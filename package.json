@@ -1,0 +1,10 @@
+{
+  "name": "multi-sport-signal-bot",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Orchestration scripts for the Multi-Sport-Signal-Bot",
+  "scripts": {
+    "format": "echo 'Use python formatter (ruff/black) in next step'",
+    "lint": "echo 'Use python linting in next step'"
+  }
+}
