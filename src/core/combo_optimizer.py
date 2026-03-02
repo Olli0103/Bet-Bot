@@ -10,7 +10,9 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from src.core.betting_engine import BettingEngine
+from src.core.betting_math import effective_tax_rate
 from src.core.correlation import CorrelationEngine
+from src.core.settings import settings
 from src.models.betting import ComboBet
 
 
@@ -179,10 +181,19 @@ class ComboOptimizer:
         stake = COMBO_STAKES.get(target_legs, 1.00)
         kelly_frac = stake / max(1.0, self.engine.bankroll)
 
+        # Tax-free for 3+ leg combos (Tipico promotion)
+        tax = effective_tax_rate(
+            base_tax=settings.tipico_tax_rate,
+            tax_free_mode=settings.tax_free_mode,
+            is_combo=True,
+            combo_legs=len(legs),
+        )
+
         return self.engine.build_combo(
             legs,
             correlation_penalty=correlation,
             kelly_frac=kelly_frac,
+            tax_rate=tax,
         )
 
     def build_ev_optimal_combo(
@@ -222,10 +233,19 @@ class ComboOptimizer:
 
         correlation = CorrelationEngine.compute_combo_correlation(legs)
 
+        # Tax-free for 3+ leg combos (Tipico promotion)
+        tax = effective_tax_rate(
+            base_tax=settings.tipico_tax_rate,
+            tax_free_mode=settings.tax_free_mode,
+            is_combo=True,
+            combo_legs=len(legs),
+        )
+
         return self.engine.build_combo(
             legs,
             correlation_penalty=correlation,
             kelly_frac=0.01,  # Conservative Kelly for combos
+            tax_rate=tax,
         )
 
     def build_all_combos(

@@ -2,17 +2,19 @@ from datetime import time as dtime
 import signal
 import asyncio
 
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, ApplicationHandlerStop
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, ContextTypes, filters, ApplicationHandlerStop
 
 from src.bot.handlers import (
     start,
     menu_value_bets,
     balance,
+    callback_handler,
     combo_suggestions,
     settings_menu,
     help_menu,
     refresh_data,
     push_daily_signals,
+    agentic_chat,
 )
 from src.agents.orchestrator import AgentOrchestrator
 from src.core.api_health import format_api_health_report, run_api_health_check
@@ -39,6 +41,12 @@ def build_app() -> Application:
     app.add_handler(MessageHandler(filters.Regex("^Kontostand$"), balance))
     app.add_handler(MessageHandler(filters.Regex("^Einstellungen$"), settings_menu))
     app.add_handler(MessageHandler(filters.Regex("^Hilfe$"), help_menu))
+
+    # Inline keyboard callbacks (pagination, mark-as-placed, agent actions)
+    app.add_handler(CallbackQueryHandler(callback_handler))
+
+    # Agentic chat: low-priority fallback for free-text questions
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, agentic_chat))
 
     return app
 

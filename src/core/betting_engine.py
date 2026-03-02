@@ -53,6 +53,7 @@ class BettingEngine:
         legs: List[Dict],
         correlation_penalty: float = 0.9,
         kelly_frac: float = 0.1,
+        tax_rate: float = 0.0,
     ) -> ComboBet:
         combo_legs = [
             ComboLeg(
@@ -68,8 +69,8 @@ class BettingEngine:
         p_independent = combo_probability(l.probability for l in combo_legs)
         p_adjusted = p_independent * correlation_penalty
 
-        ev = expected_value(p_adjusted, odds)
-        kf = kelly_fraction(p_adjusted, odds, frac=kelly_frac)
+        ev = expected_value(p_adjusted, odds, tax_rate=tax_rate)
+        kf = kelly_fraction(p_adjusted, odds, frac=kelly_frac, tax_rate=tax_rate)
         stake = round(kelly_stake(self.bankroll, kf), 2)
 
         return ComboBet(
