@@ -246,7 +246,7 @@ async def menu_value_bets(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     items = items[:10]
-    context.bot_data["signal_items"] = items
+    context.user_data["signal_items"] = items
 
     header = f"📊 {len(items)} Value Bets"
     if ts:
@@ -406,7 +406,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("sig_nav:"):
         try:
             idx = int(data.split(":")[1])
-            items = context.bot_data.get("signal_items", [])
+            items = context.user_data.get("signal_items", [])
             if not items or idx < 0 or idx >= len(items):
                 await q.edit_message_text("Signal nicht mehr verfügbar.")
                 return

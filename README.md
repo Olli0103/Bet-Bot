@@ -33,6 +33,20 @@ Agent Orchestrator (adaptive: 60s pre-kickoff / 5min normal)
 
 ## Features
 
+### Telegram UI/UX
+
+The bot provides a premium, interactive Telegram experience:
+
+- **Inline Keyboard Pagination** -- Value bets display one card at a time with Prev/Next navigation buttons, eliminating chat spam
+- **Visual PnL Dashboards** -- Matplotlib-generated charts (equity curve, win/loss pie, stats) sent as Telegram photos with dark theme
+- **Progress Bars** -- Model probabilities rendered as `[████████░░] 80%` visual bars
+- **Calibration Badges** -- 🟢 well-calibrated / 🟡 moderate / 🟠 high variance, derived from reliability bin data
+- **Retail Trap Indicator** -- `⚠️ Retail Trap` or `🔶 Public Bias` badges on signals where Tipico is shading favorites
+- **Tax-Free Badge** -- `🏷️ Steuerfrei` on qualifying 3+ leg combo suggestions
+- **Interactive Agent Alerts** -- Executioner alerts include inline buttons: `🔍 Deep Dive` (triggers Analyst re-analysis), `💰 Ghost Bet` (places virtual bet), `🛑 Ignorieren`
+- **Agentic Chat Mode** -- Type any question (e.g., "Warum empfiehlt das Modell diesen Tipp?") and the bot routes it to the LLM for a natural-language answer with signal context
+- **Per-User State** -- Pagination and session data stored in `user_data`, not global `bot_data`, so concurrent users don't corrupt each other's views
+
 ### Multi-Sport Support
 - **Soccer**: Bundesliga, EPL, La Liga, Serie A, Ligue 1, Champions League
 - **Basketball**: NBA, EuroLeague
@@ -78,7 +92,7 @@ Tipico applies a 5% tax on gross winnings. All EV and Kelly calculations account
 net_profit = gross_profit * (1 - tax_rate)
 EV = model_prob * net_profit - (1 - model_prob)
 ```
-**Tax-free mode**: Tipico offers tax-free betting for qualifying combo bets (3+ legs) and mobile promotions. The `effective_tax_rate()` function automatically applies 0% tax for these cases.
+**Tax-free mode**: Tipico offers tax-free betting for qualifying combo bets (3+ legs) and mobile promotions. The `effective_tax_rate()` function automatically applies 0% tax for these cases. The `ComboOptimizer` passes this tax rate through `build_combo()` so that combo EV and Kelly calculations reflect the true tax-free advantage.
 
 **Public bias detection**: When Tipico shades favorites (lowers odds) more than sharp books, the `public_bias` feature captures this retail-driven vig. Heavily shaded favorites (bias > 0.02) require a stronger EV edge before the bot recommends a bet.
 
@@ -107,9 +121,15 @@ Dynamic pairwise correlation penalties:
 The bot uses a multi-agent architecture with **adaptive polling**:
 
 - **Scout Agent** -- Monitors odds for steam moves (price changes exceeding 2x historical volatility) and Twitter/X for breaking injury news via a curated journalist whitelist (30+ verified beat writers)
-- **Analyst Agent** -- Triggered by Scout alerts; performs full enrichment, feature engineering, ML prediction, public bias detection, and optional LLM reasoning (Ollama/Claude). Uses Poisson as primary driver (60% weight) for soccer Draw and Over/Under markets.
-- **Executioner Agent** -- Applies circuit breakers, computes **calibration-adjusted** Kelly sizing (reliability bins trim stakes for over-predicting probability buckets), sends Telegram alerts, places virtual bets
+- **Analyst Agent** -- Triggered by Scout alerts; performs full enrichment, feature engineering, ML prediction, public bias detection, and optional LLM reasoning (Ollama/Claude). Uses **dynamic Poisson/XGBoost blending** based on xG extremity: base weight 60% for Draw/O-U, 30% for H2H, with up to +15% bonus when the Poisson model's xG differential is lopsided (capped at 75%/50%).
+- **Executioner Agent** -- Applies circuit breakers, computes **calibration-adjusted** Kelly sizing (reliability bins trim stakes for over-predicting probability buckets), sends Telegram alerts with **interactive inline buttons** (Deep Dive / Ghost Bet / Ignore), places virtual bets
 - **Orchestrator** -- Adaptive polling: **60-second intervals** when events kick off within 1 hour (steam move window), **5-minute intervals** during quiet periods. Daily self-evaluation at 22:00.
+
+### Process Safety
+
+- **Singleton Guard** -- PID-file based process guard in `app.py`. On startup, checks if an old instance is still running, sends SIGTERM (5s grace), then SIGKILL if needed. Prevents duplicate bot instances.
+- **Async-Safe Sync Wrappers** -- All API fetchers (odds, news, weather, injuries) use `_safe_sync_run()` which detects a running event loop and offloads to a `ThreadPoolExecutor` with its own loop, preventing the `asyncio.run() cannot be called from a running event loop` crash.
+- **Non-Blocking DB Calls** -- All database operations in Telegram handlers are wrapped in `asyncio.to_thread()` to avoid blocking the bot's event loop.
 
 ### Circuit Breakers
 
@@ -217,7 +237,7 @@ Bet-Bot/
 │   │   └── orchestrator.py   # Agent coordination
 │   ├── bot/
 │   │   ├── app.py            # Telegram bot setup & job scheduling
-│   │   └── handlers.py       # Command handlers (value bets, combos, settings)
+│   │   └── handlers.py       # Interactive handlers (inline pagination, dashboards, agentic chat)
 │   ├── core/
 │   │   ├── backtester.py     # Walk-forward backtesting engine
 │   │   ├── bankroll.py       # Dynamic bankroll management from DB
@@ -241,15 +261,17 @@ Bet-Bot/
 │   ├── data/
 │   │   └── venue_coordinates.py    # Stadium lat/lng for weather
 │   ├── integrations/
+│   │   ├── base_fetcher.py   # Async HTTP base + _safe_sync_run() loop-safe helper
 │   │   ├── odds_fetcher.py   # The-Odds-API client (h2h/spreads/totals)
 │   │   ├── news_fetcher.py   # NewsAPI client
 │   │   ├── weather_fetcher.py    # Open-Meteo weather client
-│   │   ├── twitter_fetcher.py    # Twitter/X API for injury news
+│   │   ├── twitter_fetcher.py    # Twitter/X API for injury news (journalist whitelist)
 │   │   ├── apisports_fetcher.py  # API-Sports injuries/lineups
 │   │   └── ollama_sentiment.py   # Ollama LLM sentiment analysis
 │   ├── models/
 │   │   └── betting.py        # Pydantic models (BetSignal, ComboBet, etc.)
 │   └── utils/
+│       ├── charts.py         # Matplotlib dashboard generator (equity curves, pie charts)
 │       └── telegram_md.py    # Telegram markdown formatting
 ├── scripts/
 │   ├── run_backtest.py       # Backtest CLI
@@ -267,13 +289,23 @@ Bet-Bot/
 | Command / Button | Description |
 |------------------|-------------|
 | `/start` | Show main keyboard menu |
-| `/status` | Current bankroll, open bets, performance |
-| `Heutige Value Bets` | Today's value bet signals |
-| `Kombi-Vorschlage` | Optimized combo suggestions (5/10/20/30 legs) |
+| `/status` | Bankroll dashboard with PnL chart (matplotlib photo) |
+| `Heutige Value Bets` | Paginated signal cards with inline Prev/Next navigation |
+| `Kombi-Vorschläge` | Combo suggestions with legs table, progress bars, tax-free badges |
 | `Daten aktualisieren` | Manually refresh odds & signals |
-| `Kontostand` | Current bankroll and PnL |
-| `Einstellungen` | Bot settings |
-| `Hilfe` | Help menu |
+| `Kontostand` | Visual PnL dashboard (equity curve + pie chart + stats) |
+| `Einstellungen` | Bot config (bankroll, tax mode, Twitter status) |
+| `Hilfe` | Help menu with feature overview |
+| *Free text question* | Agentic chat: LLM answers about betting decisions |
+
+### Inline Button Actions (on Agent Alerts)
+
+| Button | Action |
+|--------|--------|
+| 🔍 Deep Dive | Re-runs Analyst with full enrichment, shows model reasoning |
+| 💰 Ghost Bet | Places a virtual bet for tracking without real money |
+| 🛑 Ignorieren | Dismisses the alert |
+| ✅ Als platziert | Marks a value bet as placed (on signal cards) |
 
 ## Scheduled Jobs
 
@@ -295,11 +327,12 @@ See `requirements.txt`. Key dependencies:
 - `xgboost` -- Gradient boosted trees for probability estimation
 - `scikit-learn` -- Calibration, preprocessing, metrics
 - `python-telegram-bot` -- Telegram bot framework
+- `matplotlib` -- PnL dashboards and visual charts (Agg backend, dark theme)
 - `SQLAlchemy` / `psycopg` -- PostgreSQL ORM
 - `redis` -- Caching (form, Elo, volatility, odds snapshots)
 - `pandas` / `numpy` -- Data processing
 - `scipy` -- Poisson distribution for soccer modeling
-- `aiohttp` / `httpx` -- Async HTTP clients for API integrations
+- `httpx` -- Async HTTP client with retry (Tenacity) for all API integrations
 
 ## License
 
