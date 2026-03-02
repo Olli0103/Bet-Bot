@@ -6,6 +6,7 @@ ML model prediction, EV computation, and optional LLM reasoning.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, Optional
 
@@ -56,19 +57,19 @@ class AnalystAgent:
             "trigger": trigger,
         }
 
-        # 1. Sentiment
+        # 1. Sentiment (run in thread to avoid blocking the event loop)
         try:
-            sent_home = team_sentiment_score(home)
-            sent_away = team_sentiment_score(away)
+            sent_home = await asyncio.to_thread(team_sentiment_score, home)
+            sent_away = await asyncio.to_thread(team_sentiment_score, away)
         except Exception:
             sent_home = sent_away = 0.0
 
-        # 2. Injuries (only for soccer)
+        # 2. Injuries (only for soccer, run in thread)
         inj_home = inj_away = 0
         if sport.startswith("soccer"):
             try:
                 from src.core.enrichment import soccer_injury_delta
-                inj_home, inj_away = soccer_injury_delta(home, away, "")
+                inj_home, inj_away = await asyncio.to_thread(soccer_injury_delta, home, away, "")
             except Exception:
                 pass
 

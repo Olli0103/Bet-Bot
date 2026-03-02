@@ -1,10 +1,31 @@
 from typing import Any, Dict, Optional
+
+import asyncio
+import concurrent.futures
+
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 
 class APIFetchError(Exception):
     pass
+
+
+def _safe_sync_run(coro, timeout: float = 30):
+    """Run a coroutine synchronously, safely handling nested event loops.
+
+    If called from within a running event loop (e.g. the Telegram bot's loop),
+    spawns a new thread with its own event loop to avoid the
+    ``asyncio.run() cannot be called from a running event loop`` error.
+    """
+    try:
+        asyncio.get_running_loop()
+        # Already inside an event loop — offload to a thread with its own loop
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result(timeout=timeout)
+    except RuntimeError:
+        # No running loop — safe to use asyncio.run() directly
+        return asyncio.run(coro)
 
 
 class AsyncBaseFetcher:

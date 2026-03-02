@@ -11,6 +11,7 @@ logs-*.out
 logs-*.err
 run/
 *.lock
+.bot.pid
 
 # Local data/artifacts
 data/

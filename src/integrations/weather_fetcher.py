@@ -1,8 +1,7 @@
-import asyncio
 from typing import Dict, Any
 
 from src.data.redis_cache import cache
-from src.integrations.base_fetcher import AsyncBaseFetcher
+from src.integrations.base_fetcher import AsyncBaseFetcher, _safe_sync_run
 
 
 class OpenMeteoFetcher(AsyncBaseFetcher):
@@ -28,4 +27,4 @@ class OpenMeteoFetcher(AsyncBaseFetcher):
         return data
 
     def get_hourly_weather(self, latitude: float, longitude: float, ttl_seconds: int = 900) -> Dict[str, Any]:
-        return asyncio.run(self.get_hourly_weather_async(latitude, longitude, ttl_seconds))
+        return _safe_sync_run(self.get_hourly_weather_async(latitude, longitude, ttl_seconds))

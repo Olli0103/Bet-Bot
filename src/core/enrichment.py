@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-import concurrent.futures
 import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -22,18 +20,6 @@ def _norm_label(label: str) -> float:
     if l == "negative":
         return -1.0
     return 0.0
-
-
-def _run_coro(coro):
-    try:
-        loop = asyncio.get_running_loop()
-        # Already inside an event loop — run in a thread with a new loop
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, coro).result(timeout=settings.enrichment_timeout_per_team)
-    except RuntimeError:
-        return asyncio.run(coro)
-    except Exception:
-        return None
 
 
 def team_sentiment_score(team: str, limit_articles: int = 8) -> float:
@@ -86,6 +72,8 @@ def batch_team_sentiment(teams: List[str], max_teams: int = 24) -> Dict[str, flo
 
 def soccer_injury_delta(home_team: str, away_team: str, event_date_iso: str) -> Tuple[int, int]:
     """Best-effort API-Sports enrichment for football injuries by team/date."""
+    from src.integrations.base_fetcher import _safe_sync_run
+
     ap = APISportsFetcher()
     try:
         d = datetime.fromisoformat(event_date_iso.replace("Z", "+00:00")).date().isoformat()
@@ -94,11 +82,13 @@ def soccer_injury_delta(home_team: str, away_team: str, event_date_iso: str) -> 
 
     def _count_for_team(team: str) -> int:
         try:
-            fixtures = _run_coro(ap.get("fixtures", params={"date": d, "team": team})) or {}
+            # Use _safe_sync_run for the async .get() call — loop-safe
+            fixtures = _safe_sync_run(ap.get("fixtures", params={"date": d, "team": team})) or {}
             rows = fixtures.get("response") or []
             ids = [int(x.get("fixture", {}).get("id")) for x in rows if x.get("fixture", {}).get("id")]
             if not ids:
                 return 0
+            # get_injuries_by_fixture_ids is now loop-safe via _safe_sync_run
             inj = ap.get_injuries_by_fixture_ids(ids[:10])
             return len(inj.get("response") or [])
         except Exception:

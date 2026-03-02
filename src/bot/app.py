@@ -1,4 +1,6 @@
 from datetime import time as dtime
+import atexit
+import os
 import signal
 import asyncio
 
@@ -27,6 +29,70 @@ from src.core.settings import settings
 from src.data.models import Base
 from src.data.postgres import engine
 
+# ---------------------------------------------------------------------------
+# Singleton process guard (PID file)
+# ---------------------------------------------------------------------------
+PID_FILE = os.path.join(os.path.dirname(__file__), ".bot.pid")
+
+
+def _kill_stale_bot() -> None:
+    """If a PID file exists, check whether the old process is still alive
+    and kill it before we start a new instance."""
+    if not os.path.isfile(PID_FILE):
+        return
+    try:
+        with open(PID_FILE) as f:
+            old_pid = int(f.read().strip())
+    except (ValueError, OSError):
+        return
+
+    if old_pid == os.getpid():
+        return
+
+    # Check if the old process is still alive
+    try:
+        os.kill(old_pid, 0)  # signal 0 = existence check
+    except OSError:
+        # Process is already dead — stale PID file
+        print(f"Stale PID file found (pid={old_pid}, already dead). Cleaning up.")
+        return
+
+    # Old process is alive — terminate it
+    print(f"Killing stale bot instance (pid={old_pid})...")
+    try:
+        os.kill(old_pid, signal.SIGTERM)
+        # Give it a moment to shut down gracefully
+        import time
+        for _ in range(10):
+            time.sleep(0.5)
+            try:
+                os.kill(old_pid, 0)
+            except OSError:
+                break
+        else:
+            # Still alive after 5s — force kill
+            print(f"Force-killing stale instance (pid={old_pid})...")
+            os.kill(old_pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+def _write_pid() -> None:
+    """Write our PID to the lock file."""
+    with open(PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+
+def _remove_pid() -> None:
+    """Remove the PID file on exit."""
+    try:
+        if os.path.isfile(PID_FILE):
+            with open(PID_FILE) as f:
+                if f.read().strip() == str(os.getpid()):
+                    os.remove(PID_FILE)
+    except OSError:
+        pass
+
 
 def build_app() -> Application:
     Base.metadata.create_all(bind=engine)
@@ -53,7 +119,7 @@ def build_app() -> Application:
 
 async def scheduled_fetch(context: ContextTypes.DEFAULT_TYPE):
     try:
-        items = await __import__('asyncio').to_thread(fetch_and_build_signals)
+        items = await asyncio.to_thread(fetch_and_build_signals)
         chat_id = settings.telegram_chat_id
         if chat_id:
             await context.bot.send_message(chat_id=chat_id, text=f"📡 Datenupdate fertig: {len(items)} Signals")
@@ -98,7 +164,7 @@ async def learning_status_push(context: ContextTypes.DEFAULT_TYPE):
 
 async def weekly_retrain(context: ContextTypes.DEFAULT_TYPE):
     try:
-        msg = await __import__('asyncio').to_thread(auto_train_all_models, 100)
+        msg = await asyncio.to_thread(auto_train_all_models, 100)
         if settings.telegram_chat_id:
             await context.bot.send_message(chat_id=settings.telegram_chat_id, text=f"📈 Weekly Retrain: {msg}")
     except Exception:
@@ -182,13 +248,19 @@ async def error_handler(update, context):
 
 def main():
     global _global_app
+
+    # Singleton guard: kill any stale bot process before starting
+    _kill_stale_bot()
+    _write_pid()
+    atexit.register(_remove_pid)
+
     app = build_app()
     _global_app = app
-    
+
     # Add error handler
     app.add_error_handler(error_handler)
 
-    print("Starting polling...", flush=True)
+    print(f"Starting polling (pid={os.getpid()})...", flush=True)
     
     app.job_queue.run_daily(scheduled_fetch, time=dtime(hour=7, minute=0), name="fetch_0700", data={"push": True})
     app.job_queue.run_daily(scheduled_fetch, time=dtime(hour=13, minute=0), name="fetch_1300", data={"push": False})
