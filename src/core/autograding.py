@@ -5,13 +5,18 @@ import re
 
 from sqlalchemy import select
 
+from src.core.elo_ratings import EloSystem
 from src.core.form_tracker import update_form
+from src.core.poisson_model import PoissonSoccerModel
 from src.core.settings import settings
 from src.data.postgres import SessionLocal
 from src.data.models import PlacedBet
 from src.integrations.odds_fetcher import OddsFetcher
 
 log = logging.getLogger(__name__)
+
+_elo = EloSystem()
+_poisson = PoissonSoccerModel()
 
 
 def _normalize_name(name: str) -> str:
@@ -26,13 +31,14 @@ def _selection_token(selection: str) -> str:
     return s
 
 
-def _evaluate_match_result(row: dict) -> str:
+def _evaluate_match_result(row: dict) -> dict:
+    """Return {"winner": str, "home": str, "away": str, "home_score": int, "away_score": int, "sport": str}."""
     if not row.get("completed"):
-        return "Open"
+        return {"winner": "Open"}
 
     scores = row.get("scores")
     if not scores:
-        return "Void"
+        return {"winner": "Void"}
 
     home_team = row.get("home_team") or ""
     away_team = row.get("away_team") or ""
@@ -53,10 +59,20 @@ def _evaluate_match_result(row: dict) -> str:
             away_score = points
 
     if home_score > away_score:
-        return str(home_team)
-    if away_score > home_score:
-        return str(away_team)
-    return "Draw"
+        winner = str(home_team)
+    elif away_score > home_score:
+        winner = str(away_team)
+    else:
+        winner = "Draw"
+
+    return {
+        "winner": winner,
+        "home": home_team,
+        "away": away_team,
+        "home_score": home_score,
+        "away_score": away_score,
+        "sport": str(row.get("sport_key") or ""),
+    }
 
 
 async def run_auto_grading() -> int:
@@ -92,15 +108,21 @@ async def run_auto_grading() -> int:
                 continue
 
             for r in rows:
+                r["sport_key"] = sport
                 event_id = str(r.get("id") or "")
-                winner = _evaluate_match_result(r)
-                if event_id and winner != "Open":
-                    score_map[event_id] = winner
+                result = _evaluate_match_result(r)
+                if event_id and result.get("winner") != "Open":
+                    score_map[event_id] = result
+
+        # Track which events we've already updated ratings for
+        updated_events: set = set()
 
         for bet in open_bets:
-            winner = score_map.get(str(bet.event_id))
-            if not winner:
+            result = score_map.get(str(bet.event_id))
+            if not result:
                 continue
+
+            winner = result["winner"]
 
             if winner == "Void":
                 bet.status = "void"
@@ -123,6 +145,32 @@ async def run_auto_grading() -> int:
                 update_form(pick, is_won)
             except Exception as exc:
                 log.warning("Form tracker update failed for %s: %s", pick, exc)
+
+            # Update Elo and Poisson (once per event)
+            ev_id = str(bet.event_id)
+            if ev_id not in updated_events:
+                updated_events.add(ev_id)
+                home = result.get("home", "")
+                away = result.get("away", "")
+                sport_key = result.get("sport", "")
+                home_won = winner == home
+
+                if home and away:
+                    try:
+                        _elo.update(home, away, home_won, sport=sport_key)
+                    except Exception as exc:
+                        log.warning("Elo update failed for %s vs %s: %s", home, away, exc)
+
+                    # Poisson update for soccer (needs actual scores)
+                    if sport_key.startswith("soccer"):
+                        try:
+                            _poisson.update_strengths(
+                                home, away,
+                                result.get("home_score", 0),
+                                result.get("away_score", 0),
+                            )
+                        except Exception as exc:
+                            log.warning("Poisson update failed for %s vs %s: %s", home, away, exc)
 
         db.commit()
 

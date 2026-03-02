@@ -19,8 +19,14 @@ class OddsFetcher(AsyncBaseFetcher):
         cache.set_json(cache_key, data, ttl_seconds)
         return data
 
-    async def get_sport_odds_async(self, sport_key: str, regions: str = "eu", markets: str = "h2h", ttl_seconds: int = 600):
-        """Fetch odds with longer cache (10 min default) to save API calls."""
+    async def get_sport_odds_async(
+        self,
+        sport_key: str,
+        regions: str = "eu",
+        markets: str = "h2h,spreads,totals",
+        ttl_seconds: int = 600,
+    ):
+        """Fetch odds for multiple markets with longer cache (10 min default)."""
         cache_key = f"odds:{sport_key}:{regions}:{markets}"
         cached = cache.get_json(cache_key)
         if cached:
@@ -31,7 +37,7 @@ class OddsFetcher(AsyncBaseFetcher):
                 "apiKey": settings.odds_api_key,
                 "regions": regions,
                 "markets": markets,
-                "bookmakers": "tipico_de,pinnacle,bet365,betfair_ex_uk",
+                "bookmakers": "tipico_de,pinnacle,bet365,betfair_ex_uk,betsson,unibet",
             },
         )
         cache.set_json(cache_key, data, ttl_seconds)
@@ -53,10 +59,9 @@ class OddsFetcher(AsyncBaseFetcher):
                     "regions": regions,
                     "markets": markets,
                     "daysFromNow": days_history,
-                    "bookmakers": "tipico_de,pinnacle,bet365,betfair_ex_uk",
+                    "bookmakers": "tipico_de,pinnacle,bet365,betfair_ex_uk,betsson,unibet",
                 },
             )
-            # Cache historical data longer (24 hours)
             cache.set_json(cache_key, data, ttl_seconds=86400)
             return data
         except Exception as e:
@@ -67,7 +72,7 @@ class OddsFetcher(AsyncBaseFetcher):
     def get_sports(self, ttl_seconds: int = 3600):
         return asyncio.run(self.get_sports_async(ttl_seconds=ttl_seconds))
 
-    def get_sport_odds(self, sport_key: str, regions: str = "eu", markets: str = "h2h", ttl_seconds: int = 600):
+    def get_sport_odds(self, sport_key: str, regions: str = "eu", markets: str = "h2h,spreads,totals", ttl_seconds: int = 600):
         return asyncio.run(self.get_sport_odds_async(sport_key=sport_key, regions=regions, markets=markets, ttl_seconds=ttl_seconds))
 
     def get_historical_odds(self, sport_key: str, regions: str = "eu", markets: str = "h2h", days_history: int = 7):

@@ -8,11 +8,20 @@ from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ContextTypes
 from sqlalchemy import select
 
+from src.core.bankroll import BankrollManager
 from src.core.betting_engine import BettingEngine
 from src.core.live_feed import fetch_and_build_signals, get_cached_combo_legs, get_cached_meta, get_cached_signals
+from src.core.settings import settings
 from src.data.postgres import SessionLocal
 from src.data.models import PlacedBet
 from src.data.redis_cache import cache
+
+
+def _get_bankroll() -> float:
+    try:
+        return BankrollManager().get_current_bankroll()
+    except Exception:
+        return settings.initial_bankroll
 
 MAIN_MENU = ReplyKeyboardMarkup(
     [["Heutige Value Bets", "Kombi-Vorschläge"], ["Daten aktualisieren", "Kontostand"], ["Einstellungen", "Hilfe"]],
@@ -21,7 +30,7 @@ MAIN_MENU = ReplyKeyboardMarkup(
 
 
 def sample_signals():
-    engine = BettingEngine(bankroll=1000)
+    engine = BettingEngine(bankroll=_get_bankroll())
     return engine.rank_value_bets(
         [
             engine.make_signal("basketball", "nba_2026_001", "h2h", "Los Angeles Lakers vs Phoenix Suns", 2.10, 0.56),
@@ -119,7 +128,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text("Letzter Fetch < 4h. Bitte den Button 'Daten aktualisieren' nutzen.")
             return
         try:
-            n = await asyncio.to_thread(lambda: len(fetch_and_build_signals(bankroll=1000)))
+            n = await asyncio.to_thread(lambda: len(fetch_and_build_signals()))
             await q.edit_message_text(f"Quoten wurden aktualisiert. Signals={n}")
         except Exception:
             await q.edit_message_text("Aktualisierung fehlgeschlagen.")
@@ -159,7 +168,7 @@ async def combo_suggestions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not legs:
         # self-heal: build cache on demand
         try:
-            await asyncio.to_thread(lambda: fetch_and_build_signals(bankroll=1000))
+            await asyncio.to_thread(lambda: fetch_and_build_signals())
         except Exception:
             pass
         legs = get_cached_combo_legs()
@@ -167,7 +176,7 @@ async def combo_suggestions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Keine Kombi-Daten vorhanden. Bitte später erneut versuchen.")
         return
 
-    engine = BettingEngine(bankroll=1000)
+    engine = BettingEngine(bankroll=_get_bankroll())
 
     # one combo per sport, same-sport only, fixed 1 EUR stake (lotto mode)
     placed = _placed_keys_today()
@@ -230,7 +239,7 @@ async def combo_suggestions(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _refresh_job(bot, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     try:
         items = await asyncio.wait_for(
-            asyncio.to_thread(lambda: fetch_and_build_signals(bankroll=1000)),
+            asyncio.to_thread(lambda: fetch_and_build_signals()),
             timeout=120,
         )
         meta = get_cached_meta()
@@ -285,9 +294,11 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     open_n = sum(1 for r in rows if r.status == "open")
     won_n = sum(1 for r in rows if r.status == "won")
     lost_n = sum(1 for r in rows if r.status == "lost")
+    current_bankroll = _get_bankroll()
 
     msg = (
         "Auto-Grading Status\n"
+        f"Bankroll: {current_bankroll:.2f} EUR\n"
         f"Open: {open_n}\n"
         f"Won: {won_n}\n"
         f"Lost: {lost_n}\n"
@@ -338,7 +349,7 @@ async def push_daily_signals(bot, chat_id: str):
         return
 
     await bot.send_message(chat_id=chat_id, text="🧩 Kombi-Vorschläge je Sport")
-    engine = BettingEngine(bankroll=1000)
+    engine = BettingEngine(bankroll=_get_bankroll())
     for sport, sport_legs in sorted(by_sport.items()):
         ranked = sorted(sport_legs, key=lambda x: float(x.get("probability", 0)), reverse=True)
         target_size = 10 if len(ranked) >= 10 else 5 if len(ranked) >= 5 else 3 if len(ranked) >= 3 else 2 if len(ranked) >= 2 else 0

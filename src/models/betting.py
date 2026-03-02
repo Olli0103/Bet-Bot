@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, ConfigDict
-from typing import List
+from typing import List, Optional
 
 
 class BetSignal(BaseModel):
@@ -7,6 +7,7 @@ class BetSignal(BaseModel):
     sport: str
     event_id: str
     market: str
+    market_type: str = "h2h"
     selection: str
     bookmaker_odds: float = Field(gt=1.0)
     model_probability: float = Field(gt=0.0, lt=1.0)
@@ -16,6 +17,9 @@ class BetSignal(BaseModel):
     source_mode: str = "primary"
     reference_book: str = "pinnacle"
     confidence: float = 1.0
+    point: Optional[float] = None
+    odds_age_minutes: float = 0.0
+    is_stale: bool = False
 
 
 class ComboLeg(BaseModel):
@@ -23,6 +27,8 @@ class ComboLeg(BaseModel):
     selection: str
     odds: float
     probability: float
+    sport: str = ""
+    market_type: str = "h2h"
 
 
 class ComboBet(BaseModel):

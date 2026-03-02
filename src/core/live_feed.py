@@ -2,15 +2,26 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+from src.core.bankroll import BankrollManager
 from src.core.betting_engine import BettingEngine
+from src.core.elo_ratings import EloSystem
 from src.core.enrichment import batch_team_sentiment, soccer_injury_delta
 from src.core.feature_engineering import FeatureEngineer
+from src.core.form_tracker import get_form_l5
 from src.core.ghost_trading import auto_place_virtual_bets
+from src.core.h2h_tracker import get_h2h_features
+from src.core.poisson_model import PoissonSoccerModel
 from src.core.pricing_model import QuantPricingModel
 from src.core.settings import settings
+from src.core.volatility_tracker import (
+    detect_steam_move,
+    get_volatility,
+    get_volatility_features,
+    record_odds_snapshot,
+)
 from src.data.redis_cache import cache
 from src.integrations.odds_fetcher import OddsFetcher
 from src.models.betting import BetSignal, ComboBet
@@ -23,6 +34,7 @@ COMBO_LEGS_KEY = "live_snapshot:combo_legs"
 META_KEY = "live_snapshot:meta"
 
 SHARP_PRIORITY = ["pinnacle", "betfair_ex_uk", "bet365"]
+SHARP_WEIGHTS = {"pinnacle": 0.50, "betfair_ex_uk": 0.30, "bet365": 0.20}
 
 
 def _bet_window(now_utc: datetime) -> Tuple[datetime, datetime]:
@@ -35,22 +47,68 @@ def _bet_window(now_utc: datetime) -> Tuple[datetime, datetime]:
     return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
 
 
-def _extract_prices(bookmakers: List[Dict[str, Any]]) -> Dict[str, Dict[str, float]]:
+def _extract_prices(
+    bookmakers: List[Dict[str, Any]], market_key: str = "h2h"
+) -> Dict[str, Dict[str, float]]:
+    """Extract prices per bookmaker for a given market key (h2h, spreads, totals)."""
     out: Dict[str, Dict[str, float]] = {}
     for b in bookmakers or []:
         bk = (b.get("key") or "").lower()
         for m in b.get("markets", []) or []:
-            if (m.get("key") or "") != "h2h":
+            if (m.get("key") or "") != market_key:
                 continue
-            prices = {}
+            prices: Dict[str, float] = {}
             for o in m.get("outcomes", []) or []:
                 name = o.get("name")
                 price = o.get("price")
+                point = o.get("point")
                 if name and isinstance(price, (int, float)):
-                    prices[name] = float(price)
+                    label = f"{name}|{point}" if point is not None else name
+                    prices[label] = float(price)
             if prices:
                 out[bk] = prices
     return out
+
+
+def _consensus_sharp_prob(
+    all_book_prices: Dict[str, Dict[str, float]], selection: str
+) -> Optional[float]:
+    """Weighted consensus implied probability from sharp books."""
+    total_weight = 0.0
+    weighted_prob = 0.0
+    for book, weight in SHARP_WEIGHTS.items():
+        prices = all_book_prices.get(book, {})
+        price = prices.get(selection)
+        if price and price > 1.0:
+            weighted_prob += weight * (1.0 / price)
+            total_weight += weight
+    if total_weight <= 0:
+        return None
+    return round(weighted_prob / total_weight, 4)
+
+
+def _get_weather_features(home: str, away: str, sport: str) -> Dict[str, float]:
+    """Fetch weather features for outdoor sports. Returns empty dict on failure."""
+    if not sport.startswith(("soccer", "tennis")):
+        return {"weather_rain": 0.0, "weather_wind_high": 0.0}
+    try:
+        from src.data.venue_coordinates import get_venue_coordinates as get_coordinates
+        from src.integrations.weather_fetcher import OpenMeteoFetcher
+
+        coords = get_coordinates(home)
+        if not coords:
+            return {"weather_rain": 0.0, "weather_wind_high": 0.0}
+        lat, lng = coords
+        fetcher = OpenMeteoFetcher()
+        data = fetcher.get_hourly_weather(lat, lng)
+        hourly = data.get("hourly", {})
+        precip = hourly.get("precipitation", [0])
+        wind = hourly.get("wind_speed_10m", [0])
+        rain = 1.0 if any(p > 1.0 for p in precip[:6]) else 0.0
+        wind_high = 1.0 if any(w > 40 for w in wind[:6]) else 0.0
+        return {"weather_rain": rain, "weather_wind_high": wind_high}
+    except Exception:
+        return {"weather_rain": 0.0, "weather_wind_high": 0.0}
 
 
 def _extract_last_updates(bookmakers: List[Dict[str, Any]]) -> Dict[str, str]:
@@ -137,15 +195,25 @@ def _build_top_combos(engine: BettingEngine, legs: List[Dict[str, Any]]) -> List
     return out
 
 
-def fetch_and_build_signals(bankroll: float = 1000.0) -> List[BetSignal]:
+def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
     sports = [s.strip() for s in settings.live_sports.split(",") if s.strip()]
     odds = OddsFetcher()
+
+    # Dynamic bankroll: use BankrollManager if no explicit bankroll passed
+    if bankroll is None:
+        try:
+            bankroll = BankrollManager().get_current_bankroll()
+        except Exception:
+            bankroll = settings.initial_bankroll
+
     engine = BettingEngine(bankroll=bankroll)
 
     signals: List[BetSignal] = []
     combo_legs: List[Dict[str, Any]] = []
     features: Dict[str, Dict[str, float]] = {}
     qpm = QuantPricingModel()
+    elo = EloSystem()
+    poisson = PoissonSoccerModel()
 
     # Determine tax rate based on target book
     tax_rate = 0.0 if settings.tax_free_mode else settings.tipico_tax_rate
@@ -172,7 +240,7 @@ def fetch_and_build_signals(bankroll: float = 1000.0) -> List[BetSignal]:
 
     for sport in expanded_sports:
         try:
-            events = odds.get_sport_odds(sport_key=sport, regions="eu", markets="h2h", ttl_seconds=120)
+            events = odds.get_sport_odds(sport_key=sport, regions="eu", markets="h2h,spreads,totals", ttl_seconds=120)
         except Exception:
             continue
         if not isinstance(events, list):
@@ -184,6 +252,7 @@ def fetch_and_build_signals(bankroll: float = 1000.0) -> List[BetSignal]:
 
     # --- Enrichment: sentiment analysis ---
     sentiment: Dict[str, float] = {}
+    twitter_sentiment: Dict[str, float] = {}
     if settings.enrichment_enabled:
         all_teams: List[str] = []
         for _, e in raw_events:
@@ -197,6 +266,21 @@ def fetch_and_build_signals(bankroll: float = 1000.0) -> List[BetSignal]:
             sentiment = batch_team_sentiment([t for t in all_teams if t], max_teams=24)
         except Exception as exc:
             log.warning("Batch sentiment enrichment failed: %s", exc)
+
+        # --- Twitter breaking news enrichment ---
+        if settings.twitter_enabled:
+            try:
+                from src.integrations.twitter_fetcher import TwitterFetcher
+                tw = TwitterFetcher()
+                for team in list({t for t in all_teams if t})[:20]:
+                    try:
+                        result = tw.check_breaking_injury(team)
+                        if result:
+                            twitter_sentiment[team] = -0.8  # breaking injury = strong negative
+                    except Exception:
+                        pass
+            except Exception as exc:
+                log.warning("Twitter enrichment failed: %s", exc)
 
     now_utc = datetime.now(timezone.utc)
     _, window_end = _bet_window(now_utc)
@@ -214,6 +298,10 @@ def fetch_and_build_signals(bankroll: float = 1000.0) -> List[BetSignal]:
         except Exception:
             continue
 
+        # Time to kickoff in hours
+        time_to_kickoff = max(0.0, (ct - now_utc).total_seconds() / 3600.0)
+
+        # --- H2H prices (primary market) ---
         prices = _extract_prices(e.get("bookmakers") or [])
         last_updates = _extract_last_updates(e.get("bookmakers") or [])
         sharp_book, sharp = _pick_sharp(prices)
@@ -243,12 +331,44 @@ def fetch_and_build_signals(bankroll: float = 1000.0) -> List[BetSignal]:
 
         # --- Form tracking ---
         try:
-            from src.core.form_tracker import get_form_l5
             home_wr, home_gp = get_form_l5(home)
             away_wr, away_gp = get_form_l5(away)
         except Exception:
             home_wr, home_gp = 0.5, 0
             away_wr, away_gp = 0.5, 0
+
+        # --- Elo ratings ---
+        try:
+            elo_feats = elo.get_elo_features(home, away)
+        except Exception:
+            elo_feats = {"elo_diff": 0.0, "elo_expected": 0.5}
+
+        # --- H2H history ---
+        try:
+            h2h_feats = get_h2h_features(home, away)
+        except Exception:
+            h2h_feats = {"h2h_home_winrate": 0.5}
+
+        # --- Volatility tracking ---
+        try:
+            vol_feats = get_volatility_features(home, away)
+        except Exception:
+            vol_feats = {"home_volatility": 0.0, "away_volatility": 0.0}
+
+        # --- Weather (outdoor sports only) ---
+        weather_feats = _get_weather_features(home, away, sport)
+
+        # --- Poisson model for soccer ---
+        poisson_pred: Optional[Dict[str, float]] = None
+        if sport.startswith("soccer"):
+            try:
+                poisson_pred = poisson.predict_match(home, away)
+            except Exception:
+                poisson_pred = None
+
+        # --- Twitter sentiment delta ---
+        tw_sent_home = twitter_sentiment.get(home, 0.0)
+        tw_sent_away = twitter_sentiment.get(away, 0.0)
 
         # Determine effective tax rate (only for Tipico)
         effective_tax = tax_rate if target_book == "tipico_de" else 0.0
@@ -262,6 +382,32 @@ def fetch_and_build_signals(bankroll: float = 1000.0) -> List[BetSignal]:
             sel_wr = home_wr if is_home else away_wr
             sel_gp = home_gp if is_home else away_gp
 
+            # Record odds snapshot for volatility tracking
+            try:
+                record_odds_snapshot(selection, 1.0 / target_odds if target_odds > 1.0 else 0.0)
+            except Exception:
+                pass
+
+            # Steam move detection
+            steam = False
+            try:
+                team_vol = get_volatility(selection)
+                steam = detect_steam_move(target_odds, sharp_odds, team_vol)
+            except Exception:
+                pass
+
+            # Poisson probability for this selection (soccer only)
+            poisson_prob = None
+            if poisson_pred and sport.startswith("soccer"):
+                if is_home:
+                    poisson_prob = poisson_pred.get("h2h_home")
+                elif selection == "Draw":
+                    poisson_prob = poisson_pred.get("h2h_draw")
+                else:
+                    poisson_prob = poisson_pred.get("h2h_away")
+
+            tw_delta = (tw_sent_home - tw_sent_away) if is_home else (tw_sent_away - tw_sent_home)
+
             ml_features = FeatureEngineer.build_core_features(
                 target_odds=float(target_odds),
                 sharp_odds=float(sharp_odds),
@@ -274,6 +420,18 @@ def fetch_and_build_signals(bankroll: float = 1000.0) -> List[BetSignal]:
                 home_team=home,
                 form_winrate_l5=sel_wr,
                 form_games_l5=sel_gp,
+                elo_diff=elo_feats.get("elo_diff", 0.0),
+                elo_expected=elo_feats.get("elo_expected", 0.5),
+                h2h_home_winrate=h2h_feats.get("h2h_home_winrate", 0.5),
+                weather_rain=weather_feats.get("weather_rain", 0.0),
+                weather_wind_high=weather_feats.get("weather_wind_high", 0.0),
+                home_volatility=vol_feats.get("home_volatility", 0.0),
+                away_volatility=vol_feats.get("away_volatility", 0.0),
+                is_steam_move=steam,
+                line_staleness=staleness_min,
+                poisson_true_prob=poisson_prob,
+                twitter_sentiment_delta=tw_delta,
+                time_to_kickoff_hours=time_to_kickoff,
             )
 
             model_p = qpm.get_true_probability(
@@ -286,15 +444,11 @@ def fetch_and_build_signals(bankroll: float = 1000.0) -> List[BetSignal]:
                 form_games_l5=ml_features["form_games_l5"],
             )
 
-            features[event_id] = {
-                "sharp_prob": ml_features["sharp_implied_prob"],
-                "sentiment": ml_features["sentiment_delta"],
-                "injuries": ml_features["injury_delta"],
-                "clv": ml_features["clv"],
-                "sharp_vig": ml_features["sharp_vig"],
-                "form_winrate_l5": ml_features["form_winrate_l5"],
-                "form_games_l5": ml_features["form_games_l5"],
-            }
+            # Blend with Poisson if available (soccer)
+            if poisson_prob is not None and poisson_prob > 0:
+                model_p = 0.7 * model_p + 0.3 * poisson_prob
+
+            features[f"{event_id}:{selection}"] = ml_features
 
             sig = engine.make_signal(
                 sport=sport,
@@ -316,8 +470,93 @@ def fetch_and_build_signals(bankroll: float = 1000.0) -> List[BetSignal]:
                     "odds": float(target_odds),
                     "probability": model_p,
                     "sport": sport,
+                    "market_type": "h2h",
                 }
             )
+
+        # --- Process spreads market ---
+        spreads_prices = _extract_prices(e.get("bookmakers") or [], market_key="spreads")
+        sharp_spreads_book, sharp_spreads = _pick_sharp(spreads_prices)
+        target_spreads_book, target_spreads = _pick_target_book(spreads_prices, sharp_spreads_book) if sharp_spreads_book else ("", {})
+
+        if target_spreads_book and target_spreads and sharp_spreads:
+            for sel_label, t_odds in target_spreads.items():
+                s_odds = sharp_spreads.get(sel_label)
+                if not s_odds:
+                    continue
+                parts = sel_label.split("|")
+                sel_name = parts[0]
+                point_val = float(parts[1]) if len(parts) > 1 else 0.0
+                sharp_prob_sp = 1.0 / s_odds if s_odds > 1.0 else 0.5
+                # Use sharp probability as model probability for spreads (no ML model yet)
+                sig = engine.make_signal(
+                    sport=sport,
+                    event_id=event_id,
+                    market=f"spreads {point_val:+.1f}",
+                    selection=f"{sel_name} {point_val:+.1f} ({home} vs {away})",
+                    bookmaker_odds=float(t_odds),
+                    model_probability=min(0.99, max(0.01, sharp_prob_sp)),
+                    source_mode=source_mode,
+                    reference_book=sharp_spreads_book,
+                    confidence=conf * 0.8,
+                    tax_rate=effective_tax,
+                )
+                signals.append(sig)
+                combo_legs.append({
+                    "event_id": event_id,
+                    "selection": f"{sel_name} {point_val:+.1f}",
+                    "odds": float(t_odds),
+                    "probability": min(0.99, max(0.01, sharp_prob_sp)),
+                    "sport": sport,
+                    "market_type": "spreads",
+                })
+
+        # --- Process totals market ---
+        totals_prices = _extract_prices(e.get("bookmakers") or [], market_key="totals")
+        sharp_totals_book, sharp_totals = _pick_sharp(totals_prices)
+        target_totals_book, target_totals = _pick_target_book(totals_prices, sharp_totals_book) if sharp_totals_book else ("", {})
+
+        if target_totals_book and target_totals and sharp_totals:
+            for sel_label, t_odds in target_totals.items():
+                s_odds = sharp_totals.get(sel_label)
+                if not s_odds:
+                    continue
+                parts = sel_label.split("|")
+                sel_name = parts[0]  # "Over" or "Under"
+                point_val = float(parts[1]) if len(parts) > 1 else 2.5
+                sharp_prob_tot = 1.0 / s_odds if s_odds > 1.0 else 0.5
+
+                # Blend with Poisson for soccer totals
+                if poisson_pred and sport.startswith("soccer") and sel_name == "Over":
+                    poisson_ou = poisson_pred.get("over_2_5", sharp_prob_tot)
+                    model_p_tot = 0.6 * sharp_prob_tot + 0.4 * poisson_ou
+                elif poisson_pred and sport.startswith("soccer") and sel_name == "Under":
+                    poisson_ou = poisson_pred.get("under_2_5", sharp_prob_tot)
+                    model_p_tot = 0.6 * sharp_prob_tot + 0.4 * poisson_ou
+                else:
+                    model_p_tot = sharp_prob_tot
+
+                sig = engine.make_signal(
+                    sport=sport,
+                    event_id=event_id,
+                    market=f"totals {point_val}",
+                    selection=f"{sel_name} {point_val} ({home} vs {away})",
+                    bookmaker_odds=float(t_odds),
+                    model_probability=min(0.99, max(0.01, model_p_tot)),
+                    source_mode=source_mode,
+                    reference_book=sharp_totals_book,
+                    confidence=conf * 0.85,
+                    tax_rate=effective_tax,
+                )
+                signals.append(sig)
+                combo_legs.append({
+                    "event_id": event_id,
+                    "selection": f"{sel_name} {point_val}",
+                    "odds": float(t_odds),
+                    "probability": min(0.99, max(0.01, model_p_tot)),
+                    "sport": sport,
+                    "market_type": "totals",
+                })
 
     ranked = [s for s in signals if s.expected_value > 0]
     ranked.sort(key=lambda s: (s.model_probability, s.expected_value), reverse=True)
