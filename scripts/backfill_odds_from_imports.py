@@ -61,7 +61,7 @@ def backfill_football(folder: Path) -> int:
                     if o_open and o_close:
                         bet.odds_open = float(o_open)
                         bet.odds_close = float(o_close)
-                        bet.clv = float(bet.odds) - float(o_close)
+                        bet.clv = (float(bet.odds) / float(o_close)) - 1.0 if float(o_close) > 1.0 else 0.0
                         updates += 1
         db.commit()
     return updates
@@ -95,7 +95,7 @@ def backfill_tennis(folder: Path) -> int:
                     if o_open and o_close:
                         bet.odds_open = float(o_open)
                         bet.odds_close = float(o_close)
-                        bet.clv = float(bet.odds) - float(o_close)
+                        bet.clv = (float(bet.odds) / float(o_close)) - 1.0 if float(o_close) > 1.0 else 0.0
                         updates += 1
         db.commit()
     return updates

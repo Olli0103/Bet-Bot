@@ -7,17 +7,21 @@ def implied_probability(decimal_odds: float) -> float:
     return 1.0 / decimal_odds
 
 
-def expected_value(model_probability: float, decimal_odds: float) -> float:
-    # EV per 1 unit stake
-    return model_probability * (decimal_odds - 1.0) - (1.0 - model_probability)
+def expected_value(model_probability: float, decimal_odds: float, tax_rate: float = 0.0) -> float:
+    """EV per 1 unit stake. tax_rate adjusts gross profit (e.g., 0.05 for Tipico 5% tax)."""
+    gross_profit = decimal_odds - 1.0
+    net_profit = gross_profit * (1.0 - tax_rate)
+    return model_probability * net_profit - (1.0 - model_probability)
 
 
-def kelly_fraction(model_probability: float, decimal_odds: float, frac: float = 0.2) -> float:
-    b = decimal_odds - 1.0
+def kelly_fraction(model_probability: float, decimal_odds: float, frac: float = 0.2, tax_rate: float = 0.0) -> float:
+    """Kelly criterion using net odds after tax."""
+    gross_b = decimal_odds - 1.0
+    net_b = gross_b * (1.0 - tax_rate)
     q = 1.0 - model_probability
-    if b <= 0:
+    if net_b <= 0:
         return 0.0
-    raw = (b * model_probability - q) / b
+    raw = (net_b * model_probability - q) / net_b
     return max(0.0, raw) * frac
 
 

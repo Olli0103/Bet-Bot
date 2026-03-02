@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import logging
 import re
+
 from sqlalchemy import select
 
+from src.core.form_tracker import update_form
 from src.core.settings import settings
 from src.data.postgres import SessionLocal
 from src.data.models import PlacedBet
 from src.integrations.odds_fetcher import OddsFetcher
+
+log = logging.getLogger(__name__)
 
 
 def _normalize_name(name: str) -> str:
@@ -112,6 +117,12 @@ async def run_auto_grading() -> int:
                 bet.status = "lost"
                 bet.pnl = round(-float(bet.stake), 2)
             settled_count += 1
+
+            # Update form tracker for the selected team
+            try:
+                update_form(pick, is_won)
+            except Exception as exc:
+                log.warning("Form tracker update failed for %s: %s", pick, exc)
 
         db.commit()
 

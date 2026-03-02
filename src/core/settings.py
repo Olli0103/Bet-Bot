@@ -30,5 +30,22 @@ class Settings(BaseModel):
 
     live_sports: str = os.getenv("LIVE_SPORTS", "basketball_nba,soccer_germany_bundesliga,soccer_epl,tennis_atp")
 
+    # Enrichment
+    enrichment_enabled: bool = os.getenv("ENRICHMENT_ENABLED", "true").lower() == "true"
+    enrichment_timeout_per_team: int = int(os.getenv("ENRICHMENT_TIMEOUT", "30"))
+
+    # Bankroll
+    initial_bankroll: float = float(os.getenv("INITIAL_BANKROLL", "1000.0"))
+
+    # Tipico tax
+    tipico_tax_rate: float = float(os.getenv("TIPICO_TAX_RATE", "0.05"))
+    tax_free_mode: bool = os.getenv("TAX_FREE_MODE", "false").lower() == "true"
+
+    # Twitter/X (opt-in)
+    twitter_api_key: str = os.getenv("TWITTER_API_KEY", "")
+    twitter_api_secret: str = os.getenv("TWITTER_API_SECRET", "")
+    twitter_bearer_token: str = os.getenv("TWITTER_BEARER_TOKEN", "")
+    twitter_enabled: bool = os.getenv("TWITTER_ENABLED", "false").lower() == "true"
+
 
 settings = Settings()

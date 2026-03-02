@@ -1,4 +1,5 @@
 import json
+import logging
 
 import numpy as np
 import pandas as pd
@@ -9,6 +10,8 @@ from sqlalchemy import select
 
 from src.data.models import PlacedBet
 from src.data.postgres import SessionLocal
+
+log = logging.getLogger(__name__)
 
 
 FEATURES = [
@@ -101,4 +104,33 @@ def auto_train_model(min_samples: int = 500):
     with open("ml_strategy_weights.json", "w", encoding="utf-8") as f:
         json.dump(learned_weights, f)
 
-    return f"Erfolg: {len(df)} Wetten trainiert. Aktiv: {', '.join(active_features)}"
+    warnings = _validate_weights(learned_weights)
+    for w in warnings:
+        log.warning("ML validation: %s", w)
+
+    suffix = f" | Warnungen: {'; '.join(warnings)}" if warnings else ""
+    return f"Erfolg: {len(df)} Wetten trainiert. Aktiv: {', '.join(active_features)}{suffix}"
+
+
+def _validate_weights(weights: dict) -> list[str]:
+    """Post-training sanity checks on learned weights."""
+    warnings = []
+    clv_w = float(weights.get("clv", 0.0))
+    if clv_w < 0:
+        warnings.append(
+            f"CLV weight is negative ({clv_w:.4f}). "
+            "Positive CLV = better odds vs sharp = should predict wins. "
+            "Check CLV formula consistency in import scripts."
+        )
+    sharp_w = float(weights.get("sharp_implied_prob", 0.0))
+    if sharp_w < 0:
+        warnings.append(
+            f"sharp_implied_prob weight is negative ({sharp_w:.4f}). "
+            "Higher sharp probability should predict wins."
+        )
+    meta = weights.get("meta", {})
+    variance = meta.get("variance", {})
+    for feat, var in variance.items():
+        if 0 < float(var) < 1e-6:
+            warnings.append(f"Feature '{feat}' has near-zero variance ({var:.2e}). Consider excluding.")
+    return warnings

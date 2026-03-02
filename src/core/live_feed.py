@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Tuple
 from zoneinfo import ZoneInfo
 
 from src.core.betting_engine import BettingEngine
+from src.core.enrichment import batch_team_sentiment, soccer_injury_delta
 from src.core.feature_engineering import FeatureEngineer
 from src.core.ghost_trading import auto_place_virtual_bets
 from src.core.pricing_model import QuantPricingModel
@@ -12,6 +14,8 @@ from src.core.settings import settings
 from src.data.redis_cache import cache
 from src.integrations.odds_fetcher import OddsFetcher
 from src.models.betting import BetSignal, ComboBet
+
+log = logging.getLogger(__name__)
 
 SNAPSHOT_KEY = "live_snapshot:value_bets"
 COMBO_KEY = "live_snapshot:combo_bets"
@@ -47,6 +51,32 @@ def _extract_prices(bookmakers: List[Dict[str, Any]]) -> Dict[str, Dict[str, flo
             if prices:
                 out[bk] = prices
     return out
+
+
+def _extract_last_updates(bookmakers: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Extract last_update timestamps per bookmaker for staleness detection."""
+    out: Dict[str, str] = {}
+    for b in bookmakers or []:
+        bk = (b.get("key") or "").lower()
+        ts = b.get("last_update") or ""
+        if bk and ts:
+            out[bk] = ts
+    return out
+
+
+def _compute_staleness_minutes(last_updates: Dict[str, str], target_book: str, sharp_book: str) -> float:
+    """Compute how many minutes behind the target book is relative to the sharp book."""
+    target_ts = last_updates.get(target_book, "")
+    sharp_ts = last_updates.get(sharp_book, "")
+    if not target_ts or not sharp_ts:
+        return 0.0
+    try:
+        t_target = datetime.fromisoformat(target_ts.replace("Z", "+00:00"))
+        t_sharp = datetime.fromisoformat(sharp_ts.replace("Z", "+00:00"))
+        delta = (t_sharp - t_target).total_seconds() / 60.0
+        return max(0.0, delta)
+    except Exception:
+        return 0.0
 
 
 def _pick_sharp(prices: Dict[str, Dict[str, float]]) -> Tuple[str, Dict[str, float]]:
@@ -117,6 +147,9 @@ def fetch_and_build_signals(bankroll: float = 1000.0) -> List[BetSignal]:
     features: Dict[str, Dict[str, float]] = {}
     qpm = QuantPricingModel()
 
+    # Determine tax rate based on target book
+    tax_rate = 0.0 if settings.tax_free_mode else settings.tipico_tax_rate
+
     available = set()
     try:
         sports_list = odds.get_sports()
@@ -149,8 +182,21 @@ def fetch_and_build_signals(bankroll: float = 1000.0) -> List[BetSignal]:
             stats["events_seen"] += 1
             raw_events.append((sport, e))
 
-    # Fast mode (non-blocking refresh): keep expensive enrichment neutral.
+    # --- Enrichment: sentiment analysis ---
     sentiment: Dict[str, float] = {}
+    if settings.enrichment_enabled:
+        all_teams: List[str] = []
+        for _, e in raw_events:
+            home = e.get("home_team") or ""
+            away = e.get("away_team") or ""
+            if home:
+                all_teams.append(home)
+            if away:
+                all_teams.append(away)
+        try:
+            sentiment = batch_team_sentiment([t for t in all_teams if t], max_teams=24)
+        except Exception as exc:
+            log.warning("Batch sentiment enrichment failed: %s", exc)
 
     now_utc = datetime.now(timezone.utc)
     _, window_end = _bet_window(now_utc)
@@ -169,6 +215,7 @@ def fetch_and_build_signals(bankroll: float = 1000.0) -> List[BetSignal]:
             continue
 
         prices = _extract_prices(e.get("bookmakers") or [])
+        last_updates = _extract_last_updates(e.get("bookmakers") or [])
         sharp_book, sharp = _pick_sharp(prices)
         if not sharp_book or not sharp:
             continue
@@ -181,13 +228,39 @@ def fetch_and_build_signals(bankroll: float = 1000.0) -> List[BetSignal]:
         )
         conf = 1.0 if source_mode == "primary" else 0.8 if source_mode == "fallback_tipico_sharp_proxy" else 0.65
 
-        # Fast mode: neutral injuries (can be re-enabled later without touching pricing API).
+        # --- Line staleness: boost confidence if Tipico is stale vs sharp ---
+        staleness_min = _compute_staleness_minutes(last_updates, target_book, sharp_book)
+        if staleness_min > 15:
+            conf = min(1.0, conf + 0.15)
+
+        # --- Injury enrichment for soccer ---
         inj_home = inj_away = 0
+        if settings.enrichment_enabled and sport.startswith("soccer"):
+            try:
+                inj_home, inj_away = soccer_injury_delta(home, away, commence)
+            except Exception:
+                inj_home = inj_away = 0
+
+        # --- Form tracking ---
+        try:
+            from src.core.form_tracker import get_form_l5
+            home_wr, home_gp = get_form_l5(home)
+            away_wr, away_gp = get_form_l5(away)
+        except Exception:
+            home_wr, home_gp = 0.5, 0
+            away_wr, away_gp = 0.5, 0
+
+        # Determine effective tax rate (only for Tipico)
+        effective_tax = tax_rate if target_book == "tipico_de" else 0.0
 
         for selection, target_odds in target.items():
             sharp_odds = sharp.get(selection)
             if not sharp_odds:
                 continue
+
+            is_home = selection == home
+            sel_wr = home_wr if is_home else away_wr
+            sel_gp = home_gp if is_home else away_gp
 
             ml_features = FeatureEngineer.build_core_features(
                 target_odds=float(target_odds),
@@ -199,6 +272,8 @@ def fetch_and_build_signals(bankroll: float = 1000.0) -> List[BetSignal]:
                 injuries_away=int(inj_away),
                 selection=selection,
                 home_team=home,
+                form_winrate_l5=sel_wr,
+                form_games_l5=sel_gp,
             )
 
             model_p = qpm.get_true_probability(
@@ -231,6 +306,7 @@ def fetch_and_build_signals(bankroll: float = 1000.0) -> List[BetSignal]:
                 source_mode=source_mode,
                 reference_book=sharp_book,
                 confidence=conf,
+                tax_rate=effective_tax,
             )
             signals.append(sig)
             combo_legs.append(

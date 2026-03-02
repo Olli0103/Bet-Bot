@@ -35,6 +35,8 @@ class FeatureEngineer:
         injuries_away: int,
         selection: str,
         home_team: str,
+        form_winrate_l5: float = 0.5,
+        form_games_l5: int = 0,
     ) -> Dict[str, float]:
         clv_proxy = FeatureEngineer.calculate_clv_proxy(target_odds, sharp_odds)
         sharp_prob = 1.0 / sharp_odds if sharp_odds > 1.0 else 0.0
@@ -50,6 +52,6 @@ class FeatureEngineer:
             "sharp_vig": float(sharp_vig),
             "sentiment_delta": float(sent_delta),
             "injury_delta": float(inj_delta),
-            "form_winrate_l5": 0.5,
-            "form_games_l5": 0.0,
+            "form_winrate_l5": float(form_winrate_l5),
+            "form_games_l5": float(form_games_l5),
         }
