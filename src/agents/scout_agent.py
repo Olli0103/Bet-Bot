@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 
 SNAPSHOT_KEY = "scout:odds_snapshot"
 ALERTS_KEY = "scout:alerts"
+KICKOFF_TIMES_KEY = "orchestrator:kickoff_times"
 
 
 class ScoutAgent:
@@ -41,6 +42,7 @@ class ScoutAgent:
 
         sports = [s.strip() for s in settings.live_sports.split(",") if s.strip()]
         current_snapshot: Dict[str, Dict[str, float]] = {}
+        kickoff_times: List[str] = []
 
         for sport in sports:
             try:
@@ -56,6 +58,10 @@ class ScoutAgent:
                 event_id = str(event.get("id") or "")
                 home = event.get("home_team") or ""
                 away = event.get("away_team") or ""
+                # Collect kickoff times for adaptive polling
+                commence = event.get("commence_time")
+                if commence:
+                    kickoff_times.append(str(commence))
                 if not event_id or not home:
                     continue
 
@@ -107,6 +113,10 @@ class ScoutAgent:
 
         # Save current snapshot for next comparison
         cache.set_json(SNAPSHOT_KEY, current_snapshot, ttl_seconds=3600)
+
+        # Cache kickoff times so the orchestrator can use adaptive polling
+        if kickoff_times:
+            cache.set_json(KICKOFF_TIMES_KEY, kickoff_times, ttl_seconds=3600)
 
         # Save alerts
         if alerts:

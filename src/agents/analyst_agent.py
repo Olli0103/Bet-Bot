@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from src.core.betting_math import expected_value
+from src.core.betting_math import expected_value, public_bias_score
 from src.core.elo_ratings import EloSystem
 from src.core.enrichment import team_sentiment_score
 from src.core.feature_engineering import FeatureEngineer
@@ -117,7 +117,11 @@ class AnalystAgent:
         sel_wr = home_wr if is_home else away_wr
         sel_gp = home_gp if is_home else away_gp
 
-        # 8. Build features
+        # 8. Public bias detection (Tipico market shading vs sharp)
+        bias = public_bias_score(sharp_market, {selection: target_odds})
+        sel_bias = bias.get(selection, 0.0)
+
+        # 9. Build features
         ml_features = FeatureEngineer.build_core_features(
             target_odds=target_odds,
             sharp_odds=sharp_odds,
@@ -136,9 +140,10 @@ class AnalystAgent:
             home_volatility=vol_feats.get("home_volatility", 0.0),
             away_volatility=vol_feats.get("away_volatility", 0.0),
             poisson_true_prob=poisson_prob,
+            public_bias=sel_bias,
         )
 
-        # 9. Model prediction
+        # 10. Model prediction
         model_p = self.qpm.get_true_probability(
             sharp_prob=ml_features["sharp_implied_prob"],
             sentiment=ml_features["sentiment_delta"],
@@ -151,13 +156,23 @@ class AnalystAgent:
             features=ml_features,
         )
 
-        # Blend with Poisson
+        # Blend with Poisson — Poisson is primary for Draw markets
         if poisson_prob is not None and poisson_prob > 0:
-            model_p = 0.7 * model_p + 0.3 * poisson_prob
+            is_draw = selection == "Draw"
+            if is_draw:
+                model_p = 0.4 * model_p + 0.6 * poisson_prob
+            else:
+                model_p = 0.7 * model_p + 0.3 * poisson_prob
 
-        # 10. EV calculation
+        # 11. EV calculation
         tax_rate = settings.tipico_tax_rate if not settings.tax_free_mode else 0.0
         ev = expected_value(model_p, target_odds, tax_rate=tax_rate)
+
+        # Public bias skepticism: if Tipico is shading this favorite heavily,
+        # raise the EV threshold for a BET recommendation
+        ev_threshold = 0.01
+        if sel_bias > 0.02:
+            ev_threshold = 0.02  # require stronger edge on shaded favorites
 
         result.update({
             "model_probability": round(model_p, 4),
@@ -168,7 +183,9 @@ class AnalystAgent:
             "form": {"home_wr": home_wr, "away_wr": away_wr},
             "elo": elo_feats,
             "poisson_prob": poisson_prob,
-            "recommendation": "BET" if ev > 0.01 else "SKIP",
+            "public_bias": sel_bias,
+            "bookmaker_odds": target_odds,
+            "recommendation": "BET" if ev > ev_threshold else "SKIP",
         })
 
         return result

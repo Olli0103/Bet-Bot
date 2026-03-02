@@ -106,16 +106,36 @@ async def api_health_push(context: ContextTypes.DEFAULT_TYPE):
         pass
 
 
+_agent_cycle_counter = 0
+
+
 async def agent_cycle(context: ContextTypes.DEFAULT_TYPE):
-    """Run one Scout -> Analyst -> Executioner cycle via the AgentOrchestrator."""
+    """Run one Scout -> Analyst -> Executioner cycle via the AgentOrchestrator.
+
+    Uses adaptive polling: runs every 60s during pre-kickoff windows
+    (events starting within 1 hour), otherwise every 5th invocation
+    (~5 minutes) to save API calls during quiet periods.
+    """
+    global _agent_cycle_counter
+    _agent_cycle_counter += 1
+
     try:
         orchestrator = AgentOrchestrator(bot=context.bot, chat_id=settings.telegram_chat_id)
+
+        # Check if we're in a pre-kickoff window
+        is_fast_mode = orchestrator._has_imminent_kickoffs()
+
+        # In normal mode, only run every 5th cycle (60s * 5 = 5 minutes)
+        if not is_fast_mode and (_agent_cycle_counter % 5) != 0:
+            return
+
         summary = await orchestrator.run_once()
         if summary.get("scout_alerts", 0) > 0 and settings.telegram_chat_id:
+            mode_label = "FAST" if is_fast_mode else "NORMAL"
             await context.bot.send_message(
                 chat_id=settings.telegram_chat_id,
                 text=(
-                    f"🤖 Agent Cycle: {summary['scout_alerts']} alerts, "
+                    f"🤖 Agent [{mode_label}]: {summary['scout_alerts']} alerts, "
                     f"{summary['bets_placed']} bets, {summary['bets_skipped']} skipped"
                 ),
             )
@@ -174,8 +194,9 @@ def main():
     app.job_queue.run_daily(api_health_push, time=dtime(hour=20, minute=5), name="api_health_daily")
     app.job_queue.run_daily(weekly_retrain, time=dtime(hour=3, minute=15), days=(6,), name="retrain_weekly")
 
-    # Agent orchestrator: runs every 5 minutes for real-time monitoring
-    app.job_queue.run_repeating(agent_cycle, interval=300, first=60, name="agent_cycle")
+    # Agent orchestrator: polls every 60s, but internally skips to ~5min
+    # unless events are kicking off within the next hour (adaptive fast mode)
+    app.job_queue.run_repeating(agent_cycle, interval=60, first=60, name="agent_cycle")
 
     # Daily performance report + self-evaluation at 22:00
     app.job_queue.run_daily(daily_performance_report, time=dtime(hour=22, minute=0), name="daily_report")

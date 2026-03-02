@@ -24,6 +24,11 @@ class ComboConstraints:
     min_prob_per_leg: float = 0.50
     max_prob_per_leg: float = 0.95
     odds_range: Tuple[float, float] = (1.15, 4.00)
+    # Heavy favorite cap: max number of legs with odds < threshold per league.
+    # Prevents a single league-wide upset (e.g. rainy EPL matchday) from
+    # killing the entire ticket.
+    max_heavy_favorites_per_league: int = 3
+    heavy_favorite_threshold: float = 1.30
 
 
 # Pre-defined constraint profiles per combo size
@@ -31,18 +36,22 @@ COMBO_PROFILES: Dict[int, ComboConstraints] = {
     5: ComboConstraints(
         max_per_sport=3, max_per_league=2, min_sports=2,
         min_prob_per_leg=0.55, odds_range=(1.20, 3.50),
+        max_heavy_favorites_per_league=2, heavy_favorite_threshold=1.30,
     ),
     10: ComboConstraints(
         max_per_sport=4, max_per_league=3, min_sports=3,
         min_prob_per_leg=0.52, odds_range=(1.15, 3.50),
+        max_heavy_favorites_per_league=2, heavy_favorite_threshold=1.30,
     ),
     20: ComboConstraints(
         max_per_sport=7, max_per_league=4, min_sports=4,
         min_prob_per_leg=0.50, odds_range=(1.15, 4.00),
+        max_heavy_favorites_per_league=3, heavy_favorite_threshold=1.30,
     ),
     30: ComboConstraints(
         max_per_sport=10, max_per_league=5, min_sports=5,
         min_prob_per_leg=0.48, odds_range=(1.10, 4.00),
+        max_heavy_favorites_per_league=3, heavy_favorite_threshold=1.30,
     ),
 }
 
@@ -102,13 +111,16 @@ class ComboOptimizer:
         used_events: set = set()
         sport_count: Dict[str, int] = {}
         league_count: Dict[str, int] = {}
+        league_heavy_count: Dict[str, int] = {}  # heavy favorites per league
         sports_used: set = set()
 
         for leg in scored:
             event_id = leg.get("event_id", "")
             sport_key = leg.get("sport", "")
+            odds = float(leg.get("odds", 0))
             sport = _extract_sport(sport_key)
             league = _extract_league(sport_key)
+            is_heavy_favorite = odds < constraints.heavy_favorite_threshold
 
             # No duplicate events
             if constraints.no_same_event and event_id in used_events:
@@ -122,10 +134,18 @@ class ComboOptimizer:
             if league_count.get(league, 0) >= constraints.max_per_league:
                 continue
 
+            # Heavy favorite cap per league: prevents a single league-wide
+            # upset (e.g. rainy EPL matchday) from killing the ticket
+            if is_heavy_favorite:
+                if league_heavy_count.get(league, 0) >= constraints.max_heavy_favorites_per_league:
+                    continue
+
             chosen.append(leg)
             used_events.add(event_id)
             sport_count[sport] = sport_count.get(sport, 0) + 1
             league_count[league] = league_count.get(league, 0) + 1
+            if is_heavy_favorite:
+                league_heavy_count[league] = league_heavy_count.get(league, 0) + 1
             sports_used.add(sport)
 
             if len(chosen) == target_legs:

@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 
 from src.core.bankroll import BankrollManager
 from src.core.betting_math import kelly_fraction, kelly_stake
+from src.core.ml_trainer import get_reliability_adjustment
 from src.core.performance_monitor import PerformanceMonitor
 from src.core.settings import settings
 from src.data.redis_cache import cache
@@ -82,13 +83,24 @@ class ExecutionerAgent:
             result["reasoning"].append(f"EV {ev:.4f} < min_ev {min_ev:.4f}")
             return result
 
-        # 3. Calculate stake with performance-adjusted Kelly
-        target_odds = float(analysis.get("features", {}).get("sharp_implied_prob", 0))
-        # Reconstruct odds from the analysis context
+        # 3. Calculate stake with performance-adjusted + calibration-adjusted Kelly
         tax_rate = settings.tipico_tax_rate if not settings.tax_free_mode else 0.0
 
         bankroll = self.bankroll_mgr.get_current_bankroll()
         kelly_mult = adjustments.get("kelly_multiplier", 1.0)
+
+        # Calibration reliability adjustment: if the model over-predicts in
+        # this probability bucket, trim the Kelly fraction proportionally.
+        sport = str(analysis.get("sport", ""))
+        sport_group = "general"
+        if sport.startswith(("soccer", "football")):
+            sport_group = "soccer"
+        elif sport.startswith("basketball"):
+            sport_group = "basketball"
+        elif sport.startswith("tennis"):
+            sport_group = "tennis"
+        calib_adj = get_reliability_adjustment(model_p, sport_group)
+        kelly_mult *= min(1.3, max(0.5, calib_adj))  # clamp to [0.5, 1.3]
 
         # Use reduced Kelly for reactive bets (steam moves)
         frac = 0.15 if analysis.get("trigger") == "steam_move" else 0.2

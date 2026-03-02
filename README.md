@@ -7,7 +7,7 @@ A multi-sport betting signal bot with machine learning, Telegram integration, an
 ```
 Telegram Bot (UI)
       |
-Agent Orchestrator (5-min polling)
+Agent Orchestrator (adaptive: 60s pre-kickoff / 5min normal)
       |
   Scout Agent        -->  odds monitoring, steam move detection, Twitter/X alerts
       |
@@ -15,7 +15,7 @@ Agent Orchestrator (5-min polling)
       |                   feature engineering (20+ features)
       |                   ML model prediction (XGBoost + calibration)
       |
-  Executioner Agent  -->  circuit breakers, Kelly sizing, virtual bet placement
+  Executioner Agent  -->  circuit breakers, calibration-adjusted Kelly, virtual bets
       |
   Performance Monitor --> ROI tracking, daily reports, self-evaluation
 ```
@@ -23,11 +23,11 @@ Agent Orchestrator (5-min polling)
 ### Core Pipeline
 
 1. **Data Ingestion** -- The-Odds-API provides real-time odds across h2h, spreads, and totals markets from 6+ bookmakers
-2. **Enrichment** -- News sentiment (NewsAPI + Ollama), injury data (API-Sports), weather (Open-Meteo), Twitter/X breaking news
-3. **Feature Engineering** -- 20+ features including CLV, Elo differential, Poisson-derived probabilities, form tracking, H2H history, odds volatility
-4. **Model Prediction** -- XGBoost with isotonic calibration, sport-specific models (soccer/basketball/tennis), TimeSeriesSplit validation
-5. **Value Detection** -- Tax-adjusted EV calculation (Tipico 5% betting tax), consensus sharp line from weighted Pinnacle/Betfair/bet365
-6. **Bet Sizing** -- Fractional Kelly criterion with performance-based multipliers and circuit breakers
+2. **Enrichment** -- News sentiment (NewsAPI + Ollama), injury data (API-Sports), weather (Open-Meteo), Twitter/X breaking news (journalist whitelist)
+3. **Feature Engineering** -- 21 features including CLV, Elo differential, Poisson-derived probabilities, form tracking, H2H history, odds volatility, public bias
+4. **Model Prediction** -- XGBoost with isotonic calibration, sport-specific models (soccer/basketball/tennis), TimeSeriesSplit validation, reliability diagrams
+5. **Value Detection** -- Tax-adjusted EV calculation (Tipico 5% tax + combo tax-free mode), consensus sharp line from weighted Pinnacle/Betfair/bet365, public bias detection
+6. **Bet Sizing** -- Fractional Kelly criterion with performance-based multipliers, calibration-adjusted scaling, and circuit breakers
 7. **Combo Construction** -- Constraint-optimized 5/10/20/30-leg combos with dynamic pairwise correlation penalties
 8. **Virtual Trading** -- Ghost-trades all signals for tracking without real money
 
@@ -67,8 +67,10 @@ Agent Orchestrator (5-min polling)
 | `weather_rain` / `weather_wind_high` | Weather conditions (outdoor sports) |
 | `home_advantage` | Binary: selection is home team |
 | `market_consensus` | Average implied prob across all books |
+| `public_bias` | Tipico market shading vs sharp (retail over-bet detection) |
 
 - Weekly automatic retraining with post-training validation (Brier score, calibration check, feature importance audit)
+- **Reliability diagrams**: per-bucket actual-vs-predicted calibration with automatic Kelly adjustment multipliers
 
 ### Tipico Tax Handling
 Tipico applies a 5% tax on gross winnings. All EV and Kelly calculations account for this:
@@ -76,6 +78,10 @@ Tipico applies a 5% tax on gross winnings. All EV and Kelly calculations account
 net_profit = gross_profit * (1 - tax_rate)
 EV = model_prob * net_profit - (1 - model_prob)
 ```
+**Tax-free mode**: Tipico offers tax-free betting for qualifying combo bets (3+ legs) and mobile promotions. The `effective_tax_rate()` function automatically applies 0% tax for these cases.
+
+**Public bias detection**: When Tipico shades favorites (lowers odds) more than sharp books, the `public_bias` feature captures this retail-driven vig. Heavily shaded favorites (bias > 0.02) require a stronger EV edge before the bot recommends a bet.
+
 Configurable via `TIPICO_TAX_RATE` and `TAX_FREE_MODE` env vars.
 
 ### Combo System
@@ -83,10 +89,12 @@ Four combo tiers with constraint-based optimization:
 
 | Size | Type | Stake | Constraints |
 |------|------|-------|-------------|
-| 5-leg | EV-optimal | 2.00 EUR | min 2 sports, max 2/league, prob > 0.55 |
-| 10-leg | Lotto | 1.00 EUR | min 3 sports, max 3/league, prob > 0.52 |
-| 20-leg | Lotto | 1.00 EUR | min 4 sports, max 4/league, prob > 0.50 |
-| 30-leg | Lotto | 0.50 EUR | min 5 sports, max 5/league, prob > 0.48 |
+| 5-leg | EV-optimal | 2.00 EUR | min 2 sports, max 2/league, prob > 0.55, max 2 heavy favs/league |
+| 10-leg | Lotto | 1.00 EUR | min 3 sports, max 3/league, prob > 0.52, max 2 heavy favs/league |
+| 20-leg | Lotto | 1.00 EUR | min 4 sports, max 4/league, prob > 0.50, max 3 heavy favs/league |
+| 30-leg | Lotto | 0.50 EUR | min 5 sports, max 5/league, prob > 0.48, max 3 heavy favs/league |
+
+**Heavy favorite cap**: No more than 2-3 selections with odds < 1.30 per league. Prevents a single league-wide upset (e.g. rainy EPL matchday) from killing the entire ticket.
 
 Dynamic pairwise correlation penalties:
 - Same event, different market: 0.80
@@ -96,12 +104,12 @@ Dynamic pairwise correlation penalties:
 
 ### Agentic Framework
 
-The bot uses a multi-agent architecture running every 5 minutes:
+The bot uses a multi-agent architecture with **adaptive polling**:
 
-- **Scout Agent** -- Monitors odds for steam moves (price changes exceeding 2x historical volatility) and Twitter/X for breaking injury news
-- **Analyst Agent** -- Triggered by Scout alerts; performs full enrichment, feature engineering, ML prediction, and optional LLM reasoning (Ollama/Claude)
-- **Executioner Agent** -- Applies circuit breakers, computes tax-adjusted Kelly sizing, sends Telegram alerts, places virtual bets
-- **Orchestrator** -- Coordinates the pipeline and runs daily self-evaluation at 22:00
+- **Scout Agent** -- Monitors odds for steam moves (price changes exceeding 2x historical volatility) and Twitter/X for breaking injury news via a curated journalist whitelist (30+ verified beat writers)
+- **Analyst Agent** -- Triggered by Scout alerts; performs full enrichment, feature engineering, ML prediction, public bias detection, and optional LLM reasoning (Ollama/Claude). Uses Poisson as primary driver (60% weight) for soccer Draw and Over/Under markets.
+- **Executioner Agent** -- Applies circuit breakers, computes **calibration-adjusted** Kelly sizing (reliability bins trim stakes for over-predicting probability buckets), sends Telegram alerts, places virtual bets
+- **Orchestrator** -- Adaptive polling: **60-second intervals** when events kick off within 1 hour (steam move window), **5-minute intervals** during quiet periods. Daily self-evaluation at 22:00.
 
 ### Circuit Breakers
 
@@ -278,7 +286,7 @@ Bet-Bot/
 | 20:05 | API health check | Status of all external API connections |
 | 22:00 | Daily performance | Full performance report with circuit breaker status |
 | 03:15 (Sat) | Weekly retrain | Retrain all XGBoost models on latest data |
-| Every 5 min | Agent cycle | Scout/Analyst/Executioner pipeline |
+| 60s / 5 min | Agent cycle | Scout/Analyst/Executioner (adaptive: fast pre-kickoff) |
 | Every 30 min | Auto-grading | Settle open bets against API results |
 
 ## Dependencies

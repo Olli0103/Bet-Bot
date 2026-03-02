@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from src.core.bankroll import BankrollManager
 from src.core.betting_engine import BettingEngine
+from src.core.betting_math import public_bias_score
 from src.core.elo_ratings import EloSystem
 from src.core.enrichment import batch_team_sentiment, soccer_injury_delta
 from src.core.feature_engineering import FeatureEngineer
@@ -347,6 +348,9 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
         # Determine effective tax rate (only for Tipico)
         effective_tax = tax_rate if target_book == "tipico_de" else 0.0
 
+        # Compute public bias per selection (Tipico vs sharp shading)
+        bias_scores = public_bias_score(sharp, target) if target_book == "tipico_de" else {}
+
         for selection, target_odds in target.items():
             sharp_odds = sharp.get(selection)
             if not sharp_odds:
@@ -406,6 +410,7 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
                 poisson_true_prob=poisson_prob,
                 twitter_sentiment_delta=tw_delta,
                 time_to_kickoff_hours=time_to_kickoff,
+                public_bias=bias_scores.get(selection, 0.0),
             )
 
             model_p = qpm.get_true_probability(
@@ -421,8 +426,14 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
             )
 
             # Blend with Poisson if available (soccer)
+            # Draw and O/U markets: Poisson is the primary driver (60%)
+            # H2H (home/away win): XGBoost is primary (70%), Poisson secondary (30%)
             if poisson_prob is not None and poisson_prob > 0:
-                model_p = 0.7 * model_p + 0.3 * poisson_prob
+                is_draw = selection == "Draw"
+                if is_draw:
+                    model_p = 0.4 * model_p + 0.6 * poisson_prob
+                else:
+                    model_p = 0.7 * model_p + 0.3 * poisson_prob
 
             features[f"{event_id}:{selection}"] = ml_features
 
@@ -502,13 +513,13 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
                 point_val = float(parts[1]) if len(parts) > 1 else 2.5
                 sharp_prob_tot = 1.0 / s_odds if s_odds > 1.0 else 0.5
 
-                # Blend with Poisson for soccer totals
+                # Blend with Poisson for soccer totals — Poisson is primary (60%)
                 if poisson_pred and sport.startswith("soccer") and sel_name == "Over":
                     poisson_ou = poisson_pred.get("over_2_5", sharp_prob_tot)
-                    model_p_tot = 0.6 * sharp_prob_tot + 0.4 * poisson_ou
+                    model_p_tot = 0.4 * sharp_prob_tot + 0.6 * poisson_ou
                 elif poisson_pred and sport.startswith("soccer") and sel_name == "Under":
                     poisson_ou = poisson_pred.get("under_2_5", sharp_prob_tot)
-                    model_p_tot = 0.6 * sharp_prob_tot + 0.4 * poisson_ou
+                    model_p_tot = 0.4 * sharp_prob_tot + 0.6 * poisson_ou
                 else:
                     model_p_tot = sharp_prob_tot
 
