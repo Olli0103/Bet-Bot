@@ -442,6 +442,8 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
                 sharp_vig=ml_features["sharp_vig"],
                 form_winrate_l5=ml_features["form_winrate_l5"],
                 form_games_l5=ml_features["form_games_l5"],
+                sport=sport,
+                features=ml_features,
             )
 
             # Blend with Poisson if available (soccer)

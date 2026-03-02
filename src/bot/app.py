@@ -18,7 +18,7 @@ from src.core.api_health import format_api_health_report, run_api_health_check
 from src.core.autograding import run_auto_grading
 from src.core.live_feed import fetch_and_build_signals
 from src.core.learning_monitor import learning_health
-from src.core.ml_trainer import auto_train_model
+from src.core.ml_trainer import auto_train_all_models, auto_train_model
 from src.core.settings import settings
 from src.data.models import Base
 from src.data.postgres import engine
@@ -88,7 +88,7 @@ async def learning_status_push(context: ContextTypes.DEFAULT_TYPE):
 
 async def weekly_retrain(context: ContextTypes.DEFAULT_TYPE):
     try:
-        msg = await __import__('asyncio').to_thread(auto_train_model, 100)
+        msg = await __import__('asyncio').to_thread(auto_train_all_models, 100)
         if settings.telegram_chat_id:
             await context.bot.send_message(chat_id=settings.telegram_chat_id, text=f"📈 Weekly Retrain: {msg}")
     except Exception:
