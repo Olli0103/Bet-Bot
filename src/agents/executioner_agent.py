@@ -6,6 +6,8 @@ alerts to Telegram. It can also auto-place virtual bets.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from typing import Any, Dict, Optional
 
@@ -146,6 +148,26 @@ class ExecutionerAgent:
 
         return result
 
+    def _cache_alert(self, analysis: Dict[str, Any], stake: float) -> str:
+        """Cache alert data and return a short ID for inline button callbacks."""
+        payload = {
+            "event_id": str(analysis.get("event_id", "")),
+            "sport": str(analysis.get("sport", "")),
+            "home": str(analysis.get("home", "")),
+            "away": str(analysis.get("away", "")),
+            "selection": str(analysis.get("selection", "")),
+            "target_odds": float(analysis.get("bookmaker_odds", 0)),
+            "sharp_odds": float(analysis.get("sharp_odds", 0)),
+            "model_probability": float(analysis.get("model_probability", 0)),
+            "expected_value": float(analysis.get("expected_value", 0)),
+            "trigger": str(analysis.get("trigger", "")),
+            "stake": stake,
+        }
+        raw = json.dumps(payload, sort_keys=True)
+        alert_id = hashlib.md5(raw.encode()).hexdigest()[:12]
+        cache.set_json(f"agent_alert:{alert_id}", payload, ttl_seconds=6 * 3600)
+        return alert_id
+
     async def _send_alert(
         self,
         bot,
@@ -153,7 +175,9 @@ class ExecutionerAgent:
         analysis: Dict[str, Any],
         stake: float,
     ) -> None:
-        """Format and send a Telegram alert for a triggered bet."""
+        """Format and send a Telegram alert with interactive inline buttons."""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
         sport = str(analysis.get("sport", "")).replace("_", " ").upper()
         home = analysis.get("home", "")
         away = analysis.get("away", "")
@@ -164,15 +188,34 @@ class ExecutionerAgent:
 
         trigger_emoji = "⚡" if trigger == "steam_move" else "🏥" if trigger == "breaking_injury" else "🎯"
 
+        # Progress bar for model probability
+        filled = int(round(model_p * 10))
+        bar = "█" * filled + "░" * (10 - filled)
+
         msg = (
             f"{trigger_emoji} AGENT ALERT | {sport}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
             f"Match: {home} vs {away}\n"
             f"Tipp: {selection}\n"
             f"Trigger: {trigger}\n"
-            f"Modell: {model_p:.2%} | EV: {ev:.4f}\n"
-            f"Einsatz: {stake:.2f} EUR"
+            f"Modell: [{bar}] {model_p:.0%}\n"
+            f"EV: {ev:+.4f} | Einsatz: {stake:.2f} EUR"
         )
-        await bot.send_message(chat_id=chat_id, text=msg)
+
+        # Cache alert data for callback retrieval
+        alert_id = self._cache_alert(analysis, stake)
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🔍 Deep Dive", callback_data=f"agent_analyze:{alert_id}"),
+                InlineKeyboardButton("💰 Ghost Bet", callback_data=f"agent_ghost:{alert_id}"),
+            ],
+            [
+                InlineKeyboardButton("🛑 Ignorieren", callback_data=f"agent_ignore:{alert_id}"),
+            ],
+        ])
+
+        await bot.send_message(chat_id=chat_id, text=msg, reply_markup=keyboard)
 
     def check_circuit_breakers(self) -> bool:
         """Return False if we should stop betting (convenience wrapper)."""

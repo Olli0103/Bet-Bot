@@ -1,9 +1,8 @@
-import asyncio
 from typing import Dict, Any
 
 from src.core.settings import settings
 from src.data.redis_cache import cache
-from src.integrations.base_fetcher import AsyncBaseFetcher
+from src.integrations.base_fetcher import AsyncBaseFetcher, _safe_sync_run
 
 
 class OddsFetcher(AsyncBaseFetcher):
@@ -68,12 +67,12 @@ class OddsFetcher(AsyncBaseFetcher):
             print(f"Historical odds not available: {e}")
             return None
 
-    # sync helpers for non-async call sites
+    # sync helpers for non-async call sites (loop-safe)
     def get_sports(self, ttl_seconds: int = 3600):
-        return asyncio.run(self.get_sports_async(ttl_seconds=ttl_seconds))
+        return _safe_sync_run(self.get_sports_async(ttl_seconds=ttl_seconds))
 
     def get_sport_odds(self, sport_key: str, regions: str = "eu", markets: str = "h2h,spreads,totals", ttl_seconds: int = 600):
-        return asyncio.run(self.get_sport_odds_async(sport_key=sport_key, regions=regions, markets=markets, ttl_seconds=ttl_seconds))
+        return _safe_sync_run(self.get_sport_odds_async(sport_key=sport_key, regions=regions, markets=markets, ttl_seconds=ttl_seconds))
 
     def get_historical_odds(self, sport_key: str, regions: str = "eu", markets: str = "h2h", days_history: int = 7):
-        return asyncio.run(self.get_historical_odds_async(sport_key=sport_key, regions=regions, markets=markets, days_history=days_history))
+        return _safe_sync_run(self.get_historical_odds_async(sport_key=sport_key, regions=regions, markets=markets, days_history=days_history))

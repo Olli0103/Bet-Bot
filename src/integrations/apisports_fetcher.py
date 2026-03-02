@@ -1,9 +1,8 @@
-import asyncio
 from typing import Dict, List, Any
 
 from src.core.settings import settings
 from src.data.redis_cache import cache
-from src.integrations.base_fetcher import AsyncBaseFetcher
+from src.integrations.base_fetcher import AsyncBaseFetcher, _safe_sync_run
 
 
 class APISportsFetcher(AsyncBaseFetcher):
@@ -35,7 +34,7 @@ class APISportsFetcher(AsyncBaseFetcher):
         return data
 
     def get_fixtures_by_ids(self, fixture_ids: List[int], ttl_seconds: int = 120) -> Dict[str, Any]:
-        return asyncio.run(self.get_fixtures_by_ids_async(fixture_ids, ttl_seconds))
+        return _safe_sync_run(self.get_fixtures_by_ids_async(fixture_ids, ttl_seconds))
 
     def get_injuries_by_fixture_ids(self, fixture_ids: List[int], ttl_seconds: int = 180) -> Dict[str, Any]:
-        return asyncio.run(self.get_injuries_by_fixture_ids_async(fixture_ids, ttl_seconds))
+        return _safe_sync_run(self.get_injuries_by_fixture_ids_async(fixture_ids, ttl_seconds))

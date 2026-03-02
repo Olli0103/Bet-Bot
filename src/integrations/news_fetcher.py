@@ -1,9 +1,8 @@
-import asyncio
 from typing import Dict, Any
 
 from src.core.settings import settings
 from src.data.redis_cache import cache
-from src.integrations.base_fetcher import AsyncBaseFetcher
+from src.integrations.base_fetcher import AsyncBaseFetcher, _safe_sync_run
 
 
 class NewsFetcher(AsyncBaseFetcher):
@@ -29,4 +28,4 @@ class NewsFetcher(AsyncBaseFetcher):
         return data
 
     def search_news(self, query: str, language: str = "en", ttl_seconds: int = 600) -> Dict[str, Any]:
-        return asyncio.run(self.search_news_async(query=query, language=language, ttl_seconds=ttl_seconds))
+        return _safe_sync_run(self.search_news_async(query=query, language=language, ttl_seconds=ttl_seconds))

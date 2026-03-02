@@ -6,6 +6,7 @@ ML model prediction, EV computation, and optional LLM reasoning.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, Optional
 
@@ -56,19 +57,19 @@ class AnalystAgent:
             "trigger": trigger,
         }
 
-        # 1. Sentiment
+        # 1. Sentiment (run in thread to avoid blocking the event loop)
         try:
-            sent_home = team_sentiment_score(home)
-            sent_away = team_sentiment_score(away)
+            sent_home = await asyncio.to_thread(team_sentiment_score, home)
+            sent_away = await asyncio.to_thread(team_sentiment_score, away)
         except Exception:
             sent_home = sent_away = 0.0
 
-        # 2. Injuries (only for soccer)
+        # 2. Injuries (only for soccer, run in thread)
         inj_home = inj_away = 0
         if sport.startswith("soccer"):
             try:
                 from src.core.enrichment import soccer_injury_delta
-                inj_home, inj_away = soccer_injury_delta(home, away, "")
+                inj_home, inj_away = await asyncio.to_thread(soccer_injury_delta, home, away, "")
             except Exception:
                 pass
 
@@ -100,16 +101,17 @@ class AnalystAgent:
 
         # 7. Poisson (soccer)
         poisson_prob = None
+        poisson_pred = None
         if sport.startswith("soccer"):
             try:
-                pred = self.poisson.predict_match(home, away)
-                is_home = selection == home
-                if is_home:
-                    poisson_prob = pred.get("h2h_home")
+                poisson_pred = self.poisson.predict_match(home, away)
+                is_home_sel = selection == home
+                if is_home_sel:
+                    poisson_prob = poisson_pred.get("h2h_home")
                 elif selection == "Draw":
-                    poisson_prob = pred.get("h2h_draw")
+                    poisson_prob = poisson_pred.get("h2h_draw")
                 else:
-                    poisson_prob = pred.get("h2h_away")
+                    poisson_prob = poisson_pred.get("h2h_away")
             except Exception:
                 pass
 
@@ -156,13 +158,19 @@ class AnalystAgent:
             features=ml_features,
         )
 
-        # Blend with Poisson — Poisson is primary for Draw markets
+        # Dynamic Poisson/XGBoost blending based on xG extremity
         if poisson_prob is not None and poisson_prob > 0:
             is_draw = selection == "Draw"
+            home_xg = poisson_pred.get("home_xg", 1.35) if poisson_pred else 1.35
+            away_xg = poisson_pred.get("away_xg", 1.35) if poisson_pred else 1.35
+            xg_diff = abs(home_xg - away_xg)
+            xg_bonus = min(0.15, xg_diff * 0.10)
+
             if is_draw:
-                model_p = 0.4 * model_p + 0.6 * poisson_prob
+                poisson_w = min(0.75, 0.60 + xg_bonus)
             else:
-                model_p = 0.7 * model_p + 0.3 * poisson_prob
+                poisson_w = min(0.50, 0.30 + xg_bonus)
+            model_p = (1.0 - poisson_w) * model_p + poisson_w * poisson_prob
 
         # 11. EV calculation
         tax_rate = settings.tipico_tax_rate if not settings.tax_free_mode else 0.0

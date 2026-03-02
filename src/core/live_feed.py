@@ -425,15 +425,24 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
                 features=ml_features,
             )
 
-            # Blend with Poisson if available (soccer)
-            # Draw and O/U markets: Poisson is the primary driver (60%)
-            # H2H (home/away win): XGBoost is primary (70%), Poisson secondary (30%)
+            # Dynamic Poisson/XGBoost blending based on xG extremity.
+            # When the Poisson model has extreme xG differential (one-sided match),
+            # its predictions are more confident → increase its weight.
+            # Draw and O/U: Poisson base weight 0.60, H2H: base 0.30.
+            # xG extremity bonus: up to +0.15 for very lopsided matches.
             if poisson_prob is not None and poisson_prob > 0:
                 is_draw = selection == "Draw"
+                home_xg = poisson_pred.get("home_xg", 1.35) if poisson_pred else 1.35
+                away_xg = poisson_pred.get("away_xg", 1.35) if poisson_pred else 1.35
+                xg_diff = abs(home_xg - away_xg)
+                # extremity bonus: 0 when diff=0, up to 0.15 when diff>=1.5
+                xg_bonus = min(0.15, xg_diff * 0.10)
+
                 if is_draw:
-                    model_p = 0.4 * model_p + 0.6 * poisson_prob
+                    poisson_w = min(0.75, 0.60 + xg_bonus)
                 else:
-                    model_p = 0.7 * model_p + 0.3 * poisson_prob
+                    poisson_w = min(0.50, 0.30 + xg_bonus)
+                model_p = (1.0 - poisson_w) * model_p + poisson_w * poisson_prob
 
             features[f"{event_id}:{selection}"] = ml_features
 
@@ -513,13 +522,17 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
                 point_val = float(parts[1]) if len(parts) > 1 else 2.5
                 sharp_prob_tot = 1.0 / s_odds if s_odds > 1.0 else 0.5
 
-                # Blend with Poisson for soccer totals — Poisson is primary (60%)
-                if poisson_pred and sport.startswith("soccer") and sel_name == "Over":
-                    poisson_ou = poisson_pred.get("over_2_5", sharp_prob_tot)
-                    model_p_tot = 0.4 * sharp_prob_tot + 0.6 * poisson_ou
-                elif poisson_pred and sport.startswith("soccer") and sel_name == "Under":
-                    poisson_ou = poisson_pred.get("under_2_5", sharp_prob_tot)
-                    model_p_tot = 0.4 * sharp_prob_tot + 0.6 * poisson_ou
+                # Dynamic Poisson blend for soccer totals — base weight 0.60,
+                # boosted by xG extremity (high-scoring or very low-scoring predictions)
+                if poisson_pred and sport.startswith("soccer") and sel_name in ("Over", "Under"):
+                    poisson_key = "over_2_5" if sel_name == "Over" else "under_2_5"
+                    poisson_ou = poisson_pred.get(poisson_key, sharp_prob_tot)
+                    total_xg = poisson_pred.get("home_xg", 1.35) + poisson_pred.get("away_xg", 1.35)
+                    # extremity: bonus when total xG deviates from neutral 2.7
+                    xg_dev = abs(total_xg - 2.7)
+                    xg_bonus = min(0.15, xg_dev * 0.10)
+                    poisson_w = min(0.75, 0.60 + xg_bonus)
+                    model_p_tot = (1.0 - poisson_w) * sharp_prob_tot + poisson_w * poisson_ou
                 else:
                     model_p_tot = sharp_prob_tot
 
