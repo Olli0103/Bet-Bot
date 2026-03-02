@@ -14,11 +14,13 @@ from src.bot.handlers import (
     refresh_data,
     push_daily_signals,
 )
+from src.agents.orchestrator import AgentOrchestrator
 from src.core.api_health import format_api_health_report, run_api_health_check
 from src.core.autograding import run_auto_grading
 from src.core.live_feed import fetch_and_build_signals
 from src.core.learning_monitor import learning_health
-from src.core.ml_trainer import auto_train_model
+from src.core.ml_trainer import auto_train_all_models, auto_train_model
+from src.core.performance_monitor import PerformanceMonitor
 from src.core.settings import settings
 from src.data.models import Base
 from src.data.postgres import engine
@@ -43,7 +45,7 @@ def build_app() -> Application:
 
 async def scheduled_fetch(context: ContextTypes.DEFAULT_TYPE):
     try:
-        items = await __import__('asyncio').to_thread(fetch_and_build_signals, 1000)
+        items = await __import__('asyncio').to_thread(fetch_and_build_signals)
         chat_id = settings.telegram_chat_id
         if chat_id:
             await context.bot.send_message(chat_id=chat_id, text=f"📡 Datenupdate fertig: {len(items)} Signals")
@@ -88,7 +90,7 @@ async def learning_status_push(context: ContextTypes.DEFAULT_TYPE):
 
 async def weekly_retrain(context: ContextTypes.DEFAULT_TYPE):
     try:
-        msg = await __import__('asyncio').to_thread(auto_train_model, 100)
+        msg = await __import__('asyncio').to_thread(auto_train_all_models, 100)
         if settings.telegram_chat_id:
             await context.bot.send_message(chat_id=settings.telegram_chat_id, text=f"📈 Weekly Retrain: {msg}")
     except Exception:
@@ -100,6 +102,35 @@ async def api_health_push(context: ContextTypes.DEFAULT_TYPE):
         result = await run_api_health_check()
         if settings.telegram_chat_id:
             await context.bot.send_message(chat_id=settings.telegram_chat_id, text=format_api_health_report(result))
+    except Exception:
+        pass
+
+
+async def agent_cycle(context: ContextTypes.DEFAULT_TYPE):
+    """Run one Scout -> Analyst -> Executioner cycle via the AgentOrchestrator."""
+    try:
+        orchestrator = AgentOrchestrator(bot=context.bot, chat_id=settings.telegram_chat_id)
+        summary = await orchestrator.run_once()
+        if summary.get("scout_alerts", 0) > 0 and settings.telegram_chat_id:
+            await context.bot.send_message(
+                chat_id=settings.telegram_chat_id,
+                text=(
+                    f"🤖 Agent Cycle: {summary['scout_alerts']} alerts, "
+                    f"{summary['bets_placed']} bets, {summary['bets_skipped']} skipped"
+                ),
+            )
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+
+
+async def daily_performance_report(context: ContextTypes.DEFAULT_TYPE):
+    """Send daily performance report at 22:00."""
+    try:
+        monitor = PerformanceMonitor()
+        report = monitor.generate_report()
+        if settings.telegram_chat_id:
+            await context.bot.send_message(chat_id=settings.telegram_chat_id, text=report)
     except Exception:
         pass
 
@@ -142,6 +173,12 @@ def main():
     app.job_queue.run_daily(learning_status_push, time=dtime(hour=20, minute=0), name="learning_daily")
     app.job_queue.run_daily(api_health_push, time=dtime(hour=20, minute=5), name="api_health_daily")
     app.job_queue.run_daily(weekly_retrain, time=dtime(hour=3, minute=15), days=(6,), name="retrain_weekly")
+
+    # Agent orchestrator: runs every 5 minutes for real-time monitoring
+    app.job_queue.run_repeating(agent_cycle, interval=300, first=60, name="agent_cycle")
+
+    # Daily performance report + self-evaluation at 22:00
+    app.job_queue.run_daily(daily_performance_report, time=dtime(hour=22, minute=0), name="daily_report")
 
     app.run_polling(close_loop=False)
 

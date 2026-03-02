@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import logging
 from datetime import datetime
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
+from src.core.settings import settings
 from src.data.redis_cache import cache
 from src.integrations.apisports_fetcher import APISportsFetcher
 from src.integrations.news_fetcher import NewsFetcher
 from src.integrations.ollama_sentiment import OllamaSentimentClient
+
+log = logging.getLogger(__name__)
 
 
 def _norm_label(label: str) -> float:
@@ -21,11 +26,14 @@ def _norm_label(label: str) -> float:
 
 def _run_coro(coro):
     try:
-        asyncio.get_running_loop()
-        # if already inside a loop, caller should use async enrichment path; fail safe
-        return None
+        loop = asyncio.get_running_loop()
+        # Already inside an event loop — run in a thread with a new loop
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result(timeout=settings.enrichment_timeout_per_team)
     except RuntimeError:
         return asyncio.run(coro)
+    except Exception:
+        return None
 
 
 def team_sentiment_score(team: str, limit_articles: int = 8) -> float:
@@ -34,30 +42,35 @@ def team_sentiment_score(team: str, limit_articles: int = 8) -> float:
     if cached is not None:
         return float(cached)
 
-    news = NewsFetcher()
-    nlp = OllamaSentimentClient()
-    payload = news.search_news(query=team)
-    articles = (payload.get("articles") or [])[:limit_articles]
-    if not articles:
+    try:
+        news = NewsFetcher()
+        nlp = OllamaSentimentClient()
+        payload = news.search_news(query=team)
+        articles = (payload.get("articles") or [])[:limit_articles]
+        if not articles:
+            cache.set_json(k, 0.0, 6 * 3600)
+            return 0.0
+
+        vals: List[float] = []
+        for a in articles:
+            text = "\n".join(
+                [a.get("title") or "", a.get("description") or "", a.get("content") or ""]
+            ).strip()
+            if not text:
+                continue
+            s = nlp.analyze(text=text, context=f"Team={team}")
+            vals.append(_norm_label(s.label) * float(s.confidence))
+
+        score = float(sum(vals) / max(1, len(vals)))
+        cache.set_json(k, score, 6 * 3600)
+        return score
+    except Exception as exc:
+        log.warning("Sentiment fetch failed for %s: %s", team, exc)
         cache.set_json(k, 0.0, 6 * 3600)
         return 0.0
 
-    vals: List[float] = []
-    for a in articles:
-        text = "\n".join(
-            [a.get("title") or "", a.get("description") or "", a.get("content") or ""]
-        ).strip()
-        if not text:
-            continue
-        s = nlp.analyze(text=text, context=f"Team={team}")
-        vals.append(_norm_label(s.label) * float(s.confidence))
 
-    score = float(sum(vals) / max(1, len(vals)))
-    cache.set_json(k, score, 6 * 3600)
-    return score
-
-
-def batch_team_sentiment(teams: List[str], max_teams: int = 12) -> Dict[str, float]:
+def batch_team_sentiment(teams: List[str], max_teams: int = 24) -> Dict[str, float]:
     out: Dict[str, float] = {}
     uniq = []
     for t in teams:

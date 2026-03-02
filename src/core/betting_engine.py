@@ -28,9 +28,10 @@ class BettingEngine:
         source_mode: str = "primary",
         reference_book: str = "pinnacle",
         confidence: float = 1.0,
+        tax_rate: float = 0.0,
     ) -> BetSignal:
-        ev = expected_value(model_probability, bookmaker_odds)
-        kf = kelly_fraction(model_probability, bookmaker_odds, frac=kelly_frac)
+        ev = expected_value(model_probability, bookmaker_odds, tax_rate=tax_rate)
+        kf = kelly_fraction(model_probability, bookmaker_odds, frac=kelly_frac, tax_rate=tax_rate)
         stake = round(kelly_stake(self.bankroll, kf), 2)
         return BetSignal(
             sport=sport,
