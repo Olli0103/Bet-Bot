@@ -164,73 +164,47 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def combo_suggestions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    legs = get_cached_combo_legs()
-    if not legs:
+    from src.core.live_feed import get_cached_combos
+    combos = get_cached_combos()
+
+    if not combos:
         # self-heal: build cache on demand
         try:
             await asyncio.to_thread(lambda: fetch_and_build_signals())
         except Exception:
             pass
-        legs = get_cached_combo_legs()
-    if not legs:
+        combos = get_cached_combos()
+
+    if not combos:
         await update.message.reply_text("Keine Kombi-Daten vorhanden. Bitte später erneut versuchen.")
         return
 
-    engine = BettingEngine(bankroll=_get_bankroll())
+    for combo_data in combos:
+        size = combo_data.get("size", 0)
+        combo_type = combo_data.get("type", "lotto")
+        stake = float(combo_data.get("stake", 1.00))
+        combined_odds = float(combo_data.get("combined_odds", 0))
+        combined_prob = float(combo_data.get("combined_probability", 0))
+        ev = float(combo_data.get("expected_value", 0))
+        legs = combo_data.get("legs", [])
 
-    # one combo per sport, same-sport only, fixed 1 EUR stake (lotto mode)
-    placed = _placed_keys_today()
-    by_sport = {}
-    for l in legs:
-        if f"{l.get('event_id')}|{l.get('selection')}" in placed:
-            continue
-        s = str(l.get("sport", ""))
-        by_sport.setdefault(s, []).append(l)
+        potential_payout = round(stake * combined_odds, 2)
+        is_playable = ev > 0
+        status = "spielbar" if is_playable else "watchlist (kein +EV)"
+        type_label = "EV-Optimal" if combo_type == "ev_optimal" else "Lotto"
 
-    for sport, sport_legs in sorted(by_sport.items()):
-        # high probability first
-        ranked = sorted(sport_legs, key=lambda x: float(x.get("probability", 0)), reverse=True)
-
-        # practical target sizes
-        target_size = 10 if len(ranked) >= 10 else 5 if len(ranked) >= 5 else 3 if len(ranked) >= 3 else 2 if len(ranked) >= 2 else 0
-        if target_size == 0:
-            sport_label = sport.replace("_", " ").upper()
-            await update.message.reply_text(f"{sport_label}: nicht genug Legs für Kombi (mind. 2).")
-            continue
-
-        chosen = []
-        seen_events = set()
-        for l in ranked:
-            if l["event_id"] in seen_events:
-                continue
-            chosen.append(l)
-            seen_events.add(l["event_id"])
-            if len(chosen) == target_size:
-                break
-
-        if len(chosen) < 2:
-            sport_label = sport.replace("_", " ").upper()
-            await update.message.reply_text(f"{sport_label}: nach Event-Filter nicht genug eindeutige Legs (mind. 2).")
-            continue
-
-        combo = engine.build_combo(chosen, correlation_penalty=0.70, kelly_frac=0.02)
-        fixed_stake = 1.00
-
-        sport_label = sport.replace("_", " ").upper()
         legs_txt = "\n".join(
-            f"{i+1}. {leg.selection}  |  Quote {float(leg.odds):.2f}" for i, leg in enumerate(combo.legs)
+            f"{i+1}. {leg.get('selection', '?')}  |  Quote {float(leg.get('odds', 0)):.2f}"
+            for i, leg in enumerate(legs)
         )
-        is_playable = float(combo.expected_value) > 0
-        status = "✅ spielbar" if is_playable else "⚠️ watchlist (kein +EV)"
 
         msg = (
-            f"🧩 KOMBI • {sport_label}\n"
-            f"Status: {status}\n"
-            f"Legs: {len(combo.legs)}\n"
-            f"Gesamtquote: {float(combo.combined_odds):.2f}\n"
-            f"Modell-P: {float(combo.combined_probability):.2%}\n"
-            f"EV: {float(combo.expected_value):.4f}\n"
-            f"Einsatz: {fixed_stake:.2f} EUR\n\n"
+            f"{'🎯' if combo_type == 'ev_optimal' else '🧩'} KOMBI {size}er • {type_label}\n"
+            f"Status: {'✅' if is_playable else '⚠️'} {status}\n"
+            f"Legs: {len(legs)}\n"
+            f"Gesamtquote: {combined_odds:.2f}\n"
+            f"Einsatz: {stake:.2f} EUR | Möglicher Gewinn: {potential_payout:.2f} EUR\n"
+            f"Modell-P: {combined_prob:.2%} | EV: {ev:.4f}\n\n"
             f"Tipps:\n{legs_txt}"
         )
         await update.message.reply_text(msg)
@@ -336,57 +310,42 @@ async def push_daily_signals(bot, chat_id: str):
             )
             await bot.send_message(chat_id=chat_id, text=msg)
 
-    # one combo per sport
-    by_sport = {}
-    for l in combos:
-        if f"{l.get('event_id')}|{l.get('selection')}" in placed:
-            continue
-        s = str(l.get("sport", ""))
-        by_sport.setdefault(s, []).append(l)
+    # Combo push using cached optimized combos
+    from src.core.live_feed import get_cached_combos
+    cached_combos = get_cached_combos()
 
-    if not by_sport:
-        await bot.send_message(chat_id=chat_id, text="Keine Kombi-Legs für heute vorhanden.")
+    if not cached_combos:
+        await bot.send_message(chat_id=chat_id, text="Keine Kombi-Vorschläge für heute vorhanden.")
         return
 
-    await bot.send_message(chat_id=chat_id, text="🧩 Kombi-Vorschläge je Sport")
-    engine = BettingEngine(bankroll=_get_bankroll())
-    for sport, sport_legs in sorted(by_sport.items()):
-        ranked = sorted(sport_legs, key=lambda x: float(x.get("probability", 0)), reverse=True)
-        target_size = 10 if len(ranked) >= 10 else 5 if len(ranked) >= 5 else 3 if len(ranked) >= 3 else 2 if len(ranked) >= 2 else 0
-        if target_size == 0:
-            sport_label = sport.replace("_", " ").upper()
-            await bot.send_message(chat_id=chat_id, text=f"{sport_label}: nicht genug Legs (min 2).")
+    await bot.send_message(chat_id=chat_id, text="🧩 Kombi-Vorschläge")
+    for combo_data in cached_combos:
+        size = combo_data.get("size", 0)
+        combo_type = combo_data.get("type", "lotto")
+        stake = float(combo_data.get("stake", 1.00))
+        combined_odds = float(combo_data.get("combined_odds", 0))
+        combined_prob = float(combo_data.get("combined_probability", 0))
+        ev = float(combo_data.get("expected_value", 0))
+        legs = combo_data.get("legs", [])
+
+        if ev <= 0:
             continue
 
-        chosen, seen = [], set()
-        for l in ranked:
-            if l['event_id'] in seen:
-                continue
-            chosen.append(l)
-            seen.add(l['event_id'])
-            if len(chosen) == target_size:
-                break
+        potential_payout = round(stake * combined_odds, 2)
+        type_label = "EV-Optimal" if combo_type == "ev_optimal" else "Lotto"
 
-        if len(chosen) < 2:
-            sport_label = sport.replace("_", " ").upper()
-            await bot.send_message(chat_id=chat_id, text=f"{sport_label}: nach Event-Filter nicht genug eindeutige Legs (mind. 2).")
-            continue
-
-        combo = engine.build_combo(chosen, correlation_penalty=0.70, kelly_frac=0.02)
-        sport_label = sport.replace("_", " ").upper()
         legs_txt = "\n".join(
-            f"{i+1}. {leg.selection}  |  Quote {float(leg.odds):.2f}" for i, leg in enumerate(combo.legs)
+            f"{i+1}. {leg.get('selection', '?')}  |  Quote {float(leg.get('odds', 0)):.2f}"
+            for i, leg in enumerate(legs)
         )
-        if float(combo.expected_value) <= 0:
-            continue
 
         msg = (
-            f"🧩 KOMBI • {sport_label}\n"
+            f"{'🎯' if combo_type == 'ev_optimal' else '🧩'} KOMBI {size}er • {type_label}\n"
             f"Status: ✅ spielbar\n"
-            f"Legs: {len(combo.legs)}\n"
-            f"Gesamtquote: {combo.combined_odds:.2f}\n"
-            f"Modell-P: {combo.combined_probability:.2%}\n"
-            f"EV: {combo.expected_value:.4f} | Einsatz: 1.00 EUR\n\n"
+            f"Legs: {len(legs)}\n"
+            f"Gesamtquote: {combined_odds:.2f}\n"
+            f"Einsatz: {stake:.2f} EUR | Möglicher Gewinn: {potential_payout:.2f} EUR\n"
+            f"Modell-P: {combined_prob:.2%} | EV: {ev:.4f}\n\n"
             f"Tipps:\n{legs_txt}"
         )
         await bot.send_message(chat_id=chat_id, text=msg)

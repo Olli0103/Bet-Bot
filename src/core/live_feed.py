@@ -163,36 +163,10 @@ def _pick_target_book(prices: Dict[str, Dict[str, float]], sharp_book: str) -> T
 
 
 def _build_top_combos(engine: BettingEngine, legs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    ranked = sorted(legs, key=lambda x: (x["probability"], -x["odds"]), reverse=True)
-
-    def pick_n(n: int) -> ComboBet | None:
-        chosen = []
-        used_events = set()
-        used_sports = {}
-        for l in ranked:
-            if l["event_id"] in used_events:
-                continue
-            sport = l.get("sport", "")
-            limit = 2 if n <= 10 else 3
-            if used_sports.get(sport, 0) >= limit:
-                continue
-            chosen.append(l)
-            used_events.add(l["event_id"])
-            used_sports[sport] = used_sports.get(sport, 0) + 1
-            if len(chosen) == n:
-                break
-        if len(chosen) < n:
-            return None
-        frac = 0.1 if n == 5 else 0.05 if n == 10 else 0.03 if n == 20 else 0.02
-        corr = 0.90 if n == 5 else 0.85 if n == 10 else 0.75 if n == 20 else 0.65
-        return engine.build_combo(chosen, correlation_penalty=corr, kelly_frac=frac)
-
-    out = []
-    for n in [5, 10, 20, 30]:
-        c = pick_n(n)
-        if c:
-            out.append({"size": n, **c.model_dump()})
-    return out
+    """Build optimized combos using ComboOptimizer with dynamic correlation."""
+    from src.core.combo_optimizer import ComboOptimizer
+    optimizer = ComboOptimizer(engine)
+    return optimizer.build_all_combos(legs)
 
 
 def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
