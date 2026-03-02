@@ -59,6 +59,7 @@ class FeatureEngineer:
         poisson_true_prob: Optional[float] = None,
         twitter_sentiment_delta: float = 0.0,
         time_to_kickoff_hours: float = 24.0,
+        public_bias: float = 0.0,
     ) -> Dict[str, float]:
         clv_proxy = FeatureEngineer.calculate_clv_proxy(target_odds, sharp_odds)
         sharp_prob = 1.0 / sharp_odds if sharp_odds > 1.0 else 0.0
@@ -89,6 +90,8 @@ class FeatureEngineer:
             "line_staleness": float(line_staleness),
             "twitter_sentiment_delta": float(twitter_sentiment_delta),
             "time_to_kickoff_hours": float(time_to_kickoff_hours),
+            # Public bias: positive = Tipico shading this selection (retail over-bet)
+            "public_bias": float(public_bias),
         }
         if poisson_true_prob is not None:
             features["poisson_true_prob"] = float(poisson_true_prob)

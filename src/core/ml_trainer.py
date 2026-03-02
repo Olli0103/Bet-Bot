@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 
 MODELS_DIR = Path("models")
 
-# Full feature set (Phase 1-3)
+# Full feature set (Phase 1-3 + review enhancements)
 FEATURES = [
     "sentiment_delta",
     "injury_delta",
@@ -52,6 +52,7 @@ FEATURES = [
     "line_staleness",
     "twitter_sentiment_delta",
     "time_to_kickoff_hours",
+    "public_bias",
 ]
 
 # Legacy features (backward-compatible with old JSON weights)
@@ -122,6 +123,10 @@ def _clean_frame(df: pd.DataFrame, feature_list: List[str]) -> pd.DataFrame:
         out["form_games_l5"] = out["form_games_l5"].clip(0.0, 5.0)
     if "time_to_kickoff_hours" in out.columns:
         out["time_to_kickoff_hours"] = out["time_to_kickoff_hours"].clip(0.0, 168.0)
+    if "line_staleness" in out.columns:
+        out["line_staleness"] = out["line_staleness"].clip(0.0, 120.0)  # cap at 2 hours
+    if "public_bias" in out.columns:
+        out["public_bias"] = out["public_bias"].clip(-0.5, 0.5)
     return out
 
 
@@ -179,7 +184,7 @@ def _evaluate_model(
     y: np.ndarray,
     tscv: TimeSeriesSplit,
 ) -> Dict:
-    """Evaluate model on the last temporal fold."""
+    """Evaluate model on the last temporal fold with reliability diagram data."""
     metrics = {}
     splits = list(tscv.split(X))
     if splits:
@@ -191,18 +196,36 @@ def _evaluate_model(
         metrics["log_loss"] = round(float(log_loss(y_test, y_pred)), 6)
         metrics["test_size"] = len(test_idx)
 
-        # Calibration check: bin predictions into 5 buckets
+        # Reliability diagram: bin predictions into buckets and compute
+        # actual vs predicted rates + adjustment factors for Kelly scaling.
+        # If model says 60% but actual is 55%, the Kelly multiplier for
+        # that bucket should be scaled down by actual/predicted.
         bins = [0.0, 0.3, 0.45, 0.55, 0.7, 1.0]
+        reliability_bins: Dict[str, Dict] = {}
         for i in range(len(bins) - 1):
             mask = (y_pred >= bins[i]) & (y_pred < bins[i + 1])
             if mask.sum() > 5:
                 actual_rate = float(y_test[mask].mean())
                 predicted_rate = float(y_pred[mask].mean())
+                # Kelly adjustment: scale stakes by actual/predicted ratio.
+                # > 1.0 means model under-predicts (bet more),
+                # < 1.0 means model over-predicts (trim stakes).
+                kelly_adj = round(actual_rate / max(0.01, predicted_rate), 4)
+                bin_key = f"{bins[i]:.2f}_{bins[i+1]:.2f}"
+                reliability_bins[bin_key] = {
+                    "predicted": round(predicted_rate, 4),
+                    "actual": round(actual_rate, 4),
+                    "n": int(mask.sum()),
+                    "kelly_adjustment": kelly_adj,
+                    "over_predicting": predicted_rate > actual_rate + 0.02,
+                }
                 metrics[f"calib_{bins[i]:.1f}_{bins[i+1]:.1f}"] = {
                     "predicted": round(predicted_rate, 4),
                     "actual": round(actual_rate, 4),
                     "n": int(mask.sum()),
                 }
+
+        metrics["reliability_bins"] = reliability_bins
     return metrics
 
 
@@ -395,3 +418,31 @@ def load_model(sport_group: str = "general") -> Optional[Dict]:
         except Exception as exc:
             log.warning("Failed to load model %s: %s", sport_group, exc)
     return None
+
+
+def get_reliability_adjustment(model_prob: float, sport_group: str = "general") -> float:
+    """Return a Kelly multiplier based on calibration reliability bins.
+
+    If the model consistently over-predicts in the bucket containing
+    ``model_prob``, the returned multiplier will be < 1.0 to trim stakes.
+    If under-predicting, it will be > 1.0. Returns 1.0 when no data.
+    """
+    model_data = load_model(sport_group)
+    if model_data is None:
+        model_data = load_model("general")
+    if model_data is None:
+        return 1.0
+
+    bins = model_data.get("metrics", {}).get("reliability_bins", {})
+    if not bins:
+        return 1.0
+
+    for bin_key, info in bins.items():
+        try:
+            low, high = (float(x) for x in bin_key.split("_"))
+        except (ValueError, TypeError):
+            continue
+        if low <= model_prob < high:
+            return float(info.get("kelly_adjustment", 1.0))
+
+    return 1.0

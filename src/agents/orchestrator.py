@@ -1,13 +1,14 @@
 """Agent Orchestrator: Coordinates Scout -> Analyst -> Executioner pipeline.
 
 Replaces the fixed APScheduler approach with an event-driven, agent-based
-architecture. Falls back to schedule-based mode if the agent framework fails.
+architecture. Uses adaptive polling: 60 seconds when events are starting
+within the next hour, 5 minutes otherwise.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from src.agents.analyst_agent import AnalystAgent
@@ -21,14 +22,21 @@ from src.integrations.odds_fetcher import OddsFetcher
 log = logging.getLogger(__name__)
 
 ORCHESTRATOR_STATE_KEY = "orchestrator:state"
+KICKOFF_TIMES_KEY = "orchestrator:kickoff_times"
+
+# Adaptive polling thresholds
+PRE_KICKOFF_WINDOW = timedelta(hours=1)  # start fast-polling 1h before kickoff
+FAST_INTERVAL_SECONDS = 60               # 60s during high-volatility window
+NORMAL_INTERVAL_SECONDS = 300            # 5min during normal periods
 
 
 class AgentOrchestrator:
     """Coordinates all agents: Scout -> Analyst -> Executioner -> Learn.
 
-    The orchestrator can run in two modes:
-    1. Continuous monitoring (default) — polls every 5 minutes
-    2. Scheduled mode (fallback) — runs at fixed times
+    The orchestrator uses adaptive polling intervals:
+    - **Fast mode** (60s): when any tracked event kicks off within the next hour.
+      Steam moves are most profitable in this window — 5 minutes is too slow.
+    - **Normal mode** (5min): no imminent kickoffs.
     """
 
     def __init__(self, bot=None, chat_id: str = "") -> None:
@@ -122,13 +130,39 @@ class AgentOrchestrator:
         cache.set_json(ORCHESTRATOR_STATE_KEY, summary, ttl_seconds=6 * 3600)
         return summary
 
-    async def run_continuous(self, interval_minutes: int = 5) -> None:
-        """Run the orchestrator continuously with a polling interval.
+    def _has_imminent_kickoffs(self) -> bool:
+        """Check if any tracked event kicks off within PRE_KICKOFF_WINDOW.
 
-        This replaces the fixed schedule approach with real-time monitoring.
+        Uses cached kickoff times from the Scout's last odds poll to
+        avoid an extra API call.
+        """
+        cached_times = cache.get_json(KICKOFF_TIMES_KEY) or []
+        now = datetime.now(timezone.utc)
+        cutoff = now + PRE_KICKOFF_WINDOW
+        for ts_str in cached_times:
+            try:
+                ct = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+                if now < ct <= cutoff:
+                    return True
+            except (ValueError, TypeError):
+                continue
+        return False
+
+    def _get_adaptive_interval(self) -> int:
+        """Return the polling interval in seconds based on kickoff proximity."""
+        if self._has_imminent_kickoffs():
+            return FAST_INTERVAL_SECONDS
+        return NORMAL_INTERVAL_SECONDS
+
+    async def run_continuous(self, interval_minutes: int = 5) -> None:
+        """Run the orchestrator continuously with adaptive polling.
+
+        Polls every 60 seconds when events are starting within the next
+        hour (steam move window), and every 5 minutes otherwise.
         """
         self._running = True
-        log.info("Agent orchestrator starting (interval=%dm)", interval_minutes)
+        log.info("Agent orchestrator starting (adaptive polling: %ds/%ds)",
+                 FAST_INTERVAL_SECONDS, NORMAL_INTERVAL_SECONDS)
 
         while self._running:
             try:
@@ -144,7 +178,8 @@ class AgentOrchestrator:
             except Exception as exc:
                 log.error("Orchestrator cycle failed: %s", exc)
 
-            await asyncio.sleep(interval_minutes * 60)
+            interval = self._get_adaptive_interval()
+            await asyncio.sleep(interval)
 
     def stop(self) -> None:
         """Stop the continuous monitoring loop."""
