@@ -161,12 +161,23 @@ async def _send_combo_push(bot, payload: Dict, target: str, chat_ids: Optional[L
         await _broadcast(bot, "Keine Kombi-Vorschläge heute.", target, chat_ids)
         return
 
-    await _broadcast(bot, f"🧩 {len(combos)} Lotto-Kombis", target, chat_ids)
+    sent = 0
     for combo_data in combos:
         if float(combo_data.get("expected_value", 0)) <= 0:
             continue
         card = _format_combo_card(combo_data)
-        await _broadcast(bot, card, target, chat_ids)
+        if card:
+            if sent == 0:
+                await _broadcast(bot, f"🧩 {len(combos)} Lotto-Kombis", target, chat_ids)
+            await _broadcast(bot, card, target, chat_ids)
+            sent += 1
+    if sent == 0:
+        await _broadcast(
+            bot,
+            "Keine Kombi-Vorschläge mit vollständigem Event-Kontext verfügbar.",
+            target,
+            chat_ids,
+        )
 
 
 # ── Outbox polling job (runs inside Telegram event loop) ──────

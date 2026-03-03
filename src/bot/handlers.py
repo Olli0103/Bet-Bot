@@ -338,8 +338,12 @@ def _format_leg_line(i: int, leg: dict) -> str:
     return f" {i+1:2d}. {emoji} {league} | {event} | {sel_display} | @{odds:.2f} | {prob:.0%}"
 
 
-def _format_combo_card(combo_data: dict) -> str:
-    """Format a combo as a rich card with FULL context per leg."""
+def _format_combo_card(combo_data: dict) -> Optional[str]:
+    """Format a combo as a rich card with FULL context per leg.
+
+    Returns None if no legs have valid event context (avoids sending
+    confusing '0 legs' cards to the user).
+    """
     size = combo_data.get("size", 0)
     stake = float(combo_data.get("stake", 1.00))
     combined_odds = float(combo_data.get("combined_odds", 0))
@@ -358,6 +362,10 @@ def _format_combo_card(combo_data: dict) -> str:
             complete_legs.append(leg)
         else:
             incomplete_count += 1
+
+    # No usable legs → return None so callers can skip this combo
+    if not complete_legs:
+        return None
 
     legs_lines = [_format_leg_line(i, leg) for i, leg in enumerate(complete_legs)]
     legs_txt = "\n".join(legs_lines)
@@ -399,10 +407,19 @@ async def combo_suggestions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Keine Kombi-Daten vorhanden. Bitte später erneut versuchen.")
         return
 
-    await update.message.reply_text(f"🧩 {len(combos)} Lotto-Kombis (10/20/30 Legs)")
+    sent = 0
     for combo_data in combos:
         card = _format_combo_card(combo_data)
-        await update.message.reply_text(card)
+        if card:
+            if sent == 0:
+                await update.message.reply_text(f"🧩 Lotto-Kombis (10/20/30 Legs)")
+            await update.message.reply_text(card)
+            sent += 1
+
+    if sent == 0:
+        await update.message.reply_text(
+            "Keine Kombi-Vorschläge mit vollständigem Event-Kontext verfügbar."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -806,9 +823,16 @@ async def _handle_get_combos(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if filtered:
             combos = filtered
 
+    sent = 0
     for combo_data in combos:
         card = _format_combo_card(combo_data)
-        await update.message.reply_text(card)
+        if card:
+            await update.message.reply_text(card)
+            sent += 1
+    if sent == 0:
+        await update.message.reply_text(
+            "Keine Kombi-Vorschläge mit vollständigem Event-Kontext verfügbar."
+        )
 
 
 async def _handle_explain_bet(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str):
@@ -1110,9 +1134,18 @@ async def push_daily_signals(bot, chat_id: str):
         await bot.send_message(chat_id=chat_id, text="Keine Kombi-Vorschläge heute.")
         return
 
-    await bot.send_message(chat_id=chat_id, text=f"🧩 {len(cached_combos)} Lotto-Kombis")
+    sent = 0
     for combo_data in cached_combos:
         if float(combo_data.get("expected_value", 0)) <= 0:
             continue
         card = _format_combo_card(combo_data)
-        await bot.send_message(chat_id=chat_id, text=card)
+        if card:
+            if sent == 0:
+                await bot.send_message(chat_id=chat_id, text=f"🧩 {len(cached_combos)} Lotto-Kombis")
+            await bot.send_message(chat_id=chat_id, text=card)
+            sent += 1
+    if sent == 0:
+        await bot.send_message(
+            chat_id=chat_id,
+            text="Keine Kombi-Vorschläge mit vollständigem Event-Kontext verfügbar.",
+        )
