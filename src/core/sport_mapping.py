@@ -23,17 +23,17 @@ class SportEntry:
 # ── Master list ──────────────────────────────────────────────────────────────
 
 _ENTRIES: List[SportEntry] = [
-    # Soccer — 1st divisions
+    # Soccer — 1st & 2nd divisions
     SportEntry("D1",  "soccer_germany_bundesliga",        "🇩🇪 1. Bundesliga",          "soccer"),
     SportEntry("D2",  "soccer_germany_bundesliga2",       "🇩🇪 2. Bundesliga",          "soccer"),
-    SportEntry("E0",  "soccer_epl",                       "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League",       "soccer"),
-    SportEntry("E1",  "soccer_england_championship",      "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Championship",         "soccer"),
-    SportEntry("F1",  "soccer_france_ligue_one",          "🇫🇷 Ligue 1",                "soccer"),
-    SportEntry("F2",  "soccer_france_ligue_two",          "🇫🇷 Ligue 2",                "soccer"),
-    SportEntry("I1",  "soccer_italy_serie_a",             "🇮🇹 Serie A",                 "soccer"),
-    SportEntry("I2",  "soccer_italy_serie_b",             "🇮🇹 Serie B",                 "soccer"),
-    SportEntry("SP1", "soccer_spain_la_liga",             "🇪🇸 La Liga",                 "soccer"),
-    SportEntry("SP2", "soccer_spain_segunda_division",    "🇪🇸 Segunda División",        "soccer"),
+    SportEntry("E0",  "soccer_epl",                       "🏴󠁧󠁢󠁥󠁮󠁧󠁿 1. Liga England",      "soccer"),
+    SportEntry("E1",  "soccer_england_championship",      "🏴󠁧󠁢󠁥󠁮󠁧󠁿 2. Liga England",      "soccer"),
+    SportEntry("F1",  "soccer_france_ligue_one",          "🇫🇷 1. Liga Frankreich",     "soccer"),
+    SportEntry("F2",  "soccer_france_ligue_two",          "🇫🇷 2. Liga Frankreich",     "soccer"),
+    SportEntry("I1",  "soccer_italy_serie_a",             "🇮🇹 1. Liga Italien",        "soccer"),
+    SportEntry("I2",  "soccer_italy_serie_b",             "🇮🇹 2. Liga Italien",        "soccer"),
+    SportEntry("SP1", "soccer_spain_la_liga",             "🇪🇸 1. Liga Spanien",        "soccer"),
+    SportEntry("SP2", "soccer_spain_segunda_division",    "🇪🇸 2. Liga Spanien",        "soccer"),
     SportEntry("N1",  "soccer_netherlands_eredivisie",    "🇳🇱 Eredivisie",              "soccer"),
     SportEntry("P1",  "soccer_portugal_primeira_liga",    "🇵🇹 Primeira Liga",           "soccer"),
     SportEntry("T1",  "soccer_turkey_super_league",       "🇹🇷 Süper Lig",               "soccer"),
@@ -50,9 +50,9 @@ _ENTRIES: List[SportEntry] = [
     # Ice hockey
     SportEntry("nhl",       "icehockey_nhl",               "🏒 NHL",                      "icehockey"),
     # Tennis
-    SportEntry("atp",       "tennis_atp",                  "🎾 ATP",                      "tennis"),
-    SportEntry("wta",       "tennis_wta",                  "🎾 WTA",                      "tennis"),
-    SportEntry("challenger","tennis_atp_challenger",        "🎾 Challenger",               "tennis"),
+    SportEntry("atp",       "tennis_atp",                  "🎾 Tennis ATP",               "tennis"),
+    SportEntry("wta",       "tennis_wta",                  "🎾 Tennis WTA",               "tennis"),
+    SportEntry("challenger","tennis_atp_challenger",        "🎾 Tennis Challenger",        "tennis"),
 ]
 
 

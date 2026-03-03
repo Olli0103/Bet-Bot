@@ -42,9 +42,17 @@ class ScoutAgent:
         self._previous_snapshot = prev
 
         # Use dynamic settings for active sports (fallback to env var)
-        active_sports = dynamic_settings.get_active_sports()
-        if not active_sports:
-            active_sports = [s.strip() for s in settings.live_sports.split(",") if s.strip()]
+        base_sports = dynamic_settings.get_active_sports()
+        if not base_sports:
+            base_sports = [s.strip() for s in settings.live_sports.split(",") if s.strip()]
+
+        # Resolve base keys to exact in-season API keys via /v4/sports
+        try:
+            api_active = await self.odds_fetcher.get_active_sports_from_api_async()
+        except Exception:
+            api_active = []
+        active_sports = OddsFetcher.resolve_sport_keys(base_sports, api_active)
+
         current_snapshot: Dict[str, Dict[str, float]] = {}
         kickoff_times: List[str] = []
 
@@ -160,9 +168,15 @@ class ScoutAgent:
         except ImportError:
             return alerts
 
-        # Get teams from currently tracked events
-        active_sports = dynamic_settings.get_active_sports()
-        sports = active_sports if active_sports else [s.strip() for s in settings.live_sports.split(",") if s.strip()]
+        # Get teams from currently tracked events (use resolved keys)
+        base_sports = dynamic_settings.get_active_sports()
+        if not base_sports:
+            base_sports = [s.strip() for s in settings.live_sports.split(",") if s.strip()]
+        try:
+            api_active = await self.odds_fetcher.get_active_sports_from_api_async()
+        except Exception:
+            api_active = []
+        sports = OddsFetcher.resolve_sport_keys(base_sports, api_active)
         teams: set = set()
 
         for sport in sports:

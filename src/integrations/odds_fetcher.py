@@ -1,12 +1,15 @@
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from src.core.settings import settings
 from src.data.redis_cache import cache
 from src.integrations.base_fetcher import AsyncBaseFetcher, _safe_sync_run
 
 log = logging.getLogger(__name__)
+
+# How long to cache the /v4/sports list (avoids redundant API calls)
+_ACTIVE_SPORTS_TTL = 2 * 3600  # 2 hours
 
 
 class OddsFetcher(AsyncBaseFetcher):
@@ -21,6 +24,78 @@ class OddsFetcher(AsyncBaseFetcher):
         data = await self.get("sports", params={"apiKey": settings.odds_api_key})
         cache.set_json(cache_key, data, ttl_seconds)
         return data
+
+    async def get_active_sports_from_api_async(self) -> List[str]:
+        """Fetch the list of currently in-season sport keys from the Odds API.
+
+        Calls ``/v4/sports`` and caches the result in Redis for 2 hours.
+        Returns a list of active sport keys like ``["tennis_atp_dubai", ...]``.
+        """
+        cache_key = "odds:active_sport_keys"
+        cached = cache.get_json(cache_key)
+        if cached and isinstance(cached, list):
+            return cached
+
+        try:
+            data = await self.get("sports", params={"apiKey": settings.odds_api_key})
+        except Exception as exc:
+            log.warning("Failed to fetch active sports from API: %s", exc)
+            return []
+
+        if not isinstance(data, list):
+            return []
+
+        keys = [
+            str(s["key"])
+            for s in data
+            if isinstance(s, dict) and s.get("key") and s.get("active")
+        ]
+        cache.set_json(cache_key, keys, ttl_seconds=_ACTIVE_SPORTS_TTL)
+        log.debug("Cached %d active sport keys from Odds API", len(keys))
+        return keys
+
+    def get_active_sports_from_api(self) -> List[str]:
+        """Sync wrapper for :meth:`get_active_sports_from_api_async`."""
+        return _safe_sync_run(self.get_active_sports_from_api_async())
+
+    @staticmethod
+    def resolve_sport_keys(
+        user_base_keys: List[str],
+        api_active_keys: List[str],
+    ) -> List[str]:
+        """Expand user base-keys into exact API keys via prefix matching.
+
+        A user setting of ``tennis_atp`` will match ``tennis_atp_dubai``,
+        ``tennis_atp_wimbledon``, ``tennis_atp_challenger``, etc.
+        If a base key appears verbatim in the active list, it is included as-is.
+
+        Falls back to the original base key when the active list is empty
+        (API unavailable) so the bot doesn't go silent.
+        """
+        if not api_active_keys:
+            return list(user_base_keys)
+
+        active_set = set(api_active_keys)
+        resolved: List[str] = []
+        seen: set = set()
+
+        for base in user_base_keys:
+            if base in active_set:
+                if base not in seen:
+                    resolved.append(base)
+                    seen.add(base)
+            # Also find sub-keys that start with base + "_"
+            for ak in sorted(api_active_keys):
+                if ak.startswith(base + "_") or ak == base:
+                    if ak not in seen:
+                        resolved.append(ak)
+                        seen.add(ak)
+            # Fallback: if nothing matched, keep the base key anyway
+            if base not in seen and not any(ak.startswith(base + "_") for ak in api_active_keys):
+                resolved.append(base)
+                seen.add(base)
+
+        return resolved
 
     async def get_sport_odds_async(
         self,

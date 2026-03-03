@@ -201,21 +201,14 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
     # Determine tax rate based on target book
     tax_rate = 0.0 if settings.tax_free_mode else settings.tipico_tax_rate
 
-    available = set()
+    # Resolve user base-keys (e.g. "tennis_atp") into exact in-season API keys
+    # (e.g. "tennis_atp_dubai", "tennis_atp_wimbledon") via the /v4/sports endpoint.
     try:
-        sports_list = odds.get_sports()
-        if isinstance(sports_list, list):
-            available = {str(x.get("key")) for x in sports_list if x.get("key")}
+        api_active = odds.get_active_sports_from_api()
     except Exception:
-        available = set()
+        api_active = []
 
-    expanded_sports: List[str] = []
-    for sport in sports:
-        if not available or sport in available:
-            expanded_sports.append(sport)
-            continue
-        aliases = [k for k in available if k.startswith(sport + "_")]
-        expanded_sports.extend(sorted(aliases))
+    expanded_sports = OddsFetcher.resolve_sport_keys(sports, api_active)
 
     stats = {"sports_requested": len(sports), "sports_expanded": len(expanded_sports), "events_seen": 0, "signals": 0}
 

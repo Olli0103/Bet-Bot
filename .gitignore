@@ -13,8 +13,8 @@ run/
 *.lock
 .bot.pid
 
-# Local data/artifacts
-data/
+# Local data/artifacts (top-level only, not src/data/)
+/data/
 
 # ML model artifacts
 models/*.joblib
