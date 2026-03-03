@@ -137,7 +137,10 @@ async def _fetch_multi_news(home: str, away: str) -> List[Dict[str, Any]]:
     from src.integrations.multi_news_fetcher import MultiNewsFetcher
     try:
         fetcher = MultiNewsFetcher(min_articles=3, max_articles=10)
-        return await fetcher.search_async(f"{home} vs {away} injury")
+        return await fetcher.search_async(
+            query=f"{home} vs {away} injury",
+            team_names=[home, away],
+        )
     except Exception as exc:
         log.debug("MultiNews injury fetch failed: %s", exc)
         return []
