@@ -994,10 +994,10 @@ Bet-Bot/
 
 | Sport | URL | Status | Notes |
 |-------|-----|--------|-------|
-| NBA | `rotowire.com/rss/news.htm?sport=nba` | Reliable | Year-round coverage |
-| NFL | `rotowire.com/rss/news.htm?sport=nfl` | Reliable | Sparse during off-season (March-August) |
-| NHL | `rotowire.com/rss/news.htm?sport=nhl` | Reliable | Sparse during off-season (June-September) |
-| Soccer | `rotowire.com/rss/news.htm?sport=soccer` | Reliable | US-centric; EPL/La Liga/Bundesliga coverage |
+| NBA | `rotowire.com/rss/news.php?sport=NBA` | Reliable | Year-round coverage |
+| NFL | `rotowire.com/rss/news.php?sport=NFL` | Reliable | Sparse during off-season (March-August) |
+| NHL | `rotowire.com/rss/news.php?sport=NHL` | Reliable | Sparse during off-season (June-September) |
+| Soccer | `rotowire.com/rss/news.php?sport=SOCCER` | Reliable | US-centric; EPL/La Liga/Bundesliga coverage |
 
 **Access**: Free RSS 2.0 feeds. No API key required. Must link back to rotowire.com (embedded in feed items).
 
