@@ -1,7 +1,10 @@
-"""Unified Injury Aggregator: merges API-Sports and Rotowire RSS signals.
+"""Unified Injury Aggregator: merges API-Sports and MultiNews cascade signals.
 
-Collects injury/lineup intelligence from both sources in parallel,
-deduplicates, and uses Gemma 3 4B to extract a structured JSON list of
+Collects injury/lineup intelligence from two source tiers in parallel:
+  1. API-Sports  — structured injury data (most reliable)
+  2. MultiNews   — cascading Rotowire RSS → GNews → NewsData → NewsAPI
+
+Deduplicates snippets and uses Gemma 3 4B to extract a structured JSON list of
 confirmed missing key players.
 
 Replaces the legacy Twitter/X integration with 100% free data sources.
@@ -12,6 +15,7 @@ import asyncio
 import logging
 from typing import Any, Dict, List
 
+from src.core.sport_mapping import normalize_team
 from src.data.redis_cache import cache
 
 log = logging.getLogger(__name__)
@@ -27,8 +31,9 @@ async def get_match_injuries_async(
 ) -> Dict[str, Any]:
     """Aggregate injury intelligence for a match from all sources.
 
-    Calls API-Sports and Rotowire RSS in parallel, merges text snippets,
-    and passes them through Gemma 3 4B for structured extraction.
+    Calls API-Sports and MultiNewsFetcher (RSS → GNews → NewsData → NewsAPI)
+    in parallel, merges text snippets, and passes them through Gemma 3 4B
+    for structured extraction.
 
     Parameters
     ----------
@@ -53,21 +58,24 @@ async def get_match_injuries_async(
 
     team_names = [home_team, away_team]
 
-    # Collect from both sources in parallel
+    # Collect from both sources in parallel:
+    #   - API-Sports: structured injury data (most reliable)
+    #   - MultiNews:  cascading RSS → GNews → NewsData → NewsAPI
+    #     (already includes Rotowire RSS as its first tier, no separate RSS call needed)
     api_sports_task = _fetch_apisports(home_team, away_team, sport, event_date)
-    rss_task = _fetch_rss(sport, team_names)
+    multi_news_task = _fetch_multi_news(home_team, away_team)
 
-    api_results, rss_results = await asyncio.gather(
-        api_sports_task, rss_task, return_exceptions=True
+    api_results, multi_results = await asyncio.gather(
+        api_sports_task, multi_news_task, return_exceptions=True
     )
 
     # Safely unpack results (exceptions become empty lists)
     if isinstance(api_results, BaseException):
         log.warning("API-Sports aggregation failed: %s", api_results)
         api_results = []
-    if isinstance(rss_results, BaseException):
-        log.warning("RSS aggregation failed: %s", rss_results)
-        rss_results = []
+    if isinstance(multi_results, BaseException):
+        log.warning("MultiNews aggregation failed: %s", multi_results)
+        multi_results = []
 
     # Build combined text dump for LLM
     snippets: List[str] = []
@@ -81,11 +89,13 @@ async def get_match_injuries_async(
                 f"[API-Sports] {inj.get('player', '?')} ({inj.get('team', '?')}): {inj.get('status', '?')}"
             )
 
-    # RSS results
-    if rss_results:
-        sources_used.append("rotowire-rss")
-        for item in rss_results:
-            snippets.append(f"[Rotowire] {item.get('title', '')} — {item.get('summary', '')[:200]}")
+    # MultiNews results (Rotowire RSS + GNews / NewsData / NewsAPI cascade)
+    if multi_results:
+        news_sources = sorted({a.get("source", "unknown") for a in multi_results})
+        sources_used.extend(f"news-{s}" for s in news_sources)
+        for item in multi_results:
+            src = item.get("source_name") or item.get("source", "news").capitalize()
+            snippets.append(f"[{src}] {item.get('title', '')} — {item.get('summary', '')[:200]}")
 
     # If no data from any source, return empty
     if not snippets:
@@ -118,11 +128,19 @@ async def _fetch_apisports(
     return await ap.get_injuries_for_event_async(home, away, sport, event_date)
 
 
-async def _fetch_rss(sport: str, team_names: List[str]) -> List[Dict[str, str]]:
-    """Fetch from Rotowire RSS (sync, run in thread)."""
-    from src.integrations.rss_fetcher import RSSFetcher
-    rss = RSSFetcher()
-    return await asyncio.to_thread(rss.fetch_injury_news, sport, team_names, 24)
+async def _fetch_multi_news(home: str, away: str) -> List[Dict[str, Any]]:
+    """Fetch injury news via MultiNewsFetcher (Rotowire RSS → GNews → NewsData → NewsAPI).
+
+    Searches for "{home} vs {away} injury" with cascading fallback.
+    Starts with free RSS, escalates to paid APIs only if min_articles not met.
+    """
+    from src.integrations.multi_news_fetcher import MultiNewsFetcher
+    try:
+        fetcher = MultiNewsFetcher(min_articles=3, max_articles=10)
+        return await fetcher.search_async(f"{home} vs {away} injury")
+    except Exception as exc:
+        log.debug("MultiNews injury fetch failed: %s", exc)
+        return []
 
 
 async def _extract_with_llm(
@@ -139,7 +157,7 @@ async def _extract_with_llm(
         combined_text = "\n".join(snippets[:30])  # cap at 30 snippets
         example_json = (
             '{"injuries": [{"player": "LeBron James", '
-            f'"team": "{home}", "status": "Out"}}]}}'
+            f'"team": "{home}", "status": "Out"' + '}]}'
         )
         prompt = (
             "Extract critical injury news from the <text>. "
@@ -183,9 +201,10 @@ def get_injury_impact_score(
     Returns a float: 0.0 (no injuries) to -1.0 (severe: 3+ key players out).
     Used to penalize model probability / EV for the affected team.
     """
+    norm_team = normalize_team(team)
     team_injuries = [
         inj for inj in injuries
-        if inj.get("team", "").lower() == team.lower()
+        if normalize_team(inj.get("team", "")) == norm_team
     ]
 
     if not team_injuries:

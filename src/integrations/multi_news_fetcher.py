@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from src.core.settings import settings
@@ -33,12 +34,12 @@ SOURCE_CONFIDENCE: Dict[str, float] = {
     "newsapi": 0.75,
 }
 
-# Per-source rate limits (requests per hour)
+# Per-source rate limits (requests per HOUR, derived from daily quotas)
 _SOURCE_BUDGET: Dict[str, int] = {
-    "rotowire": 120,   # RSS, generous
-    "gnews": 100,       # free tier: 100/day, be conservative
-    "newsdata": 200,    # free tier: 200/day
-    "newsapi": 100,     # free tier: 100/day
+    "rotowire": 120,    # RSS, no API quota
+    "gnews": 4,          # free tier: 100/day → ~4/hour
+    "newsdata": 8,       # free tier: 200/day → ~8/hour
+    "newsapi": 4,        # free tier: 100/day → ~4/hour
 }
 
 _CACHE_TTL_SECONDS = 60 * 60  # 60 min default
@@ -55,9 +56,20 @@ def _url_hash(url: str) -> str:
     return hashlib.md5((url or "").strip().encode("utf-8")).hexdigest()[:16]
 
 
+def _get_ratelimit_key(source: str) -> str:
+    """Generate an hourly-bucketed rate-limit key.
+
+    Returns e.g. ``"news_ratelimit:gnews:2026-03-03_18"`` so each hour
+    gets its own counter.  Even if ``cache.set()`` resets the TTL, the
+    key naturally rotates every hour — no "leaky TTL" lockout.
+    """
+    current_hour = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H")
+    return f"news_ratelimit:{source}:{current_hour}"
+
+
 def _check_rate_limit(source: str) -> bool:
     """Check if source is within its hourly request budget."""
-    key = f"news_ratelimit:{source}"
+    key = _get_ratelimit_key(source)
     count_str = cache.get(key)
     if count_str is None:
         return True
@@ -69,13 +81,14 @@ def _check_rate_limit(source: str) -> bool:
 
 def _increment_rate_limit(source: str) -> None:
     """Increment the hourly request counter for a source."""
-    key = f"news_ratelimit:{source}"
+    key = _get_ratelimit_key(source)
     count_str = cache.get(key)
     try:
         count = int(count_str) + 1 if count_str else 1
     except (ValueError, TypeError):
         count = 1
-    cache.set(key, str(count), ttl_seconds=3600)
+    # TTL still set so old hour-buckets get cleaned up automatically
+    cache.set(key, str(count), ttl_seconds=7200)
 
 
 class GNewsFetcher(AsyncBaseFetcher):
@@ -305,10 +318,10 @@ class MultiNewsFetcher:
         return _safe_sync_run(self.search_async(query, language))
 
     def get_source_health(self) -> Dict[str, Dict[str, Any]]:
-        """Return rate limit status for each source."""
+        """Return rate limit status for each source (current hour bucket)."""
         health: Dict[str, Dict[str, Any]] = {}
         for source, budget in _SOURCE_BUDGET.items():
-            key = f"news_ratelimit:{source}"
+            key = _get_ratelimit_key(source)
             count_str = cache.get(key)
             used = int(count_str) if count_str else 0
             health[source] = {

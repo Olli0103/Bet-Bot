@@ -19,6 +19,7 @@ from src.core.h2h_tracker import get_h2h_features
 from src.core.poisson_model import PoissonSoccerModel
 from src.core.pricing_model import QuantPricingModel
 from src.core.settings import settings
+from src.core.sport_mapping import normalize_team
 from src.core.volatility_tracker import get_volatility_features
 
 log = logging.getLogger(__name__)
@@ -79,11 +80,13 @@ class AnalystAgent:
             injury_details = inj_result.get("injuries", [])
 
             # Count injuries per team for feature engineering
+            norm_home = normalize_team(home)
+            norm_away = normalize_team(away)
             for inj in injury_details:
-                team = (inj.get("team") or "").lower()
-                if team and (home.lower() in team or team in home.lower()):
+                inj_team = normalize_team(inj.get("team") or "")
+                if inj_team and inj_team == norm_home:
                     inj_home += 1
-                elif team and (away.lower() in team or team in away.lower()):
+                elif inj_team and inj_team == norm_away:
                     inj_away += 1
 
             # Compute impact scores for EV penalty

@@ -49,7 +49,7 @@ class OllamaSentimentClient:
             "options": {"temperature": 0.0},
         }
 
-        with httpx.Client(timeout=90) as client:
+        with httpx.Client(timeout=30) as client:
             r = client.post(f"{self.base_url}/api/generate", json=payload)
         r.raise_for_status()
         data = r.json()
@@ -77,7 +77,7 @@ class OllamaSentimentClient:
             "options": {"temperature": 0.0},
         }
 
-        with httpx.Client(timeout=90) as client:
+        with httpx.Client(timeout=30) as client:
             r = client.post(f"{self.base_url}/api/generate", json=payload)
         r.raise_for_status()
         return (r.json().get("response") or "").strip()
@@ -98,7 +98,7 @@ class OllamaSentimentClient:
             "options": {"temperature": 0.0},
         }
 
-        with httpx.Client(timeout=90) as client:
+        with httpx.Client(timeout=30) as client:
             r = client.post(f"{self.base_url}/api/generate", json=payload)
         r.raise_for_status()
         raw = _strip_markdown_json(r.json().get("response") or "{}")

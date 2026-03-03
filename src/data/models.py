@@ -26,6 +26,9 @@ class PlacedBet(Base):
     """Tracks every bet (real, virtual, and historical import)."""
 
     __tablename__ = "placed_bets"
+    __table_args__ = (
+        UniqueConstraint("event_id", "selection", "market", name="uq_event_selection_market"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     event_id = Column(String(128), nullable=False, index=True)
