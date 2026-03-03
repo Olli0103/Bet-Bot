@@ -562,48 +562,65 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # --- Agent alert: Ask Analyst for deep dive ---
+    # --- Agent alert: Deep Dive (show cached analysis + LLM reasoning) ---
     if data.startswith("agent_analyze:"):
         alert_id = data.split(":", 1)[1]
         alert_data = cache.get_json(f"agent_alert:{alert_id}")
         if not alert_data:
             await q.edit_message_text("Alert abgelaufen.")
             return
-        await q.edit_message_text("🔍 Analyst wird befragt...")
+        await q.edit_message_text("🔍 Deep Dive wird geladen...")
         try:
-            from src.agents.analyst_agent import AnalystAgent
-            analyst = AnalystAgent()
-            analysis = await analyst.analyze_event(
-                event_id=alert_data.get("event_id", ""),
-                sport=alert_data.get("sport", ""),
-                home=alert_data.get("home", ""),
-                away=alert_data.get("away", ""),
-                selection=alert_data.get("selection", ""),
-                target_odds=float(alert_data.get("target_odds", 2.0)),
-                sharp_odds=float(alert_data.get("sharp_odds", 2.0)),
-                sharp_market={alert_data.get("selection", ""): float(alert_data.get("sharp_odds", 2.0))},
-                trigger="user_deepdive",
-            )
-            reasoning = await analyst.reason_with_llm(analysis) or ""
-            model_p = float(analysis.get("model_probability", 0))
-            ev = float(analysis.get("expected_value", 0))
+            # Use the CACHED analysis data directly — no re-running the analyst.
+            # This guarantees the Deep Dive shows the exact same numbers as the
+            # alert card (model_p, EV, etc.), fixing the data mismatch bug.
+            model_p = float(alert_data.get("model_probability", 0))
+            ev = float(alert_data.get("expected_value", 0))
             badge = _calibration_badge(model_p)
+            elo = alert_data.get("elo", {})
+            form = alert_data.get("form", {})
+            sentiment = alert_data.get("sentiment", {})
+            injuries = alert_data.get("injuries", {})
+            poisson_prob = alert_data.get("poisson_prob")
+            public_bias = float(alert_data.get("public_bias", 0))
+            momentum = float(alert_data.get("market_momentum", 0))
+            trigger = alert_data.get("trigger", "")
+
+            # Format poisson display
+            poisson_display = f"{poisson_prob:.0%}" if poisson_prob is not None else "n/a"
+
             msg = (
                 f"🔬 Deep Dive | {alert_data.get('home', '')} vs {alert_data.get('away', '')}\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"Tipp: {alert_data.get('selection', '')}\n"
+                f"Quote: {float(alert_data.get('target_odds', 0)):.2f}\n"
                 f"Modell: {_progress_bar(model_p)} {badge}\n"
                 f"EV: {ev:+.4f}\n"
-                f"Elo: {analysis.get('elo', {}).get('elo_diff', 0):+.0f}\n"
-                f"Form: H={analysis.get('form', {}).get('home_wr', 0):.0%} "
-                f"A={analysis.get('form', {}).get('away_wr', 0):.0%}\n"
-                f"Poisson: {analysis.get('poisson_prob', 'n/a')}\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"Elo: {elo.get('elo_diff', 0):+.0f}\n"
+                f"Form: H={form.get('home_wr', 0):.0%} A={form.get('away_wr', 0):.0%}\n"
+                f"Sentiment: H={sentiment.get('home', 0):.2f} A={sentiment.get('away', 0):.2f}\n"
+                f"Verletzungen: H={injuries.get('home', 0)} A={injuries.get('away', 0)}\n"
+                f"Poisson: {poisson_display}\n"
+                f"Public Bias: {public_bias:.3f}\n"
+                f"Momentum: {momentum:+.3f}\n"
+                f"Trigger: {trigger}\n"
             )
+
+            # Generate fresh LLM reasoning (lightweight, uses cached data)
+            try:
+                from src.agents.analyst_agent import AnalystAgent
+                analyst = AnalystAgent()
+                reasoning = await analyst.reason_with_llm(alert_data) or ""
+            except Exception:
+                reasoning = ""
+
             if reasoning:
                 msg += f"\n💡 {reasoning}"
-            msg += f"\n\nEmpfehlung: {analysis.get('recommendation', 'SKIP')}"
+            msg += f"\n\nEmpfehlung: {alert_data.get('recommendation', 'SKIP')}"
             await q.message.reply_text(msg)
         except Exception as exc:
-            await q.message.reply_text(f"Analyse fehlgeschlagen: {type(exc).__name__}")
+            await q.message.reply_text(f"Deep Dive fehlgeschlagen: {type(exc).__name__}")
         return
 
     # --- Agent alert: Ghost Bet ---

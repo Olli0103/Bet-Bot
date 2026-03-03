@@ -149,7 +149,13 @@ class ExecutionerAgent:
         return result
 
     def _cache_alert(self, analysis: Dict[str, Any], stake: float) -> str:
-        """Cache alert data and return a short ID for inline button callbacks."""
+        """Cache alert data and return a short ID for inline button callbacks.
+
+        Caches the FULL analysis result so that Deep Dive can display the exact
+        same data without re-running the analyst (which caused data mismatches
+        when inputs like sharp_odds were lost).
+        """
+        # Core identification + inputs for potential re-analysis
         payload = {
             "event_id": str(analysis.get("event_id", "")),
             "sport": str(analysis.get("sport", "")),
@@ -158,12 +164,23 @@ class ExecutionerAgent:
             "selection": str(analysis.get("selection", "")),
             "target_odds": float(analysis.get("bookmaker_odds", 0)),
             "sharp_odds": float(analysis.get("sharp_odds", 0)),
-            "model_probability": float(analysis.get("model_probability", 0)),
-            "expected_value": float(analysis.get("expected_value", 0)),
+            "sharp_market": analysis.get("sharp_market", {}),
+            "market_momentum": float(analysis.get("market_momentum", 0)),
             "trigger": str(analysis.get("trigger", "")),
             "stake": stake,
+            # Full analysis results (so Deep Dive shows identical data)
+            "model_probability": float(analysis.get("model_probability", 0)),
+            "expected_value": float(analysis.get("expected_value", 0)),
+            "recommendation": str(analysis.get("recommendation", "SKIP")),
+            "sentiment": analysis.get("sentiment", {}),
+            "injuries": analysis.get("injuries", {}),
+            "injury_details": analysis.get("injury_details", []),
+            "form": analysis.get("form", {}),
+            "elo": analysis.get("elo", {}),
+            "poisson_prob": analysis.get("poisson_prob"),
+            "public_bias": float(analysis.get("public_bias", 0)),
         }
-        raw = json.dumps(payload, sort_keys=True)
+        raw = json.dumps(payload, sort_keys=True, default=str)
         alert_id = hashlib.md5(raw.encode()).hexdigest()[:12]
         cache.set_json(f"agent_alert:{alert_id}", payload, ttl_seconds=6 * 3600)
         return alert_id

@@ -229,6 +229,10 @@ class AnalystAgent:
             "elo": elo_feats,
             "poisson_prob": poisson_prob,
             "public_bias": sel_bias,
+            # Preserve input parameters so downstream (cache, Deep Dive) can
+            # reproduce identical results without re-guessing inputs.
+            "sharp_odds": sharp_odds,
+            "sharp_market": sharp_market,
             "market_momentum": market_momentum,
             "bookmaker_odds": target_odds,
             "recommendation": "BET" if ev > ev_threshold else "SKIP",
