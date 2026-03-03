@@ -83,13 +83,25 @@ for prefix in ("basketball_",):
 for prefix in ("tennis_",):
     for suffix in ("atp", "wta", "atp_french_open", "atp_wimbledon", "atp_us_open", "atp_australian_open"):
         SPORT_GROUPS[f"{prefix}{suffix}"] = "tennis"
+for prefix in ("americanfootball_",):
+    for suffix in ("nfl", "ncaaf"):
+        SPORT_GROUPS[f"{prefix}{suffix}"] = "americanfootball"
+for prefix in ("icehockey_",):
+    for suffix in ("nhl",):
+        SPORT_GROUPS[f"{prefix}{suffix}"] = "icehockey"
 
 
 def _get_sport_group(sport_key: str) -> str:
     """Map a sport key to its group (soccer, basketball, tennis, or 'general')."""
     if sport_key in SPORT_GROUPS:
         return SPORT_GROUPS[sport_key]
-    for prefix, group in [("soccer", "soccer"), ("basketball", "basketball"), ("tennis", "tennis")]:
+    for prefix, group in [
+        ("soccer", "soccer"), ("football", "soccer"),
+        ("basketball", "basketball"),
+        ("tennis", "tennis"),
+        ("americanfootball", "americanfootball"),
+        ("icehockey", "icehockey"),
+    ]:
         if sport_key.startswith(prefix):
             return group
     return "general"
@@ -105,6 +117,13 @@ def _clean_frame(df: pd.DataFrame, feature_list: List[str]) -> pd.DataFrame:
         if c not in out.columns:
             out[c] = 0.0
     out[feature_list] = out[feature_list].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+
+    # Derive sharp_implied_prob from odds when it has near-zero variance
+    # (common for raw imported datasets that lack engineered columns).
+    if "sharp_implied_prob" in feature_list and "odds" in out.columns:
+        if float(out["sharp_implied_prob"].var()) < EPS:
+            valid_odds = out["odds"].where(out["odds"] > 1.0)
+            out["sharp_implied_prob"] = (1.0 / valid_odds).clip(0.0, 1.0).fillna(0.0)
 
     # clamp outliers
     if "sentiment_delta" in out.columns:
@@ -330,7 +349,7 @@ def auto_train_all_models(min_samples: int = 200) -> str:
     if "sport" in df.columns:
         df["sport_group"] = df["sport"].apply(_get_sport_group)
 
-        for group in ["soccer", "basketball", "tennis"]:
+        for group in ["soccer", "basketball", "tennis", "americanfootball", "icehockey"]:
             subset = df[df["sport_group"] == group]
             if len(subset) < min_samples:
                 results.append(f"{group}: skipped ({len(subset)} < {min_samples})")
