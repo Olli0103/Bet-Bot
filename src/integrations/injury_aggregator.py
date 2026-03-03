@@ -89,11 +89,13 @@ async def get_match_injuries_async(
                 f"[API-Sports] {inj.get('player', '?')} ({inj.get('team', '?')}): {inj.get('status', '?')}"
             )
 
-    # RSS results
+    # Multi-source news results (RSS + cascading fallbacks)
     if rss_results:
-        sources_used.append("rotowire-rss")
+        news_sources = {item.get("source", "unknown") for item in rss_results}
+        sources_used.extend(f"news-{s}" for s in sorted(news_sources))
         for item in rss_results:
-            snippets.append(f"[Rotowire] {item.get('title', '')} — {item.get('summary', '')[:200]}")
+            src_label = item.get("source", "news").capitalize()
+            snippets.append(f"[{src_label}] {item.get('title', '')} — {item.get('summary', '')[:200]}")
 
     # MultiNews results (GNews / NewsData / NewsAPI cascade)
     if multi_results:
@@ -134,10 +136,27 @@ async def _fetch_apisports(
 
 
 async def _fetch_rss(sport: str, team_names: List[str]) -> List[Dict[str, str]]:
-    """Fetch from Rotowire RSS (sync, run in thread)."""
-    from src.integrations.rss_fetcher import RSSFetcher
-    rss = RSSFetcher()
-    return await asyncio.to_thread(rss.fetch_injury_news, sport, team_names, 24)
+    """Fetch injury news via MultiNewsFetcher (cascading: RSS → GNews → NewsData → NewsAPI).
+
+    Uses the full cascading fallback pipeline instead of only Rotowire RSS,
+    so injury intelligence benefits from all available sources.
+    """
+    from src.integrations.multi_news_fetcher import MultiNewsFetcher
+
+    fetcher = MultiNewsFetcher(min_articles=3, max_articles=15)
+    query = " ".join(team_names) + f" {sport} injury news"
+    results = await fetcher.search_async(query)
+
+    # Normalize MultiNewsFetcher output to the format expected by the aggregator
+    normalized: List[Dict[str, str]] = []
+    for article in results:
+        normalized.append({
+            "title": article.get("title", ""),
+            "summary": article.get("summary", "")[:300],
+            "url": article.get("url", ""),
+            "source": article.get("source", "unknown"),
+        })
+    return normalized
 
 
 async def _fetch_multi_news(home: str, away: str) -> List[Dict[str, Any]]:

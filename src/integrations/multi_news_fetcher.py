@@ -87,7 +87,8 @@ def _increment_rate_limit(source: str) -> None:
         count = int(count_str) + 1 if count_str else 1
     except (ValueError, TypeError):
         count = 1
-    cache.set(key, str(count), ttl_seconds=3600)
+    # TTL still set so old hour-buckets get cleaned up automatically
+    cache.set(key, str(count), ttl_seconds=7200)
 
 
 class GNewsFetcher(AsyncBaseFetcher):
