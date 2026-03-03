@@ -139,9 +139,16 @@ async def _extract_with_llm(
         combined_text = "\n".join(snippets[:30])  # cap at 30 snippets
         prompt = (
             "Extract only critical injury news for the match "
-            f"{home} vs {away} from the provided text. "
+            f"{home} vs {away} from the provided text.\n"
+            "Note: Teams may appear as abbreviations or nicknames "
+            "(e.g. 'Man Utd' for 'Manchester United', 'LAL' for "
+            "'Los Angeles Lakers', 'BVB' for 'Borussia Dortmund', "
+            "'Spurs' for 'Tottenham Hotspur'). "
+            "Use smart context matching to resolve aliases.\n"
             "Answer with a JSON object containing a single key 'injuries' "
             "whose value is a list of objects with keys: player, team, status. "
+            "For 'team', always use the FULL official team name from the "
+            f"match context ({home} or {away}), not the abbreviation.\n"
             "Status must be one of: Out, Doubtful, Questionable, Day-to-Day. "
             "If no missing players are found, return {\"injuries\": []}.\n\n"
             f"Text:\n{combined_text}"
