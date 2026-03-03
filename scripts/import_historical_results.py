@@ -362,6 +362,16 @@ def import_tennis(folder: Path, limit_files: int = 0) -> int:
                 if c in df.columns:
                     df[c] = pd.to_numeric(df[c], errors="coerce")
 
+            # Filter out incomplete matches (Retired, Walkover, Default,
+            # Disqualified) to prevent ML data poisoning.  Only rows
+            # with Comment == "Completed" represent true match outcomes.
+            if "Comment" in df.columns:
+                before = len(df)
+                df = df[df["Comment"].astype(str).str.strip().str.lower() == "completed"]
+                dropped = before - len(df)
+                if dropped > 0:
+                    log.info("Tennis %s: filtered %d incomplete matches (Retired/Walkover/etc.)", p.name, dropped)
+
             # Detect tour from filename
             stem_lower = p.stem.lower()
             if "wta" in stem_lower or "women" in stem_lower:

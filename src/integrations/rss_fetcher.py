@@ -2,10 +2,16 @@
 
 Fetches sport-specific RSS feeds and filters for injury-related entries
 published within the last 24 hours. Zero API cost.
+
+Cache strategy (prevents IP bans):
+  - Each Rotowire feed URL is fetched AT MOST once per 30 minutes.
+  - Redis stores the parsed entries; a per-feed threading.Lock prevents
+    concurrent cache-miss stampedes (e.g. 20 NBA games queried at once).
 """
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List
 
@@ -38,7 +44,12 @@ INJURY_KEYWORDS = [
     "probable", "game-time decision",
 ]
 
-RSS_CACHE_TTL = 15 * 60  # 15 minutes
+RSS_CACHE_TTL = 30 * 60  # 30 minutes — prevents Rotowire IP bans
+
+# Per-feed lock: ensures only ONE thread fetches a given feed URL at a time.
+# Without this, 20 concurrent NBA queries that all miss the Redis cache
+# would fire 20 parallel HTTP requests to the same Rotowire URL.
+_feed_locks: Dict[str, threading.Lock] = {k: threading.Lock() for k in ROTOWIRE_FEEDS}
 
 
 def _sport_key_to_feed(sport_key: str) -> str:
@@ -119,16 +130,25 @@ class RSSFetcher:
         if not feed_url:
             return []
 
-        # Check cache first
+        # Check Redis cache first (fast path — no lock needed)
         cache_key = f"rss:rotowire:{feed_key}"
         cached_entries = cache.get_json(cache_key)
 
         if cached_entries is None:
-            cached_entries = self._fetch_feed(feed_url)
-            if cached_entries is not None:
-                cache.set_json(cache_key, cached_entries, RSS_CACHE_TTL)
-            else:
-                cached_entries = []
+            # Slow path: acquire per-feed lock so only ONE thread fetches
+            # the URL.  All other callers block here and then read from
+            # Redis once the winner populates the cache.
+            lock = _feed_locks.get(feed_key) or threading.Lock()
+            with lock:
+                # Double-check after acquiring lock (another thread may
+                # have populated the cache while we waited).
+                cached_entries = cache.get_json(cache_key)
+                if cached_entries is None:
+                    cached_entries = self._fetch_feed(feed_url)
+                    if cached_entries is not None:
+                        cache.set_json(cache_key, cached_entries, RSS_CACHE_TTL)
+                    else:
+                        cached_entries = []
 
         # Filter entries
         cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
