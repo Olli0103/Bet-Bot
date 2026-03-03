@@ -271,8 +271,75 @@ async def menu_value_bets(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Combo Suggestions: "10/20/30 Kombis"
 # ---------------------------------------------------------------------------
 
+SPORT_EMOJI = {
+    "soccer": "⚽", "football": "⚽",
+    "basketball": "🏀",
+    "americanfootball": "🏈",
+    "icehockey": "🏒",
+    "tennis": "🎾",
+}
+
+
+def _sport_emoji(sport_key: str) -> str:
+    """Map sport key to emoji."""
+    for prefix, emoji in SPORT_EMOJI.items():
+        if sport_key.startswith(prefix):
+            return emoji
+    return "🎯"
+
+
+def _league_short(sport_key: str) -> str:
+    """Extract short league label from sport key."""
+    try:
+        from src.core.sport_mapping import api_key_to_display
+        label = api_key_to_display(sport_key)
+        if label != sport_key:
+            return label
+    except Exception:
+        pass
+    parts = sport_key.split("_", 1)
+    return parts[1].replace("_", " ").upper() if len(parts) > 1 else sport_key.upper()
+
+
+def _format_leg_line(i: int, leg: dict) -> str:
+    """Format a single combo leg with FULL context. Never output naked selections."""
+    sport_key = str(leg.get("sport", ""))
+    emoji = _sport_emoji(sport_key)
+    league = _league_short(sport_key)
+
+    home = leg.get("home_team", "")
+    away = leg.get("away_team", "")
+    selection = str(leg.get("selection", "?"))
+    market = str(leg.get("market", leg.get("market_type", "")))
+    odds = float(leg.get("odds", 0))
+    prob = float(leg.get("probability", 0))
+
+    # Build event string
+    if home and away:
+        event = f"{home} vs {away}"
+    else:
+        event = ""
+
+    # Build market + selection string
+    market_type = str(leg.get("market_type", "h2h"))
+    if market_type == "h2h":
+        sel_display = selection
+    elif market_type in ("totals", "spreads"):
+        sel_display = f"{market} {selection}" if market != selection else selection
+    elif market_type in ("double_chance", "draw_no_bet"):
+        sel_display = selection
+    else:
+        sel_display = f"{market} {selection}" if market else selection
+
+    # Validation: mark incomplete legs
+    if not event and not home:
+        sel_display = f"⚠ {sel_display} (Event?)"
+
+    return f" {i+1:2d}. {emoji} {league} | {event} | {sel_display} | @{odds:.2f} | {prob:.0%}"
+
+
 def _format_combo_card(combo_data: dict) -> str:
-    """Format a combo as a rich card with legs table and progress bar."""
+    """Format a combo as a rich card with FULL context per leg."""
     size = combo_data.get("size", 0)
     stake = float(combo_data.get("stake", 1.00))
     combined_odds = float(combo_data.get("combined_odds", 0))
@@ -283,26 +350,36 @@ def _format_combo_card(combo_data: dict) -> str:
     potential_payout = round(stake * combined_odds, 2)
     is_playable = ev > 0
 
-    legs_lines = []
-    for i, leg in enumerate(legs):
-        sel = str(leg.get("selection", "?"))[:30]
-        odds = float(leg.get("odds", 0))
-        prob = float(leg.get("probability", 0))
-        legs_lines.append(f" {i+1:2d}. {sel:<30s} {odds:5.2f}  {prob:.0%}")
+    # Filter: reject legs without event context, mark as incomplete
+    complete_legs = []
+    incomplete_count = 0
+    for leg in legs:
+        if leg.get("home_team") or leg.get("away_team"):
+            complete_legs.append(leg)
+        else:
+            incomplete_count += 1
+
+    legs_lines = [_format_leg_line(i, leg) for i, leg in enumerate(complete_legs)]
     legs_txt = "\n".join(legs_lines)
 
-    tax_badge = " 🏷️ Steuerfrei" if len(legs) >= 3 else ""
+    tax_badge = " 🏷️ Steuerfrei" if len(complete_legs) >= 3 else ""
+    incomplete_note = f"\n⚠️ {incomplete_count} Legs ohne Event-Kontext verworfen" if incomplete_count > 0 else ""
+
+    risk_note = ""
+    if combined_prob < 0.01:
+        risk_note = "\n⚠️ Sehr geringe Trefferwahrscheinlichkeit — Lotto-Charakter!"
+    elif combined_prob < 0.05:
+        risk_note = "\n⚠️ Geringe Trefferwahrscheinlichkeit — hohes Risiko"
 
     return (
         f"🧩 KOMBI {size}er | Lotto{tax_badge}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"Status: {'✅ spielbar' if is_playable else '⚠️ watchlist'}\n"
-        f"Gesamtquote: {combined_odds:.2f} ({len(legs)} Legs)\n"
+        f"Gesamtquote: {combined_odds:.2f} ({len(complete_legs)} Legs)\n"
         f"Wahrscheinlichkeit: {_progress_bar(combined_prob)}\n"
-        f"💰 Einsatz: {stake:.2f} EUR\n"
-        f"💎 Möglicher Gewinn: {potential_payout:.2f} EUR\n"
-        f"EV: {ev:+.4f}\n"
-        f"\nTipps:\n{legs_txt}"
+        f"💰 Einsatz: {stake:.2f} EUR → 💎 {potential_payout:.2f} EUR\n"
+        f"EV: {ev:+.4f}{risk_note}\n"
+        f"\nTipps:\n{legs_txt}{incomplete_note}"
     )
 
 

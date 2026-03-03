@@ -494,6 +494,9 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
                     "probability": model_p,
                     "sport": sport,
                     "market_type": "h2h",
+                    "home_team": home,
+                    "away_team": away,
+                    "market": "h2h",
                 }
             )
 
@@ -534,6 +537,9 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
                                 "probability": min(0.99, dc_prob),
                                 "sport": sport,
                                 "market_type": "double_chance",
+                                "home_team": home,
+                                "away_team": away,
+                                "market": f"double_chance {dc_code}",
                             })
 
             # Draw No Bet (DNB) — remove draw, redistribute
@@ -568,6 +574,9 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
                                     "probability": min(0.99, dnb_prob),
                                     "sport": sport,
                                     "market_type": "draw_no_bet",
+                                    "home_team": home,
+                                    "away_team": away,
+                                    "market": "draw_no_bet",
                                 })
 
         # --- Process spreads market ---
@@ -615,6 +624,9 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
                         "probability": min(0.99, max(0.01, model_p_sp)),
                         "sport": sport,
                         "market_type": "spreads",
+                        "home_team": home,
+                        "away_team": away,
+                        "market": f"spreads {point_val:+.1f}",
                     })
 
         # --- Process totals market ---
@@ -677,6 +689,9 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
                         "probability": min(0.99, max(0.01, model_p_tot)),
                         "sport": sport,
                         "market_type": "totals",
+                        "home_team": home,
+                        "away_team": away,
+                        "market": f"totals {point_val}",
                     })
 
     # Rank by hit probability (70%) + positive EV (30%), respecting min odds

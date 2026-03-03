@@ -344,8 +344,9 @@ Create a `.env` file in the project root:
 ```env
 # Required
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
-TELEGRAM_CHAT_ID=your_chat_id
-ODDS_API_KEY=your_odds_api_key          # Pro Tier required for /odds-history
+TELEGRAM_CHAT_ID=your_chat_id              # Primary chat (always receives all messages)
+TELEGRAM_CHAT_IDS=id1,id2,id3              # Additional allowed chat IDs (CSV, optional)
+ODDS_API_KEY=your_odds_api_key             # Pro Tier required for /odds-history
 POSTGRES_DSN=postgresql+psycopg://postgres:postgres@localhost:5432/signalbot
 REDIS_URL=redis://localhost:6379/0
 
@@ -369,11 +370,49 @@ ENRICHMENT_ENABLED=true
 ENRICHMENT_TIMEOUT=30
 ```
 
-### Start the Bot
+### Running Modes
+
+The bot supports two deployment modes:
+
+#### Mode 1: Monolithic (simple, backward-compatible)
+
+Single process runs both Telegram I/O and the Core pipeline:
 
 ```bash
 python -m src.bot.app
 ```
+
+#### Mode 2: Split Architecture (recommended for production)
+
+Two independent workers connected via Redis queues. Telegram failures
+cannot crash or block the Core pipeline:
+
+```bash
+# Terminal 1: Core Worker (signals, agents, ML, grading)
+python -m src.bot.core_worker
+
+# Terminal 2: Telegram Worker (UI, polling, message delivery)
+python -m src.bot.telegram_worker
+```
+
+Benefits:
+- Core keeps running if Telegram is down/blocked
+- Telegram worker can restart without losing signals
+- Redis outbox queue buffers messages during Telegram outages
+- Independent health monitoring per worker
+- Circuit breaker on Telegram sends (5 failures -> 60s cooldown)
+
+### Multi-Chat-ID Routing
+
+| ENV Variable | Purpose |
+|---|---|
+| `TELEGRAM_CHAT_ID` | Primary chat ID (receives everything) |
+| `TELEGRAM_CHAT_IDS` | CSV of additional allowed IDs |
+
+Routing rules:
+- **Broadcast events** (daily push, agent alerts, combos) -> all IDs
+- **Primary-only events** (diagnostics, retrain, API health) -> primary only
+- **Incoming messages** are only accepted from allowed IDs
 
 ### macOS LaunchAgent (Auto-Start)
 
@@ -402,9 +441,40 @@ python scripts/backfill_form_features.py
 
 ## Architecture
 
+### Split Worker Architecture
+
 ```
-Telegram Bot (UI)
-      |
+┌─────────────────────────────────────────────┐
+│ CORE WORKER (python -m src.bot.core_worker) │
+│                                             │
+│  Orchestrator (adaptive 60s / 5min)         │
+│    ├── Scout Agent    → odds, steam, RSS    │
+│    ├── Analyst Agent  → ML, enrichment      │
+│    ├── Executioner    → Kelly, circuits      │
+│    └── Performance    → ROI, self-eval      │
+│                                             │
+│  Scheduled: fetch, grading, retrain, health │
+│                                             │
+│  Writes → Redis Outbox Queue                │
+│  Reads  ← Redis Inbox Queue                 │
+└──────────────────┬──────────────────────────┘
+                   │ Redis
+┌──────────────────┴──────────────────────────┐
+│ TELEGRAM WORKER (python -m src.bot.telegram_worker) │
+│                                             │
+│  Polling / Webhook                          │
+│  Commands, Buttons, NLP Intent Router       │
+│  Multi-Chat-ID Broadcast + Access Control   │
+│  Circuit Breaker (retry + backoff)          │
+│                                             │
+│  Reads  ← Redis Outbox Queue               │
+│  Writes → Redis Inbox Queue                 │
+└─────────────────────────────────────────────┘
+```
+
+### Pipeline Overview
+
+```
 Agent Orchestrator (adaptive: 60s pre-kickoff / 5min normal)
       |
   Scout Agent        -->  odds monitoring, steam move detection, injury aggregation
@@ -645,7 +715,8 @@ All settings are loaded from environment variables (`.env` file) via `src/core/s
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
 | `TELEGRAM_BOT_TOKEN` | -- | Yes | Telegram Bot API token |
-| `TELEGRAM_CHAT_ID` | -- | Yes | Target Telegram chat ID |
+| `TELEGRAM_CHAT_ID` | -- | Yes | Primary Telegram chat ID |
+| `TELEGRAM_CHAT_IDS` | -- | No | CSV of additional allowed chat IDs |
 | `ODDS_API_KEY` | -- | Yes | The-Odds-API key (Pro tier for momentum) |
 | `POSTGRES_DSN` | `postgresql+psycopg://postgres:postgres@localhost:5432/signalbot` | No | PostgreSQL connection string |
 | `REDIS_URL` | `redis://localhost:6379/0` | No | Redis connection URL |
@@ -751,8 +822,13 @@ Bet-Bot/
 │   │   ├── executioner_agent.py        # Circuit breakers & bet execution
 │   │   └── orchestrator.py             # Agent coordination (adaptive polling)
 │   ├── bot/
-│   │   ├── app.py                      # Telegram bot setup & job scheduling
-│   │   └── handlers.py                 # UI handlers, settings dashboard, NLP routing
+│   │   ├── app.py                      # Monolithic entry point (backward compat)
+│   │   ├── core_worker.py              # Core worker (signals, agents, ML — no Telegram)
+│   │   ├── telegram_worker.py          # Telegram worker (UI, polling, outbox consumer)
+│   │   ├── message_queue.py            # Redis-backed outbox/inbox queues
+│   │   ├── chat_router.py              # Multi-chat-ID routing (broadcast/primary/ACL)
+│   │   ├── handlers.py                 # UI handlers, settings dashboard, NLP routing
+│   │   └── __main__.py                 # python -m src.bot entry point
 │   ├── core/
 │   │   ├── backtester.py               # Walk-forward backtesting engine
 │   │   ├── bankroll.py                 # Dynamic bankroll management from DB
@@ -830,6 +906,41 @@ Bet-Bot/
 | Open-Meteo | Free | Weather conditions for outdoor sports |
 | Ollama (local) | -- | Gemma 3 4B for sentiment, reasoning, NLP intents |
 | Rotowire RSS | Free | Player injury/lineup news feeds (NBA/NFL/NHL/Soccer) |
+
+---
+
+## RSS Source Reliability & Fallbacks
+
+**Researched: March 2026**
+
+### Rotowire RSS Feeds
+
+| Sport | URL | Status | Notes |
+|-------|-----|--------|-------|
+| NBA | `rotowire.com/rss/news.htm?sport=nba` | Reliable | Year-round coverage |
+| NFL | `rotowire.com/rss/news.htm?sport=nfl` | Reliable | Sparse during off-season (March-August) |
+| NHL | `rotowire.com/rss/news.htm?sport=nhl` | Reliable | Sparse during off-season (June-September) |
+| Soccer | `rotowire.com/rss/news.htm?sport=soccer` | Reliable | US-centric; EPL/La Liga/Bundesliga coverage |
+
+**Access**: Free RSS 2.0 feeds. No API key required. Must link back to rotowire.com (embedded in feed items).
+
+**Known issues**:
+- May return HTTP 403 if User-Agent looks like a bot scraper. The fetcher uses a browser-like User-Agent.
+- Off-season feeds return few or no entries. This is expected, not an error.
+- Some entries lack `published_parsed`; the parser tries 4 date formats.
+
+**Error handling**:
+- 3 retries with exponential backoff (2s, 4s) per feed
+- 15-second timeout per attempt
+- 30-minute Redis cache (prevents IP bans)
+- Per-feed threading.Lock (prevents stampede on cache miss)
+- Total failure returns empty list (graceful degradation, never crashes Core)
+- Feed health tracked per-sport via `get_feed_health()`
+
+**Fallback alternatives** (if Rotowire becomes unreliable):
+- [RotoBaller](https://www.rotoballer.com/) -- Similar coverage, XML/RSS + JSON feeds
+- [ESPN RSS](https://www.espn.com/espn/rss/) -- NFL/NBA/NHL injury reports
+- [NBC Sports Rotoworld](https://www.nbcsports.com/fantasy/) -- NFL/NBA player news
 
 ---
 
