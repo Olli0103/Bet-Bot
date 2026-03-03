@@ -812,11 +812,18 @@ def fetch_and_build_signals(
                         "market": f"totals {point_val}",
                     })
 
-    # Rank by hit probability (70%) + positive EV (30%), respecting min odds
-    ranked = [s for s in signals if s.expected_value > 0]
+    # Rank: confidence DESC -> EV DESC -> odds ASC
+    # Only include signals that passed the confidence gate (stake > 0)
+    ranked = [s for s in signals if s.expected_value > 0 and s.recommended_stake > 0]
     ranked.sort(
-        key=lambda s: (s.model_probability * 0.7 + min(s.expected_value * 10, 1.0) * 0.3),
+        key=lambda s: (s.confidence, s.expected_value, -s.bookmaker_odds),
         reverse=True,
+    )
+    log.info(
+        "Ranking: %d signals total, %d after EV>0+confidence gate, "
+        "%d rejected by gate",
+        len(signals), len(ranked),
+        sum(1 for s in signals if s.rejected_reason),
     )
     top10 = ranked[:10]
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Dict, List
 
 from src.core.betting_math import (
@@ -9,7 +10,10 @@ from src.core.betting_math import (
     kelly_fraction,
     kelly_stake,
 )
+from src.core.risk_guards import apply_stake_cap, passes_confidence_gate
 from src.models.betting import BetSignal, ComboBet, ComboLeg
+
+log = logging.getLogger(__name__)
 
 
 class BettingEngine:
@@ -29,10 +33,32 @@ class BettingEngine:
         reference_book: str = "pinnacle",
         confidence: float = 1.0,
         tax_rate: float = 0.0,
+        trigger: str = "",
     ) -> BetSignal:
         ev = expected_value(model_probability, bookmaker_odds, tax_rate=tax_rate)
-        kf = kelly_fraction(model_probability, bookmaker_odds, frac=kelly_frac, tax_rate=tax_rate)
-        stake = round(kelly_stake(self.bankroll, kf), 2)
+        kf_raw = kelly_fraction(model_probability, bookmaker_odds, frac=kelly_frac, tax_rate=tax_rate)
+        stake_raw = round(kelly_stake(self.bankroll, kf_raw), 2)
+
+        # --- Confidence gate ---
+        passed, min_conf = passes_confidence_gate(model_probability, sport, market)
+        rejected_reason = ""
+        if not passed:
+            rejected_reason = f"confidence {model_probability:.2f} < gate {min_conf:.2f}"
+            log.debug("Confidence gate blocked: %s %s %s — %s",
+                      sport, event_id, selection, rejected_reason)
+            # Zero out stake so this signal is filtered out as non-playable
+            stake_final = 0.0
+            kf = 0.0
+        else:
+            kf = kf_raw
+            # --- Stake cap ---
+            stake_final, was_capped = apply_stake_cap(
+                stake_raw, self.bankroll, bookmaker_odds, market, selection,
+            )
+            if was_capped:
+                log.debug("Stake capped: %s %s %.2f -> %.2f",
+                          sport, selection, stake_raw, stake_final)
+
         return BetSignal(
             sport=sport,
             event_id=event_id,
@@ -42,10 +68,15 @@ class BettingEngine:
             model_probability=model_probability,
             expected_value=ev,
             kelly_fraction=kf,
-            recommended_stake=stake,
+            recommended_stake=stake_final,
             source_mode=source_mode,
             reference_book=reference_book,
             confidence=confidence,
+            kelly_raw=kf_raw,
+            stake_before_cap=stake_raw,
+            stake_cap_applied=stake_final < stake_raw and stake_final > 0,
+            trigger=trigger,
+            rejected_reason=rejected_reason,
         )
 
     def build_combo(

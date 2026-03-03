@@ -56,5 +56,21 @@ class Settings(BaseModel):
     stats_ingestion_enabled: bool = os.getenv("STATS_INGESTION_ENABLED", "true").lower() == "true"
     stats_ingestion_interval_hours: int = int(os.getenv("STATS_INGESTION_INTERVAL_HOURS", "6"))
 
+    # --- Risk Guards ---
+    # Confidence gates per market type (model_probability minimum to allow a bet)
+    min_confidence_soccer_h2h: float = float(os.getenv("MIN_CONF_SOCCER_H2H", "0.55"))
+    min_confidence_soccer_totals: float = float(os.getenv("MIN_CONF_SOCCER_TOTALS", "0.56"))
+    min_confidence_soccer_spread: float = float(os.getenv("MIN_CONF_SOCCER_SPREAD", "0.56"))
+    min_confidence_tennis: float = float(os.getenv("MIN_CONF_TENNIS", "0.57"))
+    min_confidence_basketball: float = float(os.getenv("MIN_CONF_BASKETBALL", "0.55"))
+    min_confidence_icehockey: float = float(os.getenv("MIN_CONF_ICEHOCKEY", "0.55"))
+    min_confidence_americanfootball: float = float(os.getenv("MIN_CONF_AMERICANFOOTBALL", "0.55"))
+    min_confidence_default: float = float(os.getenv("MIN_CONF_DEFAULT", "0.55"))
+
+    # Stake caps (fraction of bankroll)
+    max_stake_pct: float = float(os.getenv("MAX_STAKE_PCT", "0.015"))        # 1.5%
+    max_stake_longshot_pct: float = float(os.getenv("MAX_STAKE_LONGSHOT_PCT", "0.0075"))  # 0.75%
+    longshot_odds_threshold: float = float(os.getenv("LONGSHOT_ODDS_THRESHOLD", "3.5"))
+
 
 settings = Settings()

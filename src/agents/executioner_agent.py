@@ -85,6 +85,24 @@ class ExecutionerAgent:
             result["reasoning"].append(f"EV {ev:.4f} < min_ev {min_ev:.4f}")
             return result
 
+        # 2b. Confidence gate — hard block regardless of trigger
+        sport = str(analysis.get("sport", ""))
+        market = str(analysis.get("market", "h2h"))
+        trigger = analysis.get("trigger", "")
+
+        from src.core.risk_guards import passes_confidence_gate, apply_stake_cap
+        passed_gate, min_conf = passes_confidence_gate(model_p, sport, market)
+        if not passed_gate:
+            result["reasoning"].append(
+                f"Confidence gate: {model_p:.2f} < {min_conf:.2f} "
+                f"(trigger={trigger} cannot override)"
+            )
+            log.info(
+                "Executioner blocked: %s %s confidence %.2f < gate %.2f (trigger=%s)",
+                sport, analysis.get("selection", ""), model_p, min_conf, trigger,
+            )
+            return result
+
         # 3. Calculate stake with performance-adjusted + calibration-adjusted Kelly
         tax_rate = settings.tipico_tax_rate if not settings.tax_free_mode else 0.0
 
@@ -93,7 +111,6 @@ class ExecutionerAgent:
 
         # Calibration reliability adjustment: if the model over-predicts in
         # this probability bucket, trim the Kelly fraction proportionally.
-        sport = str(analysis.get("sport", ""))
         sport_group = "general"
         if sport.startswith(("soccer", "football")):
             sport_group = "soccer"
@@ -105,17 +122,23 @@ class ExecutionerAgent:
         kelly_mult *= min(1.3, max(0.5, calib_adj))  # clamp to [0.5, 1.3]
 
         # Use reduced Kelly for reactive bets (steam moves incl. totals)
-        trigger = analysis.get("trigger", "")
         frac = 0.15 if trigger in ("steam_move", "totals_steam") else 0.2
         frac *= kelly_mult
 
         # We need bookmaker_odds to compute kelly; extract from features or analysis
         bookmaker_odds = analysis.get("bookmaker_odds", 0)
+        selection = str(analysis.get("selection", ""))
         if bookmaker_odds and bookmaker_odds > 1.0:
             kf = kelly_fraction(model_p, bookmaker_odds, frac=frac, tax_rate=tax_rate)
-            stake = round(kelly_stake(bankroll, kf), 2)
+            stake_raw = round(kelly_stake(bankroll, kf), 2)
         else:
-            stake = round(bankroll * 0.01, 2)  # fallback 1% of bankroll
+            kf = 0.0
+            stake_raw = round(bankroll * 0.01, 2)  # fallback 1% of bankroll
+
+        # Apply stake cap
+        stake, was_capped = apply_stake_cap(
+            stake_raw, bankroll, bookmaker_odds or 2.0, market, selection,
+        )
 
         if stake < 0.50:
             result["reasoning"].append(f"Calculated stake {stake:.2f} < 0.50 minimum")
@@ -123,7 +146,11 @@ class ExecutionerAgent:
 
         result["action"] = "bet"
         result["stake"] = stake
-        result["reasoning"].append(f"EV={ev:.4f}, Kelly frac={frac:.2f}, stake={stake:.2f}")
+        cap_tag = " [CAPPED]" if was_capped else ""
+        result["reasoning"].append(
+            f"EV={ev:.4f}, Kelly frac={frac:.2f}, "
+            f"stake_raw={stake_raw:.2f}, stake={stake:.2f}{cap_tag}"
+        )
 
         # 4. Optionally send Telegram alert
         if bot and chat_id:
