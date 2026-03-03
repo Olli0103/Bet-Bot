@@ -18,10 +18,15 @@ class TestSportGroup:
     def test_tennis(self):
         assert _sport_group("tennis_atp") == "tennis"
 
+    def test_icehockey(self):
+        assert _sport_group("icehockey_nhl") == "icehockey"
+
+    def test_americanfootball(self):
+        assert _sport_group("americanfootball_nfl") == "americanfootball"
+
     def test_unknown_defaults_general(self):
-        assert _sport_group("icehockey_nhl") == "general"
-        assert _sport_group("americanfootball_nfl") == "general"
         assert _sport_group("") == "general"
+        assert _sport_group("cricket_ipl") == "general"
 
 
 class TestLegacyPredict:

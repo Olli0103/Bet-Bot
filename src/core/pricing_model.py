@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -52,6 +51,10 @@ def _sport_group(sport_key: str) -> str:
         return "basketball"
     if sport_key.startswith("tennis"):
         return "tennis"
+    if sport_key.startswith("americanfootball"):
+        return "americanfootball"
+    if sport_key.startswith("icehockey"):
+        return "icehockey"
     return "general"
 
 
@@ -70,7 +73,7 @@ class QuantPricingModel:
             "form_games_l5": 0.0,
             "intercept": 0.0,
         }
-        if os.path.exists(weights_file):
+        if Path(weights_file).exists():
             try:
                 with open(weights_file, "r", encoding="utf-8") as f:
                     loaded = json.load(f)

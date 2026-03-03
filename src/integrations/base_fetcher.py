@@ -35,6 +35,10 @@ class AsyncBaseFetcher:
         self.timeout = timeout
         self.client = httpx.AsyncClient(base_url=self.base_url, headers=self.headers, timeout=self.timeout)
 
+    async def close(self) -> None:
+        """Close the underlying HTTP client to free resources."""
+        await self.client.aclose()
+
     @retry(
         retry=retry_if_exception_type((httpx.HTTPError, APIFetchError)),
         wait=wait_exponential(multiplier=1, min=1, max=30),
@@ -43,7 +47,7 @@ class AsyncBaseFetcher:
     )
     async def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         response = await self.client.get(path.lstrip('/'), params=params)
-        if response.status_code in (429, 500, 502, 503, 504):
+        if response.status_code in (408, 429, 500, 502, 503, 504):
             raise APIFetchError(f"Transient API error {response.status_code} for {path}")
         response.raise_for_status()
         return response.json()

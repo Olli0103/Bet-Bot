@@ -806,8 +806,8 @@ def fetch_and_build_signals(
 
     try:
         auto_place_virtual_bets(top10, features)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("Ghost trading failed: %s", exc)
 
     _progress("done", "Fertig!", 100,
               signals=len(top10), events=stats["events_seen"],

@@ -138,11 +138,32 @@ class AnalystAgent:
         sel_wr = home_wr if is_home else away_wr
         sel_gp = home_gp if is_home else away_gp
 
+        # 7b. Stats-based features (Phase 4)
+        home_snap: Dict[str, Any] = {}
+        away_snap: Dict[str, Any] = {}
+        try:
+            from src.core.stats_ingester import get_event_snapshot
+            home_snap = get_event_snapshot(event_id, home) or {}
+            away_snap = get_event_snapshot(event_id, away) or {}
+        except Exception:
+            pass
+
+        sel_snap = home_snap if is_home else away_snap
+        opp_snap = away_snap if is_home else home_snap
+
+        home_away_split_delta = 0.0
+        if sel_snap.get("home_win_rate") is not None and sel_snap.get("away_win_rate") is not None:
+            home_away_split_delta = (sel_snap["home_win_rate"] - sel_snap["away_win_rate"])
+
+        league_position_delta = 0.0
+        if sel_snap.get("league_position") and opp_snap.get("league_position"):
+            league_position_delta = float(opp_snap["league_position"] - sel_snap["league_position"])
+
         # 8. Public bias detection (Tipico market shading vs sharp)
         bias = public_bias_score(sharp_market, {selection: target_odds})
         sel_bias = bias.get(selection, 0.0)
 
-        # 9. Build features (including market momentum from Pro API)
+        # 9. Build features (including market momentum + Phase 4 stats)
         ml_features = FeatureEngineer.build_core_features(
             target_odds=target_odds,
             sharp_odds=sharp_odds,
@@ -163,6 +184,19 @@ class AnalystAgent:
             poisson_true_prob=poisson_prob,
             public_bias=sel_bias,
             market_momentum=market_momentum,
+            team_attack_strength=sel_snap.get("attack_strength", 1.0),
+            team_defense_strength=sel_snap.get("defense_strength", 1.0),
+            opp_attack_strength=opp_snap.get("attack_strength", 1.0),
+            opp_defense_strength=opp_snap.get("defense_strength", 1.0),
+            form_trend_slope=sel_snap.get("form_trend_slope", 0.0),
+            rest_days=sel_snap.get("rest_days"),
+            schedule_congestion=sel_snap.get("schedule_congestion", 0.0),
+            over25_rate=sel_snap.get("over25_rate", 0.0),
+            btts_rate=sel_snap.get("btts_rate", 0.0),
+            home_away_split_delta=home_away_split_delta,
+            league_position_delta=league_position_delta,
+            goals_scored_avg=sel_snap.get("goals_scored_avg", 0.0),
+            goals_conceded_avg=sel_snap.get("goals_conceded_avg", 0.0),
         )
 
         # 10. Model prediction

@@ -9,9 +9,8 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-import numpy as np
 from sqlalchemy import select, and_
 
 from src.core.settings import settings

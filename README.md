@@ -141,9 +141,11 @@ docker run -d --name redis -p 6379:6379 redis:7-alpine
 
 Default URL: `redis://localhost:6379/0` (override via `REDIS_URL`).
 
-### Schema: `placed_bets` Table
+### Schema
 
-This is the central table. All imports, virtual bets, and live signals write here.
+#### `placed_bets` -- Central bet tracking table
+
+All imports, virtual bets, and live signals write here.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -160,6 +162,7 @@ This is the central table. All imports, virtual bets, and live signals write her
 | `status` | VARCHAR(16) | `open`, `won`, `lost`, `void` |
 | `pnl` | FLOAT | Profit/loss for this bet |
 | `sharp_implied_prob` | FLOAT | Sharp consensus probability |
+| `sharp_vig` | FLOAT | Sharp book overround |
 | `sentiment_delta` | FLOAT | Home - away sentiment |
 | `injury_delta` | FLOAT | Home - away injury impact |
 | `form_winrate_l5` | FLOAT | Last-5 win rate |
@@ -168,6 +171,46 @@ This is the central table. All imports, virtual bets, and live signals write her
 | `notes` | TEXT | Free text |
 | `created_at` | TIMESTAMPTZ | Row creation time |
 | `updated_at` | TIMESTAMPTZ | Last update time |
+
+#### `team_match_stats` -- Per-team per-match statistics
+
+Ingested from TheSportsDB and football-data.org. One row per team per match.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `source_match_id` | VARCHAR(128) | External match ID |
+| `team` / `opponent` | VARCHAR(256) | Team names |
+| `is_home` | BOOLEAN | Whether this team was home |
+| `goals_for` / `goals_against` | INTEGER | Goals scored / conceded |
+| `result` | VARCHAR(4) | W / D / L |
+| `shots`, `possession_pct`, `corners`, etc. | various | Extended stats (nullable) |
+
+#### `event_stats_snapshots` -- Pre-match feature snapshots
+
+Rolling features computed from `team_match_stats` before each event (data leakage prevention).
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `event_id` | VARCHAR(128) | Links to the upcoming event |
+| `team` | VARCHAR(256) | Team name |
+| `attack_strength` / `defense_strength` | FLOAT | Goals vs league average |
+| `form_trend_slope` | FLOAT | Linear regression over recent form |
+| `over25_rate` / `btts_rate` | FLOAT | Historical rates |
+| `rest_days` | INTEGER | Days since last match |
+| `schedule_congestion` | FLOAT | Match density (30-day window) |
+| `league_position` | INTEGER | Current league position |
+
+### Database Migrations
+
+Schema changes are managed via Alembic:
+
+```bash
+# Run pending migrations
+alembic upgrade head
+
+# Create a new migration
+alembic revision -m "description"
+```
 
 If you hit `meta_features column missing` or similar schema errors, the importer's `_ensure_schema()` handles this automatically via `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`.
 
@@ -480,7 +523,7 @@ Agent Orchestrator (adaptive: 60s pre-kickoff / 5min normal)
   Scout Agent        -->  odds monitoring, steam move detection, injury aggregation
       |                   12h market momentum tracking (Pro API)
   Analyst Agent      -->  enrichment (sentiment, injuries, Elo, Poisson, form, H2H)
-      |                   feature engineering (22+ features incl. momentum)
+      |                   feature engineering (34 features incl. stats-based)
       |                   ML model prediction (XGBoost + calibration)
       |                   market expansion (Double Chance, DNB derivations)
   Executioner Agent  -->  circuit breakers, calibration-adjusted Kelly, virtual bets
@@ -490,14 +533,16 @@ Agent Orchestrator (adaptive: 60s pre-kickoff / 5min normal)
 
 ### Core Pipeline
 
-1. **Data Ingestion** -- The-Odds-API (Pro Tier) provides real-time and historical odds across h2h, spreads, totals, double_chance, and draw_no_bet markets from 6+ bookmakers
-2. **Enrichment** -- News sentiment (NewsAPI + Ollama Gemma 3 4B), injury data (API-Sports + Rotowire RSS), weather (Open-Meteo), LLM-structured injury extraction
-3. **Feature Engineering** -- 22+ features including CLV, Elo differential, Poisson-derived probabilities, form tracking, H2H history, odds volatility, public bias, market momentum (12h delta)
-4. **Model Prediction** -- XGBoost with isotonic calibration, sport-specific models (soccer/basketball/tennis/americanfootball/icehockey), TimeSeriesSplit validation, reliability diagrams
-5. **Value Detection** -- Tax-adjusted EV calculation (Tipico 5% tax + combo tax-free mode), consensus sharp line from weighted Pinnacle/Betfair/bet365, public bias detection
-6. **Bet Sizing** -- Fractional Kelly criterion with performance-based multipliers, calibration-adjusted scaling, and circuit breakers
-7. **Combo Construction** -- Constraint-optimized 10/20/30-leg lotto combos with dynamic pairwise correlation penalties and market-type-aware scoring
-8. **Virtual Trading** -- Ghost-trades all signals for tracking without real money
+1. **Data Ingestion** -- The-Odds-API (Pro Tier) provides real-time and historical odds across h2h, spreads, totals, double_chance, and draw_no_bet markets from 6+ bookmakers. TheSportsDB and football-data.org provide match results and standings for rolling feature computation.
+2. **Stats Ingestion** -- Periodic pipeline (every 6h) fetches past match results from TheSportsDB + football-data.org, stores per-team per-match stats (`team_match_stats`), and computes rolling feature snapshots (`event_stats_snapshots`) with data leakage prevention.
+3. **Enrichment** -- News sentiment (NewsAPI + Ollama Gemma 3 4B), injury data (API-Sports + Rotowire RSS), weather (Open-Meteo), LLM-structured injury extraction
+4. **Feature Engineering** -- 34+ features including CLV, Elo differential, Poisson-derived probabilities, form tracking, H2H history, odds volatility, public bias, market momentum, attack/defense strength, form trend slope, rest fatigue, schedule congestion, over 2.5/BTTS rates, home/away splits, league position delta
+5. **Model Prediction** -- XGBoost with isotonic calibration, sport-specific models (soccer/basketball/tennis/americanfootball/icehockey), TimeSeriesSplit validation, reliability diagrams, quality gates (Brier > 0.25 rejection, min 50 samples)
+6. **Value Detection** -- Tax-adjusted EV calculation (Tipico 5% tax + combo tax-free mode), consensus sharp line from weighted Pinnacle/Betfair/bet365, public bias detection
+7. **Bet Sizing** -- Fractional Kelly criterion with performance-based multipliers, calibration-adjusted scaling, and circuit breakers
+8. **Combo Construction** -- Constraint-optimized 10/20/30-leg lotto combos with dynamic pairwise correlation penalties and market-type-aware scoring
+9. **Virtual Trading** -- Ghost-trades all signals for tracking without real money
+10. **Source Health** -- Per-source circuit breakers with failure counting, cooldown timers, and half-open recovery for all 8 data sources
 
 ---
 
@@ -535,6 +580,7 @@ The bot provides a premium, interactive Telegram experience:
 - **Calibration Badges** -- Well-calibrated / moderate / high variance badges
 - **Retail Trap Indicator** -- `Retail Trap` or `Public Bias` badges on signals where Tipico is shading favorites
 - **Tax-Free Badge** -- `Steuerfrei` on qualifying 3+ leg combo suggestions
+- **Stats Card** -- Tipico-style comparison card in Deep Dive showing form blocks (🟩🟨🟥), league position, goals, O/U rates, BTTS, attack/defense strength, rest days, and home/away splits
 - **Interactive Agent Alerts** -- Executioner alerts include inline buttons: Deep Dive, Ghost Bet, Ignorieren
 - **NLP Intent Routing** -- Natural language commands via Gemma 3 4B intent classification
 - **Per-User State** -- Pagination and session data stored per-user, concurrent-safe
@@ -566,7 +612,8 @@ Kombi-Grossen:
 
 - **XGBoost** classifier with probability calibration (isotonic regression)
 - Sport-specific models with fallback to general model
-- 22+ engineered features:
+- Quality gates: Brier > 0.25 rejection, minimum 50 training samples
+- 34 engineered features:
 
 | Feature | Source |
 |---------|--------|
@@ -588,9 +635,24 @@ Kombi-Grossen:
 | `market_momentum` | Implied probability delta over 12h (Pro API history) |
 | `injury_news_delta` | Aggregated injury news sentiment (Rotowire RSS) |
 | `time_to_kickoff_hours` | Hours until event starts |
+| `team_attack_strength` | Goals scored / league avg (rolling window) |
+| `team_defense_strength` | Goals conceded / league avg (rolling window) |
+| `opp_attack_strength` | Opponent attack strength |
+| `opp_defense_strength` | Opponent defense strength |
+| `expected_total_proxy` | Predicted total goals from strength ratings |
+| `form_trend_slope` | Linear regression slope over recent form points |
+| `rest_fatigue_score` | Fatigue from short rest (0-1 scale) |
+| `schedule_congestion` | Matches per 30-day window (normalized) |
+| `over25_rate` | Historical over 2.5 goals rate |
+| `btts_rate` | Historical both-teams-to-score rate |
+| `home_away_split_delta` | Home win rate minus away win rate |
+| `league_position_delta` | Opponent position minus team position |
+| `goals_scored_avg` | Average goals scored per match |
+| `goals_conceded_avg` | Average goals conceded per match |
 
 - Weekly automatic retraining with post-training validation (Brier score, calibration check, feature importance audit)
 - **Reliability diagrams**: per-bucket actual-vs-predicted calibration with automatic Kelly adjustment multipliers
+- Temporal ordering enforced in training queries to prevent data leakage in TimeSeriesSplit
 
 ### Sport Group Mapping
 
@@ -730,6 +792,10 @@ All settings are loaded from environment variables (`.env` file) via `src/core/s
 | `TAX_FREE_MODE` | `false` | No | Set `true` for combo tax-free mode |
 | `ENRICHMENT_ENABLED` | `true` | No | Enable/disable API enrichment |
 | `ENRICHMENT_TIMEOUT` | `30` | No | Timeout per enrichment call (seconds) |
+| `SPORTSDB_API_KEY` | `3` | No | TheSportsDB API key (free tier = `3`) |
+| `FOOTBALL_DATA_API_KEY` | -- | No | football-data.org API key (free tier) |
+| `STATS_INGESTION_ENABLED` | `true` | No | Enable/disable stats ingestion pipeline |
+| `STATS_INGESTION_INTERVAL_HOURS` | `6` | No | How often stats ingestion runs |
 
 ---
 
@@ -839,7 +905,7 @@ Bet-Bot/
 │   │   ├── dynamic_settings.py         # Redis-backed dynamic settings (Telegram toggles)
 │   │   ├── elo_ratings.py              # Redis-backed Elo power ratings
 │   │   ├── enrichment.py               # News sentiment & injury enrichment
-│   │   ├── feature_engineering.py      # 22+ feature builder (incl. momentum)
+│   │   ├── feature_engineering.py      # 34 feature builder (core + stats-based)
 │   │   ├── form_tracker.py             # Redis-backed last-5-games form
 │   │   ├── ghost_trading.py            # Virtual bet placement
 │   │   ├── h2h_tracker.py              # Head-to-head history tracker
@@ -849,16 +915,20 @@ Bet-Bot/
 │   │   ├── poisson_model.py            # Poisson goal model (0.5/1.5/2.5/3.5)
 │   │   ├── pricing_model.py            # True probability estimation (XGBoost)
 │   │   ├── settings.py                 # Configuration from environment
+│   │   ├── source_health.py            # Per-source circuit breakers & health reports
 │   │   ├── sport_mapping.py            # Central sport/league registry (25+ leagues)
+│   │   ├── stats_ingester.py           # Stats ingestion pipeline (TheSportsDB + football-data.org)
 │   │   └── volatility_tracker.py       # Odds volatility & steam moves
 │   ├── data/
-│   │   ├── models.py                   # PlacedBet SQLAlchemy model
+│   │   ├── models.py                   # PlacedBet, TeamMatchStats, EventStatsSnapshot models
 │   │   ├── postgres.py                 # Engine + SessionLocal factory
 │   │   ├── redis_cache.py              # Redis cache wrapper (get/set JSON)
 │   │   └── venue_coordinates.py        # Stadium lat/lng for weather
 │   ├── integrations/
 │   │   ├── base_fetcher.py             # Async HTTP base + _safe_sync_run()
 │   │   ├── odds_fetcher.py             # The-Odds-API client (Pro tier + history)
+│   │   ├── football_data_fetcher.py    # football-data.org v4 API client
+│   │   ├── sportsdb_fetcher.py         # TheSportsDB API client
 │   │   ├── news_fetcher.py             # NewsAPI client
 │   │   ├── weather_fetcher.py          # Open-Meteo weather client
 │   │   ├── rss_fetcher.py              # Rotowire RSS injury/lineup scraper
@@ -887,11 +957,16 @@ Bet-Bot/
 │       ├── nfl/                        # NFL CSV/XLSX
 │       └── nhl/                        # NHL CSVs
 ├── models/                             # Trained .joblib model files (gitignored)
+├── alembic/                            # Database migrations
+│   ├── env.py                          # Alembic config (imports Base metadata)
+│   └── versions/                       # Migration scripts
 ├── config/
 │   └── com.clawy.bettingbot.plist      # macOS LaunchAgent
+├── tests/                              # Pytest test suite (153+ tests)
+├── .env.example                        # Environment variable template
 ├── requirements.txt
 ├── ml_strategy_weights.json            # Legacy model weights (JSON fallback)
-└── package.json
+└── alembic.ini                         # Alembic configuration
 ```
 
 ---
@@ -901,6 +976,8 @@ Bet-Bot/
 | API | Tier | Used For |
 |-----|------|----------|
 | The-Odds-API | **Pro** | Real-time odds + `/odds-history` for 12h momentum |
+| TheSportsDB | Free (`3`) | Match results, standings, team data for stats ingestion |
+| football-data.org | Free | Match results, standings, home/away splits (12 competitions) |
 | NewsAPI | Free/Dev | News sentiment enrichment |
 | API-Sports | Free | Injury data and lineups |
 | Open-Meteo | Free | Weather conditions for outdoor sports |

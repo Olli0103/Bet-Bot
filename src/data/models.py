@@ -44,6 +44,7 @@ class PlacedBet(Base):
 
     # ML feature snapshot (for training)
     sharp_implied_prob = Column(Float, nullable=True)
+    sharp_vig = Column(Float, nullable=True)
     sentiment_delta = Column(Float, nullable=True)
     injury_delta = Column(Float, nullable=True)
     form_winrate_l5 = Column(Float, nullable=True)

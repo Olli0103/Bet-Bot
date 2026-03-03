@@ -143,8 +143,8 @@ class ExecutionerAgent:
                 stake=stake,
                 features=analysis.get("features", {}),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Ghost bet placement failed: %s", exc)
 
         return result
 

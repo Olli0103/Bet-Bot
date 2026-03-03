@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -75,8 +74,6 @@ FEATURES = [
 # Soccer-specific features (added to FEATURES when training soccer model)
 SOCCER_EXTRA_FEATURES = [
     "poisson_true_prob",
-    "over25_rate",
-    "btts_rate",
 ]
 
 # Basketball-specific features (future extension)
@@ -332,7 +329,9 @@ def auto_train_model(min_samples: int = 500) -> str:
     MODELS_DIR.mkdir(exist_ok=True)
 
     with SessionLocal() as db:
-        query = select(PlacedBet).where(PlacedBet.status.in_(["won", "lost"]))
+        query = select(PlacedBet).where(
+            PlacedBet.status.in_(["won", "lost"])
+        ).order_by(PlacedBet.created_at.asc())
         df = pd.read_sql(query, db.bind)
 
     if len(df) < min_samples:
@@ -375,7 +374,9 @@ def auto_train_all_models(min_samples: int = 200) -> str:
     MODELS_DIR.mkdir(exist_ok=True)
 
     with SessionLocal() as db:
-        query = select(PlacedBet).where(PlacedBet.status.in_(["won", "lost"]))
+        query = select(PlacedBet).where(
+            PlacedBet.status.in_(["won", "lost"])
+        ).order_by(PlacedBet.created_at.asc())
         df = pd.read_sql(query, db.bind)
 
     if len(df) < min_samples:
