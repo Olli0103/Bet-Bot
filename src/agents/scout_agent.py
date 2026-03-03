@@ -71,7 +71,7 @@ class ScoutAgent:
         for sport in active_sports:
             try:
                 events = await self.odds_fetcher.get_sport_odds_async(
-                    sport_key=sport, regions="eu", markets="h2h", ttl_seconds=60,
+                    sport_key=sport, regions="eu", markets="h2h,totals", ttl_seconds=60,
                 )
             except Exception:
                 continue
@@ -89,49 +89,62 @@ class ScoutAgent:
                 if not event_id or not home:
                     continue
 
-                # Extract current odds from sharp books
+                # Extract current odds from sharp books (h2h + totals)
                 for bm in event.get("bookmakers", []):
                     if bm.get("key") not in ("pinnacle", "betfair_ex_uk"):
                         continue
                     for mkt in bm.get("markets", []):
-                        if mkt.get("key") != "h2h":
+                        mkt_key = mkt.get("key") or ""
+                        if mkt_key not in ("h2h", "totals"):
                             continue
                         for outcome in mkt.get("outcomes", []):
                             name = outcome.get("name")
                             price = outcome.get("price")
+                            point = outcome.get("point")
                             if not name or not price:
                                 continue
 
-                            key = f"{event_id}:{name}"
+                            # Build unique key (includes point for totals)
+                            if mkt_key == "totals" and point is not None:
+                                label = f"{name}|{point}"
+                                snap_key = f"{event_id}:{label}"
+                            else:
+                                label = name
+                                snap_key = f"{event_id}:{name}"
+
                             current_odds = float(price)
                             current_ip = 1.0 / current_odds if current_odds > 1.0 else 0.0
-                            current_snapshot[key] = {"odds": current_odds, "ip": current_ip}
+                            current_snapshot[snap_key] = {"odds": current_odds, "ip": current_ip}
 
                             # Record for volatility tracking
                             try:
-                                record_odds_snapshot(name, current_ip)
+                                record_odds_snapshot(label, current_ip)
                             except Exception:
                                 pass
 
                             # Check for steam move
-                            prev_data = prev.get(key, {})
+                            prev_data = prev.get(snap_key, {})
                             prev_odds = prev_data.get("odds", current_odds)
 
-                            team_vol = get_volatility(name)
+                            team_vol = get_volatility(label)
                             is_steam = detect_steam_move(current_odds, prev_odds, team_vol)
 
                             if is_steam:
                                 # Compute 12h momentum if available
-                                hist_ip = momentum_data.get(key)
+                                hist_ip = momentum_data.get(snap_key)
                                 market_momentum = round(current_ip - hist_ip, 4) if hist_ip else 0.0
 
+                                alert_type = "totals_steam" if mkt_key == "totals" else "steam_move"
+                                selection_label = label if mkt_key == "totals" else name
+
                                 alerts.append({
-                                    "type": "steam_move",
+                                    "type": alert_type,
                                     "event_id": event_id,
                                     "sport": sport,
                                     "home": home,
                                     "away": away,
-                                    "selection": name,
+                                    "selection": selection_label,
+                                    "market": mkt_key,
                                     "commence_time": str(commence or ""),
                                     "prev_odds": prev_odds,
                                     "current_odds": current_odds,
@@ -139,7 +152,10 @@ class ScoutAgent:
                                     "team_volatility": team_vol,
                                     "market_momentum": market_momentum,
                                 })
-                                log.info("Steam move detected: %s %s %.2f -> %.2f", sport, name, prev_odds, current_odds)
+                                log.info(
+                                    "%s detected: %s %s %.2f -> %.2f",
+                                    alert_type, sport, selection_label, prev_odds, current_odds,
+                                )
 
         # Save current snapshot for next comparison
         cache.set_json(SNAPSHOT_KEY, current_snapshot, ttl_seconds=3600)
