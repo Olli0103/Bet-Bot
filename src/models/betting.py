@@ -29,6 +29,9 @@ class ComboLeg(BaseModel):
     probability: float
     sport: str = ""
     market_type: str = "h2h"
+    home_team: str = ""
+    away_team: str = ""
+    market: str = ""  # full descriptor e.g. "totals 2.5", "spreads +3.5"
 
 
 class ComboBet(BaseModel):

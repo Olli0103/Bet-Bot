@@ -6,6 +6,7 @@ import asyncio
 
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, ContextTypes, filters, ApplicationHandlerStop
 
+from src.bot.chat_router import chat_router
 from src.bot.handlers import (
     start,
     menu_value_bets,
@@ -117,15 +118,25 @@ def build_app() -> Application:
     return app
 
 
+async def _broadcast(bot, text: str, target: str = "broadcast"):
+    """Send text to all applicable chat IDs."""
+    ids = chat_router.broadcast_ids() if target == "broadcast" else chat_router.primary_only_ids()
+    for cid in ids:
+        try:
+            await bot.send_message(chat_id=cid, text=text)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("Send to %s failed: %s", cid, exc)
+
+
 async def scheduled_fetch(context: ContextTypes.DEFAULT_TYPE):
     try:
         items = await asyncio.to_thread(fetch_and_build_signals)
-        chat_id = settings.telegram_chat_id
-        if chat_id:
-            await context.bot.send_message(chat_id=chat_id, text=f"📡 Datenupdate fertig: {len(items)} Signals")
-            push = bool((context.job.data or {}).get("push", False)) if context.job else False
-            if push:
-                await push_daily_signals(context.bot, str(chat_id))
+        await _broadcast(context.bot, f"📡 Datenupdate fertig: {len(items)} Signals")
+        push = bool((context.job.data or {}).get("push", False)) if context.job else False
+        if push:
+            for cid in chat_router.broadcast_ids():
+                await push_daily_signals(context.bot, cid)
     except Exception:
         pass
 
@@ -133,31 +144,24 @@ async def scheduled_fetch(context: ContextTypes.DEFAULT_TYPE):
 async def scheduled_grading(context: ContextTypes.DEFAULT_TYPE):
     try:
         settled = await run_auto_grading()
-        if settled > 0 and settings.telegram_chat_id:
-            await context.bot.send_message(chat_id=settings.telegram_chat_id, text=f"✅ Auto-Grading: {settled} Wetten bewertet")
+        if settled > 0:
+            await _broadcast(context.bot, f"✅ Auto-Grading: {settled} Wetten bewertet")
     except Exception:
         pass
 
 
 async def morning_briefing(context: ContextTypes.DEFAULT_TYPE):
-    chat_id = settings.telegram_chat_id
-    if not chat_id:
-        return
-    await context.bot.send_message(chat_id=chat_id, text="🌅 Morning Briefing bereit. Tippe auf Heutige Top 10 Einzelwetten.")
+    await _broadcast(context.bot, "🌅 Morning Briefing bereit. Tippe auf Heutige Top 10 Einzelwetten.")
 
 
 async def learning_status_push(context: ContextTypes.DEFAULT_TYPE):
     try:
         h = learning_health()
-        if settings.telegram_chat_id:
-            await context.bot.send_message(
-                chat_id=settings.telegram_chat_id,
-                text=(
-                    f"🧠 Learning Check\n"
-                    f"Total: {h['total']} | Settled: {h['settled']} | Open: {h['open']}\n"
-                    f"W/L: {h['wins']}/{h['losses']} | Hit: {h['hit_rate_pct']}% | PnL: {h['pnl']:.2f} EUR"
-                ),
-            )
+        await _broadcast(context.bot, (
+            f"🧠 Learning Check\n"
+            f"Total: {h['total']} | Settled: {h['settled']} | Open: {h['open']}\n"
+            f"W/L: {h['wins']}/{h['losses']} | Hit: {h['hit_rate_pct']}% | PnL: {h['pnl']:.2f} EUR"
+        ))
     except Exception:
         pass
 
@@ -165,8 +169,7 @@ async def learning_status_push(context: ContextTypes.DEFAULT_TYPE):
 async def weekly_retrain(context: ContextTypes.DEFAULT_TYPE):
     try:
         msg = await asyncio.to_thread(auto_train_all_models, 100)
-        if settings.telegram_chat_id:
-            await context.bot.send_message(chat_id=settings.telegram_chat_id, text=f"📈 Weekly Retrain: {msg}")
+        await _broadcast(context.bot, f"📈 Weekly Retrain: {msg}", target="primary")
     except Exception:
         pass
 
@@ -174,8 +177,7 @@ async def weekly_retrain(context: ContextTypes.DEFAULT_TYPE):
 async def api_health_push(context: ContextTypes.DEFAULT_TYPE):
     try:
         result = await run_api_health_check()
-        if settings.telegram_chat_id:
-            await context.bot.send_message(chat_id=settings.telegram_chat_id, text=format_api_health_report(result))
+        await _broadcast(context.bot, format_api_health_report(result), target="primary")
     except Exception:
         pass
 
@@ -184,36 +186,25 @@ _agent_cycle_counter = 0
 
 
 async def agent_cycle(context: ContextTypes.DEFAULT_TYPE):
-    """Run one Scout -> Analyst -> Executioner cycle via the AgentOrchestrator.
-
-    Uses adaptive polling: runs every 60s during pre-kickoff windows
-    (events starting within 1 hour), otherwise every 5th invocation
-    (~5 minutes) to save API calls during quiet periods.
-    """
+    """Run one Scout -> Analyst -> Executioner cycle via the AgentOrchestrator."""
     global _agent_cycle_counter
     _agent_cycle_counter += 1
 
     try:
-        orchestrator = AgentOrchestrator(bot=context.bot, chat_id=settings.telegram_chat_id)
-
-        # Check if we're in a pre-kickoff window
+        orchestrator = AgentOrchestrator(bot=context.bot, chat_id=chat_router.primary_id)
         is_fast_mode = orchestrator._has_imminent_kickoffs()
 
-        # In normal mode, only run every 5th cycle (60s * 5 = 5 minutes)
         if not is_fast_mode and (_agent_cycle_counter % 5) != 0:
             return
 
         summary = await orchestrator.run_once()
-        if summary.get("scout_alerts", 0) > 0 and settings.telegram_chat_id:
+        if summary.get("scout_alerts", 0) > 0:
             mode_label = "FAST" if is_fast_mode else "NORMAL"
-            await context.bot.send_message(
-                chat_id=settings.telegram_chat_id,
-                text=(
-                    f"🤖 Agent [{mode_label}]: {summary['scout_alerts']} alerts, "
-                    f"{summary['bets_placed']} bets, {summary['bets_skipped']} skipped"
-                ),
-            )
-    except Exception as exc:
+            await _broadcast(context.bot, (
+                f"🤖 Agent [{mode_label}]: {summary['scout_alerts']} alerts, "
+                f"{summary['bets_placed']} bets, {summary['bets_skipped']} skipped"
+            ))
+    except Exception:
         import traceback
         traceback.print_exc()
 
@@ -223,8 +214,7 @@ async def daily_performance_report(context: ContextTypes.DEFAULT_TYPE):
     try:
         monitor = PerformanceMonitor()
         report = monitor.generate_report()
-        if settings.telegram_chat_id:
-            await context.bot.send_message(chat_id=settings.telegram_chat_id, text=report)
+        await _broadcast(context.bot, report)
     except Exception:
         pass
 

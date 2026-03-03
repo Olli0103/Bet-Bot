@@ -61,6 +61,11 @@ class BettingEngine:
                 selection=l["selection"],
                 odds=float(l["odds"]),
                 probability=float(l["probability"]),
+                sport=l.get("sport", ""),
+                market_type=l.get("market_type", "h2h"),
+                home_team=l.get("home_team", ""),
+                away_team=l.get("away_team", ""),
+                market=l.get("market", l.get("market_type", "h2h")),
             )
             for l in legs
         ]

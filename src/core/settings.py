@@ -27,6 +27,7 @@ class Settings(BaseModel):
 
     telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     telegram_chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")
+    telegram_chat_ids: str = os.getenv("TELEGRAM_CHAT_IDS", "")  # CSV of allowed IDs
 
     live_sports: str = os.getenv("LIVE_SPORTS", "basketball_nba,soccer_germany_bundesliga,soccer_epl,tennis_atp")
 

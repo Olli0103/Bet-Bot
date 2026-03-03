@@ -271,8 +271,75 @@ async def menu_value_bets(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Combo Suggestions: "10/20/30 Kombis"
 # ---------------------------------------------------------------------------
 
+SPORT_EMOJI = {
+    "soccer": "⚽", "football": "⚽",
+    "basketball": "🏀",
+    "americanfootball": "🏈",
+    "icehockey": "🏒",
+    "tennis": "🎾",
+}
+
+
+def _sport_emoji(sport_key: str) -> str:
+    """Map sport key to emoji."""
+    for prefix, emoji in SPORT_EMOJI.items():
+        if sport_key.startswith(prefix):
+            return emoji
+    return "🎯"
+
+
+def _league_short(sport_key: str) -> str:
+    """Extract short league label from sport key."""
+    try:
+        from src.core.sport_mapping import api_key_to_display
+        label = api_key_to_display(sport_key)
+        if label != sport_key:
+            return label
+    except Exception:
+        pass
+    parts = sport_key.split("_", 1)
+    return parts[1].replace("_", " ").upper() if len(parts) > 1 else sport_key.upper()
+
+
+def _format_leg_line(i: int, leg: dict) -> str:
+    """Format a single combo leg with FULL context. Never output naked selections."""
+    sport_key = str(leg.get("sport", ""))
+    emoji = _sport_emoji(sport_key)
+    league = _league_short(sport_key)
+
+    home = leg.get("home_team", "")
+    away = leg.get("away_team", "")
+    selection = str(leg.get("selection", "?"))
+    market = str(leg.get("market", leg.get("market_type", "")))
+    odds = float(leg.get("odds", 0))
+    prob = float(leg.get("probability", 0))
+
+    # Build event string
+    if home and away:
+        event = f"{home} vs {away}"
+    else:
+        event = ""
+
+    # Build market + selection string
+    market_type = str(leg.get("market_type", "h2h"))
+    if market_type == "h2h":
+        sel_display = selection
+    elif market_type in ("totals", "spreads"):
+        sel_display = f"{market} {selection}" if market != selection else selection
+    elif market_type in ("double_chance", "draw_no_bet"):
+        sel_display = selection
+    else:
+        sel_display = f"{market} {selection}" if market else selection
+
+    # Validation: mark incomplete legs
+    if not event and not home:
+        sel_display = f"⚠ {sel_display} (Event?)"
+
+    return f" {i+1:2d}. {emoji} {league} | {event} | {sel_display} | @{odds:.2f} | {prob:.0%}"
+
+
 def _format_combo_card(combo_data: dict) -> str:
-    """Format a combo as a rich card with legs table and progress bar."""
+    """Format a combo as a rich card with FULL context per leg."""
     size = combo_data.get("size", 0)
     stake = float(combo_data.get("stake", 1.00))
     combined_odds = float(combo_data.get("combined_odds", 0))
@@ -283,26 +350,36 @@ def _format_combo_card(combo_data: dict) -> str:
     potential_payout = round(stake * combined_odds, 2)
     is_playable = ev > 0
 
-    legs_lines = []
-    for i, leg in enumerate(legs):
-        sel = str(leg.get("selection", "?"))[:30]
-        odds = float(leg.get("odds", 0))
-        prob = float(leg.get("probability", 0))
-        legs_lines.append(f" {i+1:2d}. {sel:<30s} {odds:5.2f}  {prob:.0%}")
+    # Filter: reject legs without event context, mark as incomplete
+    complete_legs = []
+    incomplete_count = 0
+    for leg in legs:
+        if leg.get("home_team") or leg.get("away_team"):
+            complete_legs.append(leg)
+        else:
+            incomplete_count += 1
+
+    legs_lines = [_format_leg_line(i, leg) for i, leg in enumerate(complete_legs)]
     legs_txt = "\n".join(legs_lines)
 
-    tax_badge = " 🏷️ Steuerfrei" if len(legs) >= 3 else ""
+    tax_badge = " 🏷️ Steuerfrei" if len(complete_legs) >= 3 else ""
+    incomplete_note = f"\n⚠️ {incomplete_count} Legs ohne Event-Kontext verworfen" if incomplete_count > 0 else ""
+
+    risk_note = ""
+    if combined_prob < 0.01:
+        risk_note = "\n⚠️ Sehr geringe Trefferwahrscheinlichkeit — Lotto-Charakter!"
+    elif combined_prob < 0.05:
+        risk_note = "\n⚠️ Geringe Trefferwahrscheinlichkeit — hohes Risiko"
 
     return (
         f"🧩 KOMBI {size}er | Lotto{tax_badge}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"Status: {'✅ spielbar' if is_playable else '⚠️ watchlist'}\n"
-        f"Gesamtquote: {combined_odds:.2f} ({len(legs)} Legs)\n"
+        f"Gesamtquote: {combined_odds:.2f} ({len(complete_legs)} Legs)\n"
         f"Wahrscheinlichkeit: {_progress_bar(combined_prob)}\n"
-        f"💰 Einsatz: {stake:.2f} EUR\n"
-        f"💎 Möglicher Gewinn: {potential_payout:.2f} EUR\n"
-        f"EV: {ev:+.4f}\n"
-        f"\nTipps:\n{legs_txt}"
+        f"💰 Einsatz: {stake:.2f} EUR → 💎 {potential_payout:.2f} EUR\n"
+        f"EV: {ev:+.4f}{risk_note}\n"
+        f"\nTipps:\n{legs_txt}{incomplete_note}"
     )
 
 
@@ -485,48 +562,65 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # --- Agent alert: Ask Analyst for deep dive ---
+    # --- Agent alert: Deep Dive (show cached analysis + LLM reasoning) ---
     if data.startswith("agent_analyze:"):
         alert_id = data.split(":", 1)[1]
         alert_data = cache.get_json(f"agent_alert:{alert_id}")
         if not alert_data:
             await q.edit_message_text("Alert abgelaufen.")
             return
-        await q.edit_message_text("🔍 Analyst wird befragt...")
+        await q.edit_message_text("🔍 Deep Dive wird geladen...")
         try:
-            from src.agents.analyst_agent import AnalystAgent
-            analyst = AnalystAgent()
-            analysis = await analyst.analyze_event(
-                event_id=alert_data.get("event_id", ""),
-                sport=alert_data.get("sport", ""),
-                home=alert_data.get("home", ""),
-                away=alert_data.get("away", ""),
-                selection=alert_data.get("selection", ""),
-                target_odds=float(alert_data.get("target_odds", 2.0)),
-                sharp_odds=float(alert_data.get("sharp_odds", 2.0)),
-                sharp_market={alert_data.get("selection", ""): float(alert_data.get("sharp_odds", 2.0))},
-                trigger="user_deepdive",
-            )
-            reasoning = await analyst.reason_with_llm(analysis) or ""
-            model_p = float(analysis.get("model_probability", 0))
-            ev = float(analysis.get("expected_value", 0))
+            # Use the CACHED analysis data directly — no re-running the analyst.
+            # This guarantees the Deep Dive shows the exact same numbers as the
+            # alert card (model_p, EV, etc.), fixing the data mismatch bug.
+            model_p = float(alert_data.get("model_probability", 0))
+            ev = float(alert_data.get("expected_value", 0))
             badge = _calibration_badge(model_p)
+            elo = alert_data.get("elo", {})
+            form = alert_data.get("form", {})
+            sentiment = alert_data.get("sentiment", {})
+            injuries = alert_data.get("injuries", {})
+            poisson_prob = alert_data.get("poisson_prob")
+            public_bias = float(alert_data.get("public_bias", 0))
+            momentum = float(alert_data.get("market_momentum", 0))
+            trigger = alert_data.get("trigger", "")
+
+            # Format poisson display
+            poisson_display = f"{poisson_prob:.0%}" if poisson_prob is not None else "n/a"
+
             msg = (
                 f"🔬 Deep Dive | {alert_data.get('home', '')} vs {alert_data.get('away', '')}\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"Tipp: {alert_data.get('selection', '')}\n"
+                f"Quote: {float(alert_data.get('target_odds', 0)):.2f}\n"
                 f"Modell: {_progress_bar(model_p)} {badge}\n"
                 f"EV: {ev:+.4f}\n"
-                f"Elo: {analysis.get('elo', {}).get('elo_diff', 0):+.0f}\n"
-                f"Form: H={analysis.get('form', {}).get('home_wr', 0):.0%} "
-                f"A={analysis.get('form', {}).get('away_wr', 0):.0%}\n"
-                f"Poisson: {analysis.get('poisson_prob', 'n/a')}\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"Elo: {elo.get('elo_diff', 0):+.0f}\n"
+                f"Form: H={form.get('home_wr', 0):.0%} A={form.get('away_wr', 0):.0%}\n"
+                f"Sentiment: H={sentiment.get('home', 0):.2f} A={sentiment.get('away', 0):.2f}\n"
+                f"Verletzungen: H={injuries.get('home', 0)} A={injuries.get('away', 0)}\n"
+                f"Poisson: {poisson_display}\n"
+                f"Public Bias: {public_bias:.3f}\n"
+                f"Momentum: {momentum:+.3f}\n"
+                f"Trigger: {trigger}\n"
             )
+
+            # Generate fresh LLM reasoning (lightweight, uses cached data)
+            try:
+                from src.agents.analyst_agent import AnalystAgent
+                analyst = AnalystAgent()
+                reasoning = await analyst.reason_with_llm(alert_data) or ""
+            except Exception:
+                reasoning = ""
+
             if reasoning:
                 msg += f"\n💡 {reasoning}"
-            msg += f"\n\nEmpfehlung: {analysis.get('recommendation', 'SKIP')}"
+            msg += f"\n\nEmpfehlung: {alert_data.get('recommendation', 'SKIP')}"
             await q.message.reply_text(msg)
         except Exception as exc:
-            await q.message.reply_text(f"Analyse fehlgeschlagen: {type(exc).__name__}")
+            await q.message.reply_text(f"Deep Dive fehlgeschlagen: {type(exc).__name__}")
         return
 
     # --- Agent alert: Ghost Bet ---
@@ -782,25 +876,157 @@ async def agentic_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Refresh / Help
 # ---------------------------------------------------------------------------
 
-async def _refresh_job(bot, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+def _render_progress_display(info: dict) -> str:
+    """Render a rich progress display for the fetch pipeline."""
+    phase = info.get("phase", "init")
+    pct = int(info.get("pct", 0))
+    events = int(info.get("events", 0))
+    signals = int(info.get("signals", 0))
+    sport_idx = int(info.get("sport_idx", 0))
+    sport_total = int(info.get("sport_total", 0))
+    done_sports = info.get("done_sports", [])
+    detail = info.get("detail", "")
+    combos = int(info.get("combos", 0))
+
+    # Progress bar (20 chars wide)
+    filled = int(pct / 5)
+    bar = "█" * filled + "░" * (20 - filled)
+
+    # Phase labels
+    phase_labels = {
+        "init": "⚙️ Initialisierung",
+        "resolve": "🔍 Sportarten auflösen",
+        "fetch_odds": "📡 Odds abrufen",
+        "enrichment": "🧠 Enrichment",
+        "signals": "🎯 Signals berechnen",
+        "combos": "🧩 Kombis bauen",
+        "done": "✅ Fertig!",
+    }
+    phase_label = phase_labels.get(phase, phase)
+
+    # Build sport status lines
+    sport_lines = []
+    for s in done_sports[-6:]:  # show last 6 completed sports
+        short = s.replace("soccer_", "").replace("basketball_", "").replace(
+            "americanfootball_", "").replace("icehockey_", "").replace(
+            "tennis_", "").replace("_", " ").title()
+        sport_lines.append(f"  ✅ {short}")
+
+    if phase == "fetch_odds" and detail and detail not in done_sports:
+        current = detail.replace("soccer_", "").replace("basketball_", "").replace(
+            "americanfootball_", "").replace("icehockey_", "").replace(
+            "tennis_", "").replace("_", " ").title()
+        sport_lines.append(f"  ⏳ {current}...")
+
+    sports_block = "\n".join(sport_lines) if sport_lines else ""
+
+    # Stats line
+    stats_parts = []
+    if events > 0:
+        stats_parts.append(f"Events: {events}")
+    if signals > 0:
+        stats_parts.append(f"Signals: {signals}")
+    if combos > 0:
+        stats_parts.append(f"Kombis: {combos}")
+    stats_line = " | ".join(stats_parts) if stats_parts else ""
+
+    # Sport counter
+    counter = f" ({sport_idx}/{sport_total})" if sport_total > 0 else ""
+
+    lines = [
+        "🔄 Datenupdate",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"[{bar}] {pct}%",
+        f"{phase_label}{counter}",
+    ]
+    if sports_block:
+        lines.append("")
+        lines.append(sports_block)
+    if stats_line:
+        lines.append("")
+        lines.append(stats_line)
+
+    return "\n".join(lines)
+
+
+async def _refresh_job(bot, chat_id: int, msg_id: int, context: ContextTypes.DEFAULT_TYPE):
+    progress_queue = asyncio.Queue()
+    last_text = ""
+
+    def on_progress(info):
+        """Thread-safe callback: pushes progress dict into the async queue."""
+        try:
+            progress_queue.put_nowait(info)
+        except Exception:
+            pass
+
+    async def update_display():
+        """Polls the progress queue and edits the Telegram message."""
+        nonlocal last_text
+        while True:
+            try:
+                info = await asyncio.wait_for(progress_queue.get(), timeout=2.0)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+
+            text = _render_progress_display(info)
+            # Only edit if text actually changed (avoid Telegram rate limits)
+            if text != last_text:
+                try:
+                    await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=text)
+                    last_text = text
+                except Exception:
+                    pass  # message may have been deleted, rate limited, etc.
+
+            if info.get("phase") == "done":
+                break
+
+    # Run fetch + display updater concurrently
+    display_task = asyncio.create_task(update_display())
+
     try:
         items = await asyncio.wait_for(
-            asyncio.to_thread(lambda: fetch_and_build_signals()),
-            timeout=120,
+            asyncio.to_thread(fetch_and_build_signals, progress_callback=on_progress),
+            timeout=180,
         )
+        # Wait for display to catch the "done" message
+        await asyncio.sleep(0.5)
+        display_task.cancel()
+
         meta = get_cached_meta()
-        await bot.send_message(
-            chat_id=chat_id,
-            text=(
-                f"📡 Daten aktualisiert\n"
-                f"Signals: {len(items)} | Sports: {meta.get('sports_expanded', 0)} "
-                f"| Events: {meta.get('events_seen', 0)}"
-            ),
+        final_text = (
+            "✅ Datenupdate abgeschlossen\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 Signals: {len(items)}\n"
+            f"📡 Sports: {meta.get('sports_expanded', 0)} | "
+            f"Events: {meta.get('events_seen', 0)}\n"
+            f"🧩 Kombis im Cache"
         )
+        try:
+            await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=final_text)
+        except Exception:
+            await bot.send_message(chat_id=chat_id, text=final_text)
+
     except asyncio.TimeoutError:
-        await bot.send_message(chat_id=chat_id, text="⏰ Datenupdate Timeout (120s).")
+        display_task.cancel()
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id, message_id=msg_id,
+                text="⏰ Datenupdate Timeout (180s). Teilweise Daten im Cache."
+            )
+        except Exception:
+            await bot.send_message(chat_id=chat_id, text="⏰ Datenupdate Timeout (180s).")
     except Exception as e:
-        await bot.send_message(chat_id=chat_id, text=f"❌ Fehler: {type(e).__name__}")
+        display_task.cancel()
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id, message_id=msg_id,
+                text=f"❌ Fehler beim Update: {type(e).__name__}"
+            )
+        except Exception:
+            await bot.send_message(chat_id=chat_id, text=f"❌ Fehler: {type(e).__name__}")
     finally:
         context.application.bot_data["refresh_running"] = False
 
@@ -810,8 +1036,11 @@ async def refresh_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⏳ Refresh läuft bereits...")
         return
     context.application.bot_data["refresh_running"] = True
-    await update.message.reply_text("🔄 Aktualisiere Daten im Hintergrund...")
-    context.application.create_task(_refresh_job(context.bot, update.effective_chat.id, context))
+    # Send initial progress message (will be edited in-place)
+    msg = await update.message.reply_text(_render_progress_display({"phase": "init", "pct": 0}))
+    context.application.create_task(
+        _refresh_job(context.bot, update.effective_chat.id, msg.message_id, context)
+    )
 
 
 async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
