@@ -390,6 +390,16 @@ def fetch_and_build_signals(
             except Exception:
                 poisson_pred = None
 
+        # --- Stats-based features from EventStatsSnapshot (Phase 4) ---
+        home_snapshot: Dict[str, Any] = {}
+        away_snapshot: Dict[str, Any] = {}
+        try:
+            from src.core.stats_ingester import get_event_snapshot
+            home_snapshot = get_event_snapshot(event_id, home) or {}
+            away_snapshot = get_event_snapshot(event_id, away) or {}
+        except Exception:
+            pass
+
         # --- Injury sentiment delta (from Rotowire RSS enrichment) ---
         inj_sent_home = injury_sentiment.get(home, 0.0)
         inj_sent_away = injury_sentiment.get(away, 0.0)
@@ -451,6 +461,26 @@ def fetch_and_build_signals(
             historical_ip = sport_momentum.get(event_id, {}).get(selection, current_ip)
             market_momentum = current_ip - historical_ip
 
+            # Resolve snapshot features for selected team vs opponent
+            sel_snap = home_snapshot if is_home else away_snapshot
+            opp_snap = away_snapshot if is_home else home_snapshot
+
+            # Home/away split delta: selected team's venue win rate vs opponent's
+            ha_split = 0.0
+            if sel_snap:
+                sel_venue_wr = sel_snap.get("home_win_rate" if is_home else "away_win_rate")
+                opp_venue_wr = opp_snap.get("away_win_rate" if is_home else "home_win_rate") if opp_snap else None
+                if sel_venue_wr is not None and opp_venue_wr is not None:
+                    ha_split = sel_venue_wr - opp_venue_wr
+
+            # League position delta (negative = selected team is higher ranked)
+            lp_delta = 0.0
+            if sel_snap and opp_snap:
+                sel_pos = sel_snap.get("league_position")
+                opp_pos = opp_snap.get("league_position")
+                if sel_pos is not None and opp_pos is not None:
+                    lp_delta = float(opp_pos - sel_pos)
+
             ml_features = FeatureEngineer.build_core_features(
                 target_odds=float(target_odds),
                 sharp_odds=float(sharp_odds),
@@ -477,6 +507,20 @@ def fetch_and_build_signals(
                 time_to_kickoff_hours=time_to_kickoff,
                 public_bias=bias_scores.get(selection, 0.0),
                 market_momentum=market_momentum,
+                # Phase 4: stats-based features
+                team_attack_strength=float(sel_snap.get("attack_strength", 1.0)),
+                team_defense_strength=float(sel_snap.get("defense_strength", 1.0)),
+                opp_attack_strength=float(opp_snap.get("attack_strength", 1.0)),
+                opp_defense_strength=float(opp_snap.get("defense_strength", 1.0)),
+                form_trend_slope=float(sel_snap.get("form_trend_slope", 0.0)),
+                rest_days=sel_snap.get("rest_days"),
+                schedule_congestion=float(sel_snap.get("schedule_congestion", 0.0)),
+                over25_rate=float(sel_snap.get("over25_rate", 0.0)),
+                btts_rate=float(sel_snap.get("btts_rate", 0.0)),
+                home_away_split_delta=ha_split,
+                league_position_delta=lp_delta,
+                goals_scored_avg=float(sel_snap.get("goals_scored_avg", 0.0)),
+                goals_conceded_avg=float(sel_snap.get("goals_conceded_avg", 0.0)),
             )
 
             model_p = qpm.get_true_probability(

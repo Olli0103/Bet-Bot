@@ -144,7 +144,13 @@ class QuantPricingModel:
         )
 
     def _xgboost_predict(self, features: Dict[str, float], sport: str) -> Optional[float]:
-        """Try to predict using sport-specific or general XGBoost model."""
+        """Try to predict using sport-specific or general XGBoost model.
+
+        Quality checks:
+        - Rejects models with Brier score > 0.25 (worse than random)
+        - Falls back to general if sport-specific model is unreliable
+        - Applies reliability adjustment from calibration bins
+        """
         group = _sport_group(sport)
 
         # Try sport-specific model first, then general
@@ -158,13 +164,60 @@ class QuantPricingModel:
             if model is None or not model_features:
                 continue
 
+            # Quality gate: skip models with poor calibration
+            metrics = model_data.get("metrics", {})
+            brier = metrics.get("brier_score", 1.0)
+            if brier > 0.25:
+                log.warning(
+                    "Skipping model %s: Brier=%.4f > 0.25 (unreliable)",
+                    model_group, brier,
+                )
+                continue
+
+            # Minimum sample check
+            n_samples = model_data.get("n_samples", 0)
+            if n_samples < 50:
+                log.warning(
+                    "Skipping model %s: only %d samples (need 50+)",
+                    model_group, n_samples,
+                )
+                continue
+
             try:
-                # Build feature vector in the correct order
                 x = np.array([[float(features.get(f, 0.0)) for f in model_features]])
                 prob = float(model.predict_proba(x)[0, 1])
-                return max(0.01, min(0.99, prob))
+                prob = max(0.01, min(0.99, prob))
+
+                # Apply reliability adjustment from calibration bins
+                rel_adj = self._get_reliability_adjustment(prob, model_data)
+                if rel_adj != 1.0:
+                    # Blend model probability toward implied (sharp) probability
+                    sharp_p = features.get("sharp_implied_prob", prob)
+                    prob = prob * rel_adj + sharp_p * (1.0 - rel_adj)
+                    prob = max(0.01, min(0.99, prob))
+
+                return prob
             except Exception as exc:
                 log.debug("XGBoost predict failed (%s): %s", model_group, exc)
                 continue
 
         return None
+
+    @staticmethod
+    def _get_reliability_adjustment(prob: float, model_data: Dict) -> float:
+        """Return reliability adjustment factor from calibration bins."""
+        bins = model_data.get("metrics", {}).get("reliability_bins", {})
+        if not bins:
+            return 1.0
+
+        for bin_key, info in bins.items():
+            try:
+                low, high = (float(x) for x in bin_key.split("_"))
+            except (ValueError, TypeError):
+                continue
+            if low <= prob < high:
+                adj = float(info.get("kelly_adjustment", 1.0))
+                # Cap adjustment to prevent extreme swings
+                return max(0.5, min(1.5, adj))
+
+        return 1.0

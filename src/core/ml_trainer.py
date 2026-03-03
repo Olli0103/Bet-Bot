@@ -31,8 +31,9 @@ log = logging.getLogger(__name__)
 
 MODELS_DIR = Path("models")
 
-# Full feature set (Phase 1-3 + review enhancements)
+# Full feature set (Phase 1-4 + stats-based features)
 FEATURES = [
+    # Phase 1-3: core + market + enrichment
     "sentiment_delta",
     "injury_delta",
     "sharp_implied_prob",
@@ -53,7 +54,33 @@ FEATURES = [
     "injury_news_delta",
     "time_to_kickoff_hours",
     "public_bias",
+    "market_momentum",
+    # Phase 4: stats-based features (from TeamMatchStats / EventStatsSnapshot)
+    "team_attack_strength",
+    "team_defense_strength",
+    "opp_attack_strength",
+    "opp_defense_strength",
+    "expected_total_proxy",
+    "form_trend_slope",
+    "rest_fatigue_score",
+    "schedule_congestion",
+    "over25_rate",
+    "btts_rate",
+    "home_away_split_delta",
+    "league_position_delta",
+    "goals_scored_avg",
+    "goals_conceded_avg",
 ]
+
+# Soccer-specific features (added to FEATURES when training soccer model)
+SOCCER_EXTRA_FEATURES = [
+    "poisson_true_prob",
+    "over25_rate",
+    "btts_rate",
+]
+
+# Basketball-specific features (future extension)
+BASKETBALL_EXTRA_FEATURES: List[str] = []
 
 # Legacy features (backward-compatible with old JSON weights)
 LEGACY_FEATURES = [
@@ -146,6 +173,32 @@ def _clean_frame(df: pd.DataFrame, feature_list: List[str]) -> pd.DataFrame:
         out["line_staleness"] = out["line_staleness"].clip(0.0, 120.0)  # cap at 2 hours
     if "public_bias" in out.columns:
         out["public_bias"] = out["public_bias"].clip(-0.5, 0.5)
+    if "market_momentum" in out.columns:
+        out["market_momentum"] = out["market_momentum"].clip(-0.5, 0.5)
+    # Phase 4 features
+    for col in ("team_attack_strength", "team_defense_strength",
+                "opp_attack_strength", "opp_defense_strength"):
+        if col in out.columns:
+            out[col] = out[col].clip(0.1, 5.0)
+    if "expected_total_proxy" in out.columns:
+        out["expected_total_proxy"] = out["expected_total_proxy"].clip(0.0, 10.0)
+    if "form_trend_slope" in out.columns:
+        out["form_trend_slope"] = out["form_trend_slope"].clip(-3.0, 3.0)
+    if "rest_fatigue_score" in out.columns:
+        out["rest_fatigue_score"] = out["rest_fatigue_score"].clip(0.0, 1.0)
+    if "schedule_congestion" in out.columns:
+        out["schedule_congestion"] = out["schedule_congestion"].clip(0.0, 1.0)
+    for col in ("over25_rate", "btts_rate"):
+        if col in out.columns:
+            out[col] = out[col].clip(0.0, 1.0)
+    if "home_away_split_delta" in out.columns:
+        out["home_away_split_delta"] = out["home_away_split_delta"].clip(-1.0, 1.0)
+    if "league_position_delta" in out.columns:
+        out["league_position_delta"] = out["league_position_delta"].clip(-20.0, 20.0)
+    if "goals_scored_avg" in out.columns:
+        out["goals_scored_avg"] = out["goals_scored_avg"].clip(0.0, 5.0)
+    if "goals_conceded_avg" in out.columns:
+        out["goals_conceded_avg"] = out["goals_conceded_avg"].clip(0.0, 5.0)
     return out
 
 
@@ -349,15 +402,27 @@ def auto_train_all_models(min_samples: int = 200) -> str:
     if "sport" in df.columns:
         df["sport_group"] = df["sport"].apply(_get_sport_group)
 
+        # Sport-specific extra features
+        sport_extra_map = {
+            "soccer": SOCCER_EXTRA_FEATURES,
+            "basketball": BASKETBALL_EXTRA_FEATURES,
+        }
+
         for group in ["soccer", "basketball", "tennis", "americanfootball", "icehockey"]:
             subset = df[df["sport_group"] == group]
             if len(subset) < min_samples:
                 results.append(f"{group}: skipped ({len(subset)} < {min_samples})")
                 continue
 
-            X_sport = subset[FEATURES]
+            # Combine base features with sport-specific extras
+            extra = sport_extra_map.get(group, [])
+            sport_features = FEATURES + [f for f in extra if f not in FEATURES]
+
+            # Ensure columns exist
+            subset = _clean_frame(subset, sport_features)
+            X_sport = subset[sport_features]
             y_sport = (subset["status"] == "won").astype(int)
-            active_sport = _get_active_features(X_sport, FEATURES)
+            active_sport = _get_active_features(X_sport, sport_features)
 
             if not active_sport:
                 results.append(f"{group}: no feature variance")
