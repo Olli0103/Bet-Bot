@@ -20,7 +20,7 @@ class Settings(BaseModel):
     redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
     ollama_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    ollama_model: str = os.getenv("OLLAMA_MODEL", "gemma2")
+    ollama_model: str = os.getenv("OLLAMA_MODEL", "gemma:4b")
 
     odds_api_key: str = os.getenv("ODDS_API_KEY", "")
     odds_api_base_url: str = os.getenv("ODDS_API_BASE_URL", "https://api.the-odds-api.com/v4")

@@ -171,7 +171,15 @@ def _build_top_combos(engine: BettingEngine, legs: List[Dict[str, Any]]) -> List
 
 
 def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
-    sports = [s.strip() for s in settings.live_sports.split(",") if s.strip()]
+    from src.core.dynamic_settings import dynamic_settings
+
+    # Use dynamic settings for active sports, falling back to env var
+    dyn_sports = dynamic_settings.get_active_sports()
+    sports = dyn_sports if dyn_sports else [s.strip() for s in settings.live_sports.split(",") if s.strip()]
+    active_markets = set(dynamic_settings.get_active_markets())
+    min_odds_threshold = dynamic_settings.get_min_odds()
+    combo_sizes = dynamic_settings.get_combo_sizes()
+
     odds = OddsFetcher()
 
     # Dynamic bankroll: use BankrollManager if no explicit bankroll passed
@@ -193,25 +201,20 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
     # Determine tax rate based on target book
     tax_rate = 0.0 if settings.tax_free_mode else settings.tipico_tax_rate
 
-    available = set()
+    # Resolve user base-keys (e.g. "tennis_atp") into exact in-season API keys
+    # (e.g. "tennis_atp_dubai", "tennis_atp_wimbledon") via the /v4/sports endpoint.
     try:
-        sports_list = odds.get_sports()
-        if isinstance(sports_list, list):
-            available = {str(x.get("key")) for x in sports_list if x.get("key")}
+        api_active = odds.get_active_sports_from_api()
     except Exception:
-        available = set()
+        api_active = []
 
-    expanded_sports: List[str] = []
-    for sport in sports:
-        if not available or sport in available:
-            expanded_sports.append(sport)
-            continue
-        aliases = [k for k in available if k.startswith(sport + "_")]
-        expanded_sports.extend(sorted(aliases))
+    expanded_sports = OddsFetcher.resolve_sport_keys(sports, api_active)
 
     stats = {"sports_requested": len(sports), "sports_expanded": len(expanded_sports), "events_seen": 0, "signals": 0}
 
     raw_events: List[Tuple[str, Dict[str, Any]]] = []
+    # Fetch historical odds for momentum calculation (Pro API)
+    momentum_data: Dict[str, Dict[str, Dict[str, float]]] = {}
 
     for sport in expanded_sports:
         try:
@@ -220,6 +223,12 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
             continue
         if not isinstance(events, list):
             continue
+
+        # Fetch 12h-ago odds for momentum (best-effort, non-blocking)
+        try:
+            momentum_data[sport] = odds.get_odds_12h_ago(sport_key=sport)
+        except Exception:
+            momentum_data[sport] = {}
 
         for e in events:
             stats["events_seen"] += 1
@@ -351,9 +360,20 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
         # Compute public bias per selection (Tipico vs sharp shading)
         bias_scores = public_bias_score(sharp, target) if target_book == "tipico_de" else {}
 
+        # Momentum data for this sport
+        sport_momentum = momentum_data.get(sport, {})
+
         for selection, target_odds in target.items():
             sharp_odds = sharp.get(selection)
             if not sharp_odds:
+                continue
+
+            # Apply min odds threshold from dynamic settings
+            if float(target_odds) < min_odds_threshold:
+                continue
+
+            # Skip markets not in active_markets
+            if "h2h" not in active_markets:
                 continue
 
             is_home = selection == home
@@ -386,6 +406,11 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
 
             tw_delta = (tw_sent_home - tw_sent_away) if is_home else (tw_sent_away - tw_sent_home)
 
+            # Market momentum: implied probability delta over 12h (Pro API)
+            current_ip = 1.0 / float(sharp_odds) if float(sharp_odds) > 1.0 else 0.5
+            historical_ip = sport_momentum.get(event_id, {}).get(selection, current_ip)
+            market_momentum = current_ip - historical_ip
+
             ml_features = FeatureEngineer.build_core_features(
                 target_odds=float(target_odds),
                 sharp_odds=float(sharp_odds),
@@ -411,6 +436,7 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
                 twitter_sentiment_delta=tw_delta,
                 time_to_kickoff_hours=time_to_kickoff,
                 public_bias=bias_scores.get(selection, 0.0),
+                market_momentum=market_momentum,
             )
 
             model_p = qpm.get_true_probability(
@@ -425,17 +451,12 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
                 features=ml_features,
             )
 
-            # Dynamic Poisson/XGBoost blending based on xG extremity.
-            # When the Poisson model has extreme xG differential (one-sided match),
-            # its predictions are more confident → increase its weight.
-            # Draw and O/U: Poisson base weight 0.60, H2H: base 0.30.
-            # xG extremity bonus: up to +0.15 for very lopsided matches.
+            # Dynamic Poisson/XGBoost blending based on xG extremity
             if poisson_prob is not None and poisson_prob > 0:
                 is_draw = selection == "Draw"
                 home_xg = poisson_pred.get("home_xg", 1.35) if poisson_pred else 1.35
                 away_xg = poisson_pred.get("away_xg", 1.35) if poisson_pred else 1.35
                 xg_diff = abs(home_xg - away_xg)
-                # extremity bonus: 0 when diff=0, up to 0.15 when diff>=1.5
                 xg_bonus = min(0.15, xg_diff * 0.10)
 
                 if is_draw:
@@ -443,6 +464,10 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
                 else:
                     poisson_w = min(0.50, 0.30 + xg_bonus)
                 model_p = (1.0 - poisson_w) * model_p + poisson_w * poisson_prob
+
+            # Momentum adjustment
+            if abs(market_momentum) > 0.005:
+                model_p = max(0.01, min(0.99, model_p + market_momentum * 0.15))
 
             features[f"{event_id}:{selection}"] = ml_features
 
@@ -470,99 +495,201 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
                 }
             )
 
-        # --- Process spreads market ---
-        spreads_prices = _extract_prices(e.get("bookmakers") or [], market_key="spreads")
-        sharp_spreads_book, sharp_spreads = _pick_sharp(spreads_prices)
-        target_spreads_book, target_spreads = _pick_target_book(spreads_prices, sharp_spreads_book) if sharp_spreads_book else ("", {})
+        # --- Derive Double Chance & Draw No Bet for soccer (from 1X2 sharp odds) ---
+        if sport.startswith("soccer") and len(sharp) == 3:
+            home_ip = 1.0 / sharp.get(home, 3.0) if sharp.get(home, 3.0) > 1.0 else 0.33
+            draw_ip = 1.0 / sharp.get("Draw", 3.0) if sharp.get("Draw", 3.0) > 1.0 else 0.33
+            away_ip = 1.0 / sharp.get(away, 3.0) if sharp.get(away, 3.0) > 1.0 else 0.33
 
-        if target_spreads_book and target_spreads and sharp_spreads:
-            for sel_label, t_odds in target_spreads.items():
-                s_odds = sharp_spreads.get(sel_label)
-                if not s_odds:
-                    continue
-                parts = sel_label.split("|")
-                sel_name = parts[0]
-                point_val = float(parts[1]) if len(parts) > 1 else 0.0
-                sharp_prob_sp = 1.0 / s_odds if s_odds > 1.0 else 0.5
-                # Use sharp probability as model probability for spreads (no ML model yet)
-                sig = engine.make_signal(
-                    sport=sport,
-                    event_id=event_id,
-                    market=f"spreads {point_val:+.1f}",
-                    selection=f"{sel_name} {point_val:+.1f} ({home} vs {away})",
-                    bookmaker_odds=float(t_odds),
-                    model_probability=min(0.99, max(0.01, sharp_prob_sp)),
-                    source_mode=source_mode,
-                    reference_book=sharp_spreads_book,
-                    confidence=conf * 0.8,
-                    tax_rate=effective_tax,
-                )
-                signals.append(sig)
-                combo_legs.append({
-                    "event_id": event_id,
-                    "selection": f"{sel_name} {point_val:+.1f}",
-                    "odds": float(t_odds),
-                    "probability": min(0.99, max(0.01, sharp_prob_sp)),
-                    "sport": sport,
-                    "market_type": "spreads",
-                })
+            # Double Chance (1X, X2, 12) — derived mathematically
+            if "double_chance" in active_markets:
+                dc_markets = [
+                    ("1X", f"{home} oder Unentschieden", home_ip + draw_ip),
+                    ("X2", f"Unentschieden oder {away}", draw_ip + away_ip),
+                    ("12", f"{home} oder {away}", home_ip + away_ip),
+                ]
+                for dc_code, dc_label, dc_prob in dc_markets:
+                    if dc_prob > 0.01 and dc_prob < 1.0:
+                        dc_odds = round(1.0 / dc_prob, 2)
+                        if dc_odds >= min_odds_threshold:
+                            sig = engine.make_signal(
+                                sport=sport,
+                                event_id=event_id,
+                                market=f"double_chance {dc_code}",
+                                selection=f"{dc_label} ({home} vs {away})",
+                                bookmaker_odds=dc_odds,
+                                model_probability=min(0.99, dc_prob),
+                                source_mode=source_mode,
+                                reference_book=sharp_book,
+                                confidence=conf * 0.9,
+                                tax_rate=effective_tax,
+                            )
+                            signals.append(sig)
+                            combo_legs.append({
+                                "event_id": event_id,
+                                "selection": dc_label,
+                                "odds": dc_odds,
+                                "probability": min(0.99, dc_prob),
+                                "sport": sport,
+                                "market_type": "double_chance",
+                            })
+
+            # Draw No Bet (DNB) — remove draw, redistribute
+            if "draw_no_bet" in active_markets:
+                total_no_draw = home_ip + away_ip
+                if total_no_draw > 0.01:
+                    dnb_markets = [
+                        (home, home_ip / total_no_draw),
+                        (away, away_ip / total_no_draw),
+                    ]
+                    for dnb_name, dnb_prob in dnb_markets:
+                        if dnb_prob > 0.01 and dnb_prob < 1.0:
+                            dnb_odds = round(1.0 / dnb_prob, 2)
+                            if dnb_odds >= min_odds_threshold:
+                                sig = engine.make_signal(
+                                    sport=sport,
+                                    event_id=event_id,
+                                    market="draw_no_bet",
+                                    selection=f"DNB {dnb_name} ({home} vs {away})",
+                                    bookmaker_odds=dnb_odds,
+                                    model_probability=min(0.99, dnb_prob),
+                                    source_mode=source_mode,
+                                    reference_book=sharp_book,
+                                    confidence=conf * 0.85,
+                                    tax_rate=effective_tax,
+                                )
+                                signals.append(sig)
+                                combo_legs.append({
+                                    "event_id": event_id,
+                                    "selection": f"DNB {dnb_name}",
+                                    "odds": dnb_odds,
+                                    "probability": min(0.99, dnb_prob),
+                                    "sport": sport,
+                                    "market_type": "draw_no_bet",
+                                })
+
+        # --- Process spreads market ---
+        if "spreads" in active_markets:
+            spreads_prices = _extract_prices(e.get("bookmakers") or [], market_key="spreads")
+            sharp_spreads_book, sharp_spreads = _pick_sharp(spreads_prices)
+            target_spreads_book, target_spreads = _pick_target_book(spreads_prices, sharp_spreads_book) if sharp_spreads_book else ("", {})
+
+            if target_spreads_book and target_spreads and sharp_spreads:
+                for sel_label, t_odds in target_spreads.items():
+                    if float(t_odds) < min_odds_threshold:
+                        continue
+                    s_odds = sharp_spreads.get(sel_label)
+                    if not s_odds:
+                        continue
+                    parts = sel_label.split("|")
+                    sel_name = parts[0]
+                    point_val = float(parts[1]) if len(parts) > 1 else 0.0
+                    sharp_prob_sp = 1.0 / s_odds if s_odds > 1.0 else 0.5
+
+                    # Adjust spreads with momentum for NBA/NFL
+                    sp_momentum = sport_momentum.get(event_id, {}).get(sel_name, sharp_prob_sp)
+                    sp_momentum_delta = sharp_prob_sp - sp_momentum
+                    model_p_sp = sharp_prob_sp
+                    if abs(sp_momentum_delta) > 0.005 and sport in ("basketball_nba", "americanfootball_nfl"):
+                        model_p_sp = max(0.01, min(0.99, sharp_prob_sp + sp_momentum_delta * 0.15))
+
+                    sig = engine.make_signal(
+                        sport=sport,
+                        event_id=event_id,
+                        market=f"spreads {point_val:+.1f}",
+                        selection=f"{sel_name} {point_val:+.1f} ({home} vs {away})",
+                        bookmaker_odds=float(t_odds),
+                        model_probability=min(0.99, max(0.01, model_p_sp)),
+                        source_mode=source_mode,
+                        reference_book=sharp_spreads_book,
+                        confidence=conf * 0.8,
+                        tax_rate=effective_tax,
+                    )
+                    signals.append(sig)
+                    combo_legs.append({
+                        "event_id": event_id,
+                        "selection": f"{sel_name} {point_val:+.1f}",
+                        "odds": float(t_odds),
+                        "probability": min(0.99, max(0.01, model_p_sp)),
+                        "sport": sport,
+                        "market_type": "spreads",
+                    })
 
         # --- Process totals market ---
-        totals_prices = _extract_prices(e.get("bookmakers") or [], market_key="totals")
-        sharp_totals_book, sharp_totals = _pick_sharp(totals_prices)
-        target_totals_book, target_totals = _pick_target_book(totals_prices, sharp_totals_book) if sharp_totals_book else ("", {})
+        if "totals" in active_markets:
+            totals_prices = _extract_prices(e.get("bookmakers") or [], market_key="totals")
+            sharp_totals_book, sharp_totals = _pick_sharp(totals_prices)
+            target_totals_book, target_totals = _pick_target_book(totals_prices, sharp_totals_book) if sharp_totals_book else ("", {})
 
-        if target_totals_book and target_totals and sharp_totals:
-            for sel_label, t_odds in target_totals.items():
-                s_odds = sharp_totals.get(sel_label)
-                if not s_odds:
-                    continue
-                parts = sel_label.split("|")
-                sel_name = parts[0]  # "Over" or "Under"
-                point_val = float(parts[1]) if len(parts) > 1 else 2.5
-                sharp_prob_tot = 1.0 / s_odds if s_odds > 1.0 else 0.5
+            if target_totals_book and target_totals and sharp_totals:
+                for sel_label, t_odds in target_totals.items():
+                    if float(t_odds) < min_odds_threshold:
+                        continue
+                    s_odds = sharp_totals.get(sel_label)
+                    if not s_odds:
+                        continue
+                    parts = sel_label.split("|")
+                    sel_name = parts[0]  # "Over" or "Under"
+                    point_val = float(parts[1]) if len(parts) > 1 else 2.5
+                    sharp_prob_tot = 1.0 / s_odds if s_odds > 1.0 else 0.5
 
-                # Dynamic Poisson blend for soccer totals — base weight 0.60,
-                # boosted by xG extremity (high-scoring or very low-scoring predictions)
-                if poisson_pred and sport.startswith("soccer") and sel_name in ("Over", "Under"):
-                    poisson_key = "over_2_5" if sel_name == "Over" else "under_2_5"
-                    poisson_ou = poisson_pred.get(poisson_key, sharp_prob_tot)
-                    total_xg = poisson_pred.get("home_xg", 1.35) + poisson_pred.get("away_xg", 1.35)
-                    # extremity: bonus when total xG deviates from neutral 2.7
-                    xg_dev = abs(total_xg - 2.7)
-                    xg_bonus = min(0.15, xg_dev * 0.10)
-                    poisson_w = min(0.75, 0.60 + xg_bonus)
-                    model_p_tot = (1.0 - poisson_w) * sharp_prob_tot + poisson_w * poisson_ou
-                else:
-                    model_p_tot = sharp_prob_tot
+                    # Dynamic Poisson blend for soccer totals — heavy weight (0.70 base)
+                    # Uses expanded Poisson keys: over_0_5, over_1_5, over_2_5, over_3_5
+                    if poisson_pred and sport.startswith("soccer") and sel_name in ("Over", "Under"):
+                        # Map point value to Poisson key
+                        poisson_key_map = {
+                            0.5: ("over_0_5", "under_0_5"),
+                            1.5: ("over_1_5", "under_1_5"),
+                            2.5: ("over_2_5", "under_2_5"),
+                            3.5: ("over_3_5", "under_3_5"),
+                        }
+                        keys = poisson_key_map.get(point_val, ("over_2_5", "under_2_5"))
+                        poisson_key = keys[0] if sel_name == "Over" else keys[1]
+                        poisson_ou = poisson_pred.get(poisson_key, sharp_prob_tot)
+                        total_xg = poisson_pred.get("home_xg", 1.35) + poisson_pred.get("away_xg", 1.35)
+                        xg_dev = abs(total_xg - 2.7)
+                        xg_bonus = min(0.15, xg_dev * 0.10)
+                        # Heavy Poisson weight for totals: base 0.70 (up from 0.60)
+                        poisson_w = min(0.85, 0.70 + xg_bonus)
+                        model_p_tot = (1.0 - poisson_w) * sharp_prob_tot + poisson_w * poisson_ou
+                    else:
+                        model_p_tot = sharp_prob_tot
 
-                sig = engine.make_signal(
-                    sport=sport,
-                    event_id=event_id,
-                    market=f"totals {point_val}",
-                    selection=f"{sel_name} {point_val} ({home} vs {away})",
-                    bookmaker_odds=float(t_odds),
-                    model_probability=min(0.99, max(0.01, model_p_tot)),
-                    source_mode=source_mode,
-                    reference_book=sharp_totals_book,
-                    confidence=conf * 0.85,
-                    tax_rate=effective_tax,
-                )
-                signals.append(sig)
-                combo_legs.append({
-                    "event_id": event_id,
-                    "selection": f"{sel_name} {point_val}",
-                    "odds": float(t_odds),
-                    "probability": min(0.99, max(0.01, model_p_tot)),
-                    "sport": sport,
-                    "market_type": "totals",
-                })
+                    sig = engine.make_signal(
+                        sport=sport,
+                        event_id=event_id,
+                        market=f"totals {point_val}",
+                        selection=f"{sel_name} {point_val} ({home} vs {away})",
+                        bookmaker_odds=float(t_odds),
+                        model_probability=min(0.99, max(0.01, model_p_tot)),
+                        source_mode=source_mode,
+                        reference_book=sharp_totals_book,
+                        confidence=conf * 0.85,
+                        tax_rate=effective_tax,
+                    )
+                    signals.append(sig)
+                    combo_legs.append({
+                        "event_id": event_id,
+                        "selection": f"{sel_name} {point_val}",
+                        "odds": float(t_odds),
+                        "probability": min(0.99, max(0.01, model_p_tot)),
+                        "sport": sport,
+                        "market_type": "totals",
+                    })
 
+    # Rank by hit probability (70%) + positive EV (30%), respecting min odds
     ranked = [s for s in signals if s.expected_value > 0]
-    ranked.sort(key=lambda s: (s.model_probability, s.expected_value), reverse=True)
+    ranked.sort(
+        key=lambda s: (s.model_probability * 0.7 + min(s.expected_value * 10, 1.0) * 0.3),
+        reverse=True,
+    )
     top10 = ranked[:10]
 
-    combos = _build_top_combos(engine, [l for l in combo_legs if l["probability"] >= 0.55])
+    # Build combos for configured sizes (default: 10, 20, 30)
+    from src.core.combo_optimizer import ComboOptimizer
+    optimizer = ComboOptimizer(engine)
+    eligible_legs = [l for l in combo_legs if l["probability"] >= 0.50]
+    combos = optimizer.build_all_combos(eligible_legs, target_sizes=combo_sizes)
 
     payload = {
         "ts": datetime.now(timezone.utc).isoformat(),

@@ -43,6 +43,7 @@ class AnalystAgent:
         sharp_odds: float,
         sharp_market: Dict[str, float],
         trigger: str = "manual",
+        market_momentum: float = 0.0,
     ) -> Dict[str, Any]:
         """Full analysis of a single event/selection.
 
@@ -123,7 +124,7 @@ class AnalystAgent:
         bias = public_bias_score(sharp_market, {selection: target_odds})
         sel_bias = bias.get(selection, 0.0)
 
-        # 9. Build features
+        # 9. Build features (including market momentum from Pro API)
         ml_features = FeatureEngineer.build_core_features(
             target_odds=target_odds,
             sharp_odds=sharp_odds,
@@ -143,6 +144,7 @@ class AnalystAgent:
             away_volatility=vol_feats.get("away_volatility", 0.0),
             poisson_true_prob=poisson_prob,
             public_bias=sel_bias,
+            market_momentum=market_momentum,
         )
 
         # 10. Model prediction
@@ -172,6 +174,11 @@ class AnalystAgent:
                 poisson_w = min(0.50, 0.30 + xg_bonus)
             model_p = (1.0 - poisson_w) * model_p + poisson_w * poisson_prob
 
+        # Momentum adjustment: nudge model_p toward market direction
+        if abs(market_momentum) > 0.005:
+            model_p = model_p + market_momentum * 0.15
+            model_p = max(0.01, min(0.99, model_p))
+
         # 11. EV calculation
         tax_rate = settings.tipico_tax_rate if not settings.tax_free_mode else 0.0
         ev = expected_value(model_p, target_odds, tax_rate=tax_rate)
@@ -192,6 +199,7 @@ class AnalystAgent:
             "elo": elo_feats,
             "poisson_prob": poisson_prob,
             "public_bias": sel_bias,
+            "market_momentum": market_momentum,
             "bookmaker_odds": target_odds,
             "recommendation": "BET" if ev > ev_threshold else "SKIP",
         })
@@ -199,29 +207,31 @@ class AnalystAgent:
         return result
 
     async def reason_with_llm(self, context: Dict) -> Optional[str]:
-        """Optional LLM reasoning about the analysis.
+        """LLM reasoning optimized for Gemma 3 4B.
 
-        Uses Ollama (local) or Claude API if configured. Returns a qualitative
-        assessment or None if LLM is not available.
+        Uses concise German prompts with strict data-only reasoning.
         """
         try:
             from src.integrations.ollama_sentiment import OllamaSentimentClient
             nlp = OllamaSentimentClient()
 
+            model_p = context.get("model_probability", 0)
+            ev = context.get("expected_value", 0)
+            momentum = context.get("market_momentum", 0.0)
+
             prompt = (
-                f"Analyze this betting opportunity:\n"
+                "Basiere deine Analyse STRIKT auf den Daten. "
+                "Antworte in genau 2 Sätzen auf Deutsch.\n\n"
                 f"Sport: {context.get('sport')}\n"
                 f"Match: {context.get('home')} vs {context.get('away')}\n"
-                f"Selection: {context.get('selection')}\n"
-                f"Model probability: {context.get('model_probability', 0):.2%}\n"
-                f"Expected value: {context.get('expected_value', 0):.4f}\n"
-                f"Trigger: {context.get('trigger', 'unknown')}\n"
-                f"Sentiment: home={context.get('sentiment', {}).get('home', 0):.2f}, "
-                f"away={context.get('sentiment', {}).get('away', 0):.2f}\n"
-                f"Should we bet? Give a brief assessment."
+                f"Tipp: {context.get('selection')}\n"
+                f"Modell-Wk: {model_p:.0%}\n"
+                f"EV: {ev:+.4f}\n"
+                f"Momentum: {momentum:+.3f}\n"
+                f"Empfehlung: {'Wetten' if ev > 0.01 else 'Nicht wetten'}"
             )
 
-            result = nlp.analyze(text=prompt, context="betting_analysis")
-            return f"LLM: {result.label} ({result.confidence:.2f})"
+            result = await asyncio.to_thread(nlp.generate_raw, prompt)
+            return result if result else None
         except Exception:
             return None

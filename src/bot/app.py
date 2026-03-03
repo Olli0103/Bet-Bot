@@ -101,8 +101,8 @@ def build_app() -> Application:
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", balance))
-    app.add_handler(MessageHandler(filters.Regex("^Heutige Value Bets$"), menu_value_bets))
-    app.add_handler(MessageHandler(filters.Regex("(?i)^kombi[\s\-–—_]*vorschläge$"), combo_suggestions))
+    app.add_handler(MessageHandler(filters.Regex("^Heutige Top 10 Einzelwetten$"), menu_value_bets))
+    app.add_handler(MessageHandler(filters.Regex("^10/20/30 Kombis$"), combo_suggestions))
     app.add_handler(MessageHandler(filters.Regex("^Daten aktualisieren$"), refresh_data))
     app.add_handler(MessageHandler(filters.Regex("^Kontostand$"), balance))
     app.add_handler(MessageHandler(filters.Regex("^Einstellungen$"), settings_menu))
@@ -143,7 +143,7 @@ async def morning_briefing(context: ContextTypes.DEFAULT_TYPE):
     chat_id = settings.telegram_chat_id
     if not chat_id:
         return
-    await context.bot.send_message(chat_id=chat_id, text="🌅 Morning Briefing bereit. Tippe auf Heutige Value Bets.")
+    await context.bot.send_message(chat_id=chat_id, text="🌅 Morning Briefing bereit. Tippe auf Heutige Top 10 Einzelwetten.")
 
 
 async def learning_status_push(context: ContextTypes.DEFAULT_TYPE):

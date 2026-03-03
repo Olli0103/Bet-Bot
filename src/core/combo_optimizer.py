@@ -75,11 +75,20 @@ def _extract_league(sport_key: str) -> str:
     return parts[1] if len(parts) > 1 else sport_key
 
 
-def _combo_score(prob: float, odds: float) -> float:
-    """Score a leg for combo selection: balance win probability with payout contribution."""
+def _combo_score(prob: float, odds: float, market_type: str = "h2h") -> float:
+    """Score a leg for combo selection: balance win probability with payout contribution.
+
+    High-probability markets (Over 0.5/1.5, Double Chance) get a boost
+    to prioritize them in Lotto combos where hit rate matters most.
+    """
     if prob <= 0 or odds <= 1.0:
         return 0.0
-    return prob * math.log(odds)
+    base = prob * math.log(odds)
+    if market_type in ("double_chance", "draw_no_bet"):
+        base *= 1.20
+    elif market_type == "totals" and prob >= 0.80:
+        base *= 1.15
+    return base
 
 
 class ComboOptimizer:
@@ -106,8 +115,12 @@ class ComboOptimizer:
                 continue
             valid.append(leg)
 
-        # Score and sort
-        scored = sorted(valid, key=lambda l: _combo_score(l["probability"], l["odds"]), reverse=True)
+        # Score and sort (with market-type-aware scoring)
+        scored = sorted(
+            valid,
+            key=lambda l: _combo_score(l["probability"], l["odds"], l.get("market_type", "h2h")),
+            reverse=True,
+        )
 
         chosen: List[Dict] = []
         used_events: set = set()
@@ -249,23 +262,17 @@ class ComboOptimizer:
         )
 
     def build_all_combos(
-        self, candidates: List[Dict]
+        self,
+        candidates: List[Dict],
+        target_sizes: Optional[List[int]] = None,
     ) -> List[Dict]:
-        """Build combos for all target sizes (5, 10, 20, 30)."""
+        """Build combos for configured target sizes (default: 10, 20, 30)."""
+        if target_sizes is None:
+            target_sizes = [10, 20, 30]
+
         results = []
 
-        # 5-leg EV-optimal combo
-        ev_combo = self.build_ev_optimal_combo(candidates, target_legs=5)
-        if ev_combo:
-            results.append({
-                "size": 5,
-                "type": "ev_optimal",
-                "stake": COMBO_STAKES.get(5, 2.00),
-                **ev_combo.model_dump(),
-            })
-
-        # 10, 20, 30-leg lotto combos
-        for target in [10, 20, 30]:
+        for target in target_sizes:
             combo = self.build_lotto_combo(candidates, target_legs=target)
             if combo:
                 results.append({
