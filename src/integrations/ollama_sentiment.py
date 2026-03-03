@@ -3,6 +3,7 @@
 Optimized for Gemma 3 4B: concise prompts, zero temperature, strict JSON output.
 """
 import json
+import re
 from typing import Any, Dict
 
 import httpx
@@ -10,6 +11,14 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 from src.core.settings import settings
 from src.models.sentiment import SentimentResult
+
+
+def _strip_markdown_json(raw: str) -> str:
+    """Remove markdown code fences that small LLMs sometimes wrap around JSON."""
+    raw = raw.strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+    return raw.strip()
 
 
 class OllamaSentimentClient:
@@ -45,7 +54,7 @@ class OllamaSentimentClient:
         r.raise_for_status()
         data = r.json()
 
-        raw = (data.get("response") or "{}").strip()
+        raw = _strip_markdown_json(data.get("response") or "{}")
         try:
             parsed = json.loads(raw)
         except Exception:
@@ -92,7 +101,7 @@ class OllamaSentimentClient:
         with httpx.Client(timeout=90) as client:
             r = client.post(f"{self.base_url}/api/generate", json=payload)
         r.raise_for_status()
-        raw = (r.json().get("response") or "{}").strip()
+        raw = _strip_markdown_json(r.json().get("response") or "{}")
         try:
             return json.loads(raw)
         except Exception:
