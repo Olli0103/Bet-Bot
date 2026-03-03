@@ -321,16 +321,20 @@ def _fetched_within(hours: int = 4) -> bool:
 # ---------------------------------------------------------------------------
 
 def _format_signal_card(b: dict, index: int, total: int) -> str:
-    """Format a single signal as a rich card with all transparency fields."""
+    """Format a single signal as a rich card with all transparency fields.
+
+    model_probability is the SINGLE confidence value shown in UI.
+    source_quality is the odds-pair reliability (shown separately).
+    """
     sport = str(b.get("sport", "")).replace("_", " ").upper()
     market = str(b.get("market", "h2h"))
     model_p = float(b.get("model_probability", 0))
     ev = float(b.get("expected_value", 0))
     odds = float(b.get("bookmaker_odds", 0))
     stake = float(b.get("recommended_stake", 0))
-    conf = float(b.get("confidence", 0))
     source = b.get("source_mode", "n/a")
     ref = b.get("reference_book", "n/a")
+    src_q = float(b.get("source_quality", b.get("confidence", 0)))
 
     # Transparency: kelly_raw, stake_before_cap, cap status, trigger
     kelly_raw = float(b.get("kelly_raw", b.get("kelly_fraction", 0)))
@@ -351,8 +355,8 @@ def _format_signal_card(b: dict, index: int, total: int) -> str:
         f"--------------------\n"
         f"Tipp: {b['selection']}\n"
         f"Quote: {odds:.2f}\n"
-        f"Modell: {_progress_bar(model_p)} {badge}{trap}\n"
-        f"EV: {ev:+.4f} | Conf: {conf:.0%}\n"
+        f"Confidence: {_progress_bar(model_p)} {badge}{trap}\n"
+        f"EV: {ev:+.4f} | SrcQ: {src_q:.0%}\n"
         f"Kelly: {kelly_raw:.4f} | Stake: {stake_before:.2f} -> {stake:.2f} EUR{cap_tag}\n"
         f"{source} | {ref}{trigger_tag}"
     )
@@ -458,10 +462,10 @@ async def _show_top10_for_sport(
     filtered = _filter_items_by_sport(playable, sport_filter)
     n_sport_filtered = len(playable) - len(filtered)
 
-    # Re-sort per sport: confidence DESC -> EV DESC -> odds ASC
+    # Re-sort per sport: model_probability DESC -> EV DESC -> odds ASC
     filtered.sort(
         key=lambda x: (
-            float(x.get("confidence", 0)),
+            float(x.get("model_probability", 0)),
             float(x.get("expected_value", 0)),
             -float(x.get("bookmaker_odds", 99)),
         ),

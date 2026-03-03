@@ -31,7 +31,7 @@ class BettingEngine:
         kelly_frac: float = 0.2,
         source_mode: str = "primary",
         reference_book: str = "pinnacle",
-        confidence: float = 1.0,
+        source_quality: float = 1.0,
         tax_rate: float = 0.0,
         trigger: str = "",
     ) -> BetSignal:
@@ -39,13 +39,16 @@ class BettingEngine:
         kf_raw = kelly_fraction(model_probability, bookmaker_odds, frac=kelly_frac, tax_rate=tax_rate)
         stake_raw = round(kelly_stake(self.bankroll, kf_raw), 2)
 
-        # --- Confidence gate ---
+        # --- Confidence gate (uses model_probability as THE confidence) ---
         passed, min_conf = passes_confidence_gate(model_probability, sport, market)
         rejected_reason = ""
         if not passed:
-            rejected_reason = f"confidence {model_probability:.2f} < gate {min_conf:.2f}"
-            log.debug("Confidence gate blocked: %s %s %s — %s",
-                      sport, event_id, selection, rejected_reason)
+            rejected_reason = (
+                f"reject_confidence_below_min: "
+                f"model_prob={model_probability:.2f} < gate={min_conf:.2f}"
+            )
+            log.info("Confidence gate blocked: %s %s %s — %s",
+                     sport, event_id, selection, rejected_reason)
             # Zero out stake so this signal is filtered out as non-playable
             stake_final = 0.0
             kf = 0.0
@@ -58,6 +61,10 @@ class BettingEngine:
             if was_capped:
                 log.debug("Stake capped: %s %s %.2f -> %.2f",
                           sport, selection, stake_raw, stake_final)
+            log.info(
+                "Signal accepted: %s %s model_prob=%.2f ev=%.4f trigger=%s stake=%.2f",
+                sport, selection, model_probability, ev, trigger or "none", stake_final,
+            )
 
         return BetSignal(
             sport=sport,
@@ -71,7 +78,9 @@ class BettingEngine:
             recommended_stake=stake_final,
             source_mode=source_mode,
             reference_book=reference_book,
-            confidence=confidence,
+            source_quality=source_quality,
+            # confidence == model_probability: single source of truth for UI + ranking
+            confidence=model_probability,
             kelly_raw=kf_raw,
             stake_before_cap=stake_raw,
             stake_cap_applied=stake_final < stake_raw and stake_final > 0,

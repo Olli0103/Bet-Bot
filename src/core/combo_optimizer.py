@@ -41,19 +41,19 @@ COMBO_PROFILES: Dict[int, ComboConstraints] = {
         max_heavy_favorites_per_league=2, heavy_favorite_threshold=1.30,
     ),
     10: ComboConstraints(
-        max_per_sport=4, max_per_league=3, min_sports=3,
+        max_per_sport=4, max_per_league=2, min_sports=3,
         min_prob_per_leg=0.52, odds_range=(1.15, 3.50),
         max_heavy_favorites_per_league=2, heavy_favorite_threshold=1.30,
     ),
     20: ComboConstraints(
-        max_per_sport=7, max_per_league=4, min_sports=4,
+        max_per_sport=7, max_per_league=2, min_sports=4,
         min_prob_per_leg=0.50, odds_range=(1.15, 4.00),
-        max_heavy_favorites_per_league=3, heavy_favorite_threshold=1.30,
+        max_heavy_favorites_per_league=2, heavy_favorite_threshold=1.30,
     ),
     30: ComboConstraints(
-        max_per_sport=10, max_per_league=5, min_sports=5,
+        max_per_sport=10, max_per_league=2, min_sports=5,
         min_prob_per_leg=0.48, odds_range=(1.10, 4.00),
-        max_heavy_favorites_per_league=3, heavy_favorite_threshold=1.30,
+        max_heavy_favorites_per_league=2, heavy_favorite_threshold=1.30,
     ),
 }
 

@@ -600,7 +600,7 @@ def fetch_and_build_signals(
                 model_probability=model_p,
                 source_mode=source_mode,
                 reference_book=sharp_book,
-                confidence=conf,
+                source_quality=conf,
                 tax_rate=effective_tax,
             )
             signals.append(sig)
@@ -644,7 +644,7 @@ def fetch_and_build_signals(
                                 model_probability=min(0.99, dc_prob),
                                 source_mode=source_mode,
                                 reference_book=sharp_book,
-                                confidence=conf * 0.9,
+                                source_quality=conf * 0.9,
                                 tax_rate=effective_tax,
                             )
                             signals.append(sig)
@@ -681,7 +681,7 @@ def fetch_and_build_signals(
                                     model_probability=min(0.99, dnb_prob),
                                     source_mode=source_mode,
                                     reference_book=sharp_book,
-                                    confidence=conf * 0.85,
+                                    source_quality=conf * 0.85,
                                     tax_rate=effective_tax,
                                 )
                                 signals.append(sig)
@@ -731,7 +731,7 @@ def fetch_and_build_signals(
                         model_probability=min(0.99, max(0.01, model_p_sp)),
                         source_mode=source_mode,
                         reference_book=sharp_spreads_book,
-                        confidence=conf * 0.8,
+                        source_quality=conf * 0.8,
                         tax_rate=effective_tax,
                     )
                     signals.append(sig)
@@ -796,7 +796,7 @@ def fetch_and_build_signals(
                         model_probability=min(0.99, max(0.01, model_p_tot)),
                         source_mode=source_mode,
                         reference_book=sharp_totals_book,
-                        confidence=conf * 0.85,
+                        source_quality=conf * 0.85,
                         tax_rate=effective_tax,
                     )
                     signals.append(sig)
@@ -812,11 +812,11 @@ def fetch_and_build_signals(
                         "market": f"totals {point_val}",
                     })
 
-    # Rank: confidence DESC -> EV DESC -> odds ASC
+    # Rank: model_probability DESC -> EV DESC -> odds ASC
     # Only include signals that passed the confidence gate (stake > 0)
     ranked = [s for s in signals if s.expected_value > 0 and s.recommended_stake > 0]
     ranked.sort(
-        key=lambda s: (s.confidence, s.expected_value, -s.bookmaker_odds),
+        key=lambda s: (s.model_probability, s.expected_value, -s.bookmaker_odds),
         reverse=True,
     )
     log.info(
@@ -828,11 +828,18 @@ def fetch_and_build_signals(
     top10 = ranked[:10]
 
     # Build combos for configured sizes (default: 10, 20, 30)
+    # Hard confidence floor for every combo leg (default 40%)
+    min_combo_conf = settings.min_combo_leg_confidence
     _progress("combos", f"Baue Kombis aus {len(combo_legs)} Legs...", 85,
               signals=len(top10), events=stats["events_seen"])
     from src.core.combo_optimizer import ComboOptimizer
     optimizer = ComboOptimizer(engine)
-    eligible_legs = [l for l in combo_legs if l["probability"] >= 0.50]
+    eligible_legs = [
+        l for l in combo_legs
+        if l["probability"] >= max(min_combo_conf, 0.40)
+    ]
+    log.info("Combo legs: %d total, %d after confidence >= %.2f filter",
+             len(combo_legs), len(eligible_legs), min_combo_conf)
     combos = optimizer.build_all_combos(eligible_legs, target_sizes=combo_sizes)
 
     now_iso = datetime.now(timezone.utc).isoformat()

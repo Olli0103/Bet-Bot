@@ -72,5 +72,8 @@ class Settings(BaseModel):
     max_stake_longshot_pct: float = float(os.getenv("MAX_STAKE_LONGSHOT_PCT", "0.0075"))  # 0.75%
     longshot_odds_threshold: float = float(os.getenv("LONGSHOT_ODDS_THRESHOLD", "3.5"))
 
+    # Combo leg minimum confidence (model_probability)
+    min_combo_leg_confidence: float = float(os.getenv("MIN_COMBO_LEG_CONFIDENCE", "0.40"))
+
 
 settings = Settings()

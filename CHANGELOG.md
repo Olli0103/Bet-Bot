@@ -1,5 +1,72 @@
 # Changelog
 
+## [2026-03-03] Unified Confidence Model + Combo Leg Gate + Sorting Fix
+
+### Root cause: "Model 28% + Conf 100%" contradiction
+
+The BetSignal model had TWO separate fields that the UI both called "confidence":
+- `model_probability` — the actual model prediction (e.g. 28%)
+- `confidence` — the **odds source reliability** (e.g. 100% for primary Tipico/Pinnacle pair)
+
+These were displayed side-by-side as "Modell: 28%" and "Conf: 100%", creating a
+contradiction. Ranking used `confidence` (source quality) which meant a 28% pick
+from a "reliable" source could outrank a 72% pick from a fallback source.
+
+### Fix: Single source of truth
+
+- `model_probability` is now THE confidence for ranking, gates, and UI display
+- The old `confidence` field is set to `model_probability` (backward-compat)
+- Source reliability is renamed to `source_quality` (separate field, shown as "SrcQ")
+- `BettingEngine.make_signal()` enforces: `confidence = model_probability`
+- No more contradictory display possible
+
+### Ranking change
+
+- **Before:** sort by `confidence` DESC (= source reliability, not model output!)
+- **After:** sort by `model_probability` DESC -> `expected_value` DESC -> `odds` ASC
+- Both `live_feed.py` (global ranking) and `handlers.py` (per-sport re-sort) updated
+
+### Combo leg confidence gate
+
+- New setting `MIN_COMBO_LEG_CONFIDENCE` (default 0.40)
+- Every combo leg must have `model_probability >= 0.40` before combo construction
+- `max_per_league` reduced to 2 across all combo profiles for diversification
+- Cross-sport combos remain allowed
+
+### Logging
+
+- Every accepted bet logs: `model_prob`, `ev`, `trigger`, `stake`
+- Every rejected bet logs: `reject_confidence_below_min: model_prob=X < gate=Y`
+
+### New env vars
+
+- `MIN_COMBO_LEG_CONFIDENCE=0.40` — minimum model_probability for combo legs
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `src/models/betting.py` | + `source_quality` field; `confidence` = `model_probability` |
+| `src/core/betting_engine.py` | `confidence=` param renamed to `source_quality=`; sets `confidence=model_probability` |
+| `src/core/live_feed.py` | All `confidence=conf` -> `source_quality=conf`; ranking by `model_probability` |
+| `src/bot/handlers.py` | Sort by `model_probability`; card shows "Confidence:" + "SrcQ:" |
+| `src/core/combo_optimizer.py` | `max_per_league=2` across all profiles |
+| `src/core/settings.py` | + `min_combo_leg_confidence` |
+| `tests/test_confidence_unified.py` | NEW: 14 tests covering all 5 mandatory cases |
+| `tests/test_risk_guards.py` | Updated for new API (source_quality, model_probability sort) |
+
+### Tests
+
+- `tests/test_confidence_unified.py` — 14 tests:
+  1. `test_single_tips_sorted_by_model_conf_desc`
+  2. `test_single_tip_confidence_gate_blocks_low_conf`
+  3. `test_steam_move_cannot_bypass_conf_gate`
+  4. `test_combo_leg_min_confidence_40_applied`
+  5. `test_ui_confidence_consistency_single_source`
+- 76 total tests passing
+
+---
+
 ## [2026-03-03] Risk Guards + Confidence Gate + Stake Caps + Top10 Fix
 
 ### Why false picks slipped through (root cause)

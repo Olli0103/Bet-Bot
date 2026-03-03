@@ -16,7 +16,10 @@ class BetSignal(BaseModel):
     recommended_stake: float
     source_mode: str = "primary"
     reference_book: str = "pinnacle"
-    confidence: float = 1.0
+    # source_quality: how reliable is the odds source pair (1.0=primary, 0.8=fallback…)
+    # NOT the model's prediction strength — that is model_probability.
+    source_quality: float = 1.0
+    confidence: float = 1.0  # kept for backward-compat serialization; == model_probability
     point: Optional[float] = None
     odds_age_minutes: float = 0.0
     is_stale: bool = False
