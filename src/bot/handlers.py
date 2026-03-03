@@ -859,25 +859,157 @@ async def agentic_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Refresh / Help
 # ---------------------------------------------------------------------------
 
-async def _refresh_job(bot, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+def _render_progress_display(info: dict) -> str:
+    """Render a rich progress display for the fetch pipeline."""
+    phase = info.get("phase", "init")
+    pct = int(info.get("pct", 0))
+    events = int(info.get("events", 0))
+    signals = int(info.get("signals", 0))
+    sport_idx = int(info.get("sport_idx", 0))
+    sport_total = int(info.get("sport_total", 0))
+    done_sports = info.get("done_sports", [])
+    detail = info.get("detail", "")
+    combos = int(info.get("combos", 0))
+
+    # Progress bar (20 chars wide)
+    filled = int(pct / 5)
+    bar = "█" * filled + "░" * (20 - filled)
+
+    # Phase labels
+    phase_labels = {
+        "init": "⚙️ Initialisierung",
+        "resolve": "🔍 Sportarten auflösen",
+        "fetch_odds": "📡 Odds abrufen",
+        "enrichment": "🧠 Enrichment",
+        "signals": "🎯 Signals berechnen",
+        "combos": "🧩 Kombis bauen",
+        "done": "✅ Fertig!",
+    }
+    phase_label = phase_labels.get(phase, phase)
+
+    # Build sport status lines
+    sport_lines = []
+    for s in done_sports[-6:]:  # show last 6 completed sports
+        short = s.replace("soccer_", "").replace("basketball_", "").replace(
+            "americanfootball_", "").replace("icehockey_", "").replace(
+            "tennis_", "").replace("_", " ").title()
+        sport_lines.append(f"  ✅ {short}")
+
+    if phase == "fetch_odds" and detail and detail not in done_sports:
+        current = detail.replace("soccer_", "").replace("basketball_", "").replace(
+            "americanfootball_", "").replace("icehockey_", "").replace(
+            "tennis_", "").replace("_", " ").title()
+        sport_lines.append(f"  ⏳ {current}...")
+
+    sports_block = "\n".join(sport_lines) if sport_lines else ""
+
+    # Stats line
+    stats_parts = []
+    if events > 0:
+        stats_parts.append(f"Events: {events}")
+    if signals > 0:
+        stats_parts.append(f"Signals: {signals}")
+    if combos > 0:
+        stats_parts.append(f"Kombis: {combos}")
+    stats_line = " | ".join(stats_parts) if stats_parts else ""
+
+    # Sport counter
+    counter = f" ({sport_idx}/{sport_total})" if sport_total > 0 else ""
+
+    lines = [
+        "🔄 Datenupdate",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"[{bar}] {pct}%",
+        f"{phase_label}{counter}",
+    ]
+    if sports_block:
+        lines.append("")
+        lines.append(sports_block)
+    if stats_line:
+        lines.append("")
+        lines.append(stats_line)
+
+    return "\n".join(lines)
+
+
+async def _refresh_job(bot, chat_id: int, msg_id: int, context: ContextTypes.DEFAULT_TYPE):
+    progress_queue = asyncio.Queue()
+    last_text = ""
+
+    def on_progress(info):
+        """Thread-safe callback: pushes progress dict into the async queue."""
+        try:
+            progress_queue.put_nowait(info)
+        except Exception:
+            pass
+
+    async def update_display():
+        """Polls the progress queue and edits the Telegram message."""
+        nonlocal last_text
+        while True:
+            try:
+                info = await asyncio.wait_for(progress_queue.get(), timeout=2.0)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+
+            text = _render_progress_display(info)
+            # Only edit if text actually changed (avoid Telegram rate limits)
+            if text != last_text:
+                try:
+                    await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=text)
+                    last_text = text
+                except Exception:
+                    pass  # message may have been deleted, rate limited, etc.
+
+            if info.get("phase") == "done":
+                break
+
+    # Run fetch + display updater concurrently
+    display_task = asyncio.create_task(update_display())
+
     try:
         items = await asyncio.wait_for(
-            asyncio.to_thread(lambda: fetch_and_build_signals()),
-            timeout=120,
+            asyncio.to_thread(fetch_and_build_signals, progress_callback=on_progress),
+            timeout=180,
         )
+        # Wait for display to catch the "done" message
+        await asyncio.sleep(0.5)
+        display_task.cancel()
+
         meta = get_cached_meta()
-        await bot.send_message(
-            chat_id=chat_id,
-            text=(
-                f"📡 Daten aktualisiert\n"
-                f"Signals: {len(items)} | Sports: {meta.get('sports_expanded', 0)} "
-                f"| Events: {meta.get('events_seen', 0)}"
-            ),
+        final_text = (
+            "✅ Datenupdate abgeschlossen\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 Signals: {len(items)}\n"
+            f"📡 Sports: {meta.get('sports_expanded', 0)} | "
+            f"Events: {meta.get('events_seen', 0)}\n"
+            f"🧩 Kombis im Cache"
         )
+        try:
+            await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=final_text)
+        except Exception:
+            await bot.send_message(chat_id=chat_id, text=final_text)
+
     except asyncio.TimeoutError:
-        await bot.send_message(chat_id=chat_id, text="⏰ Datenupdate Timeout (120s).")
+        display_task.cancel()
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id, message_id=msg_id,
+                text="⏰ Datenupdate Timeout (180s). Teilweise Daten im Cache."
+            )
+        except Exception:
+            await bot.send_message(chat_id=chat_id, text="⏰ Datenupdate Timeout (180s).")
     except Exception as e:
-        await bot.send_message(chat_id=chat_id, text=f"❌ Fehler: {type(e).__name__}")
+        display_task.cancel()
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id, message_id=msg_id,
+                text=f"❌ Fehler beim Update: {type(e).__name__}"
+            )
+        except Exception:
+            await bot.send_message(chat_id=chat_id, text=f"❌ Fehler: {type(e).__name__}")
     finally:
         context.application.bot_data["refresh_running"] = False
 
@@ -887,8 +1019,11 @@ async def refresh_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⏳ Refresh läuft bereits...")
         return
     context.application.bot_data["refresh_running"] = True
-    await update.message.reply_text("🔄 Aktualisiere Daten im Hintergrund...")
-    context.application.create_task(_refresh_job(context.bot, update.effective_chat.id, context))
+    # Send initial progress message (will be edited in-place)
+    msg = await update.message.reply_text(_render_progress_display({"phase": "init", "pct": 0}))
+    context.application.create_task(
+        _refresh_job(context.bot, update.effective_chat.id, msg.message_id, context)
+    )
 
 
 async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):

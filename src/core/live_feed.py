@@ -170,8 +170,32 @@ def _build_top_combos(engine: BettingEngine, legs: List[Dict[str, Any]]) -> List
     return optimizer.build_all_combos(legs)
 
 
-def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
+def fetch_and_build_signals(
+    bankroll: float | None = None,
+    progress_callback=None,
+) -> List[BetSignal]:
+    """Build signals for today's events.
+
+    Parameters
+    ----------
+    bankroll : float, optional
+        Override bankroll. Uses BankrollManager if None.
+    progress_callback : callable, optional
+        Called with a dict ``{"phase": str, "detail": str, "pct": int,
+        "sport_idx": int, "sport_total": int, "events": int, "signals": int,
+        "done_sports": list[str]}`` at each major step.
+        Used by the Telegram UI for live progress display.
+    """
     from src.core.dynamic_settings import dynamic_settings
+
+    def _progress(phase: str, detail: str = "", pct: int = 0, **extra):
+        if progress_callback:
+            try:
+                progress_callback({"phase": phase, "detail": detail, "pct": pct, **extra})
+            except Exception:
+                pass
+
+    _progress("init", "Lade Einstellungen...", 0)
 
     # Use dynamic settings for active sports, falling back to env var
     dyn_sports = dynamic_settings.get_active_sports()
@@ -211,12 +235,15 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
     expanded_sports = OddsFetcher.resolve_sport_keys(sports, api_active)
 
     stats = {"sports_requested": len(sports), "sports_expanded": len(expanded_sports), "events_seen": 0, "signals": 0}
+    _progress("resolve", f"{len(expanded_sports)} Sportarten aufgelöst", 5,
+              sport_total=len(expanded_sports))
 
     raw_events: List[Tuple[str, Dict[str, Any]]] = []
     # Fetch historical odds for momentum calculation (Pro API)
     momentum_data: Dict[str, Dict[str, Dict[str, float]]] = {}
+    done_sports: List[str] = []
 
-    for sport in expanded_sports:
+    for sport_idx, sport in enumerate(expanded_sports):
         try:
             events = odds.get_sport_odds(sport_key=sport, regions="eu", markets="h2h,spreads,totals", ttl_seconds=120)
         except Exception:
@@ -234,7 +261,15 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
             stats["events_seen"] += 1
             raw_events.append((sport, e))
 
+        done_sports.append(sport)
+        fetch_pct = 5 + int((sport_idx + 1) / max(1, len(expanded_sports)) * 45)
+        _progress("fetch_odds", sport, fetch_pct,
+                  sport_idx=sport_idx + 1, sport_total=len(expanded_sports),
+                  events=stats["events_seen"], done_sports=list(done_sports))
+
     # --- Enrichment: sentiment analysis ---
+    _progress("enrichment", f"Enrichment für {stats['events_seen']} Events...", 55,
+              events=stats["events_seen"])
     sentiment: Dict[str, float] = {}
     injury_sentiment: Dict[str, float] = {}
     if settings.enrichment_enabled:
@@ -270,6 +305,9 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
 
     now_utc = datetime.now(timezone.utc)
     _, window_end = _bet_window(now_utc)
+
+    _progress("signals", f"Baue Signals für {len(raw_events)} Events...", 65,
+              events=stats["events_seen"])
 
     for sport, e in raw_events:
         event_id = str(e.get("id") or "")
@@ -703,6 +741,8 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
     top10 = ranked[:10]
 
     # Build combos for configured sizes (default: 10, 20, 30)
+    _progress("combos", f"Baue Kombis aus {len(combo_legs)} Legs...", 85,
+              signals=len(top10), events=stats["events_seen"])
     from src.core.combo_optimizer import ComboOptimizer
     optimizer = ComboOptimizer(engine)
     eligible_legs = [l for l in combo_legs if l["probability"] >= 0.50]
@@ -724,6 +764,10 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
         auto_place_virtual_bets(top10, features)
     except Exception:
         pass
+
+    _progress("done", "Fertig!", 100,
+              signals=len(top10), events=stats["events_seen"],
+              combos=len(combos), done_sports=list(done_sports))
 
     return top10
 
