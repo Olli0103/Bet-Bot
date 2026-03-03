@@ -1,5 +1,5 @@
 """Telegram bot handlers with interactive inline keyboards, visual dashboards,
-and agentic chat mode.
+dynamic settings toggle dashboard, NLP intent routing, and agentic chat mode.
 
 All sync DB calls are wrapped in asyncio.to_thread to avoid blocking the
 event loop (the "gotcha" fix).
@@ -69,7 +69,7 @@ def _sync_place_bet(payload: dict) -> None:
 
 MAIN_MENU = ReplyKeyboardMarkup(
     [
-        ["Heutige Value Bets", "Kombi-Vorschläge"],
+        ["Heutige Top 10 Einzelwetten", "10/20/30 Kombis"],
         ["Daten aktualisieren", "Kontostand"],
         ["Einstellungen", "Hilfe"],
     ],
@@ -161,7 +161,7 @@ def _fetched_within(hours: int = 4) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Value Bets: Inline Pagination
+# Value Bets: Inline Pagination — "Heutige Top 10 Einzelwetten"
 # ---------------------------------------------------------------------------
 
 def _format_signal_card(b: dict, index: int, total: int) -> str:
@@ -218,7 +218,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def menu_value_bets(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show value bets with inline pagination (one card at a time)."""
+    """Show Top 10 value bets ranked by hit probability + positive EV."""
     items, ts = get_cached_signals()
 
     if not items:
@@ -248,7 +248,7 @@ async def menu_value_bets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     items = items[:10]
     context.user_data["signal_items"] = items
 
-    header = f"📊 {len(items)} Value Bets"
+    header = f"🎯 Top {len(items)} Einzelwetten"
     if ts:
         header += f" | Stand: {ts[:16]}"
     await update.message.reply_text(header)
@@ -268,13 +268,12 @@ async def menu_value_bets(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
-# Combo Suggestions: Rich Display
+# Combo Suggestions: "10/20/30 Kombis"
 # ---------------------------------------------------------------------------
 
 def _format_combo_card(combo_data: dict) -> str:
     """Format a combo as a rich card with legs table and progress bar."""
     size = combo_data.get("size", 0)
-    combo_type = combo_data.get("type", "lotto")
     stake = float(combo_data.get("stake", 1.00))
     combined_odds = float(combo_data.get("combined_odds", 0))
     combined_prob = float(combo_data.get("combined_probability", 0))
@@ -283,8 +282,6 @@ def _format_combo_card(combo_data: dict) -> str:
 
     potential_payout = round(stake * combined_odds, 2)
     is_playable = ev > 0
-    type_label = "EV-Optimal" if combo_type == "ev_optimal" else "Lotto"
-    icon = "🎯" if combo_type == "ev_optimal" else "🧩"
 
     legs_lines = []
     for i, leg in enumerate(legs):
@@ -297,7 +294,7 @@ def _format_combo_card(combo_data: dict) -> str:
     tax_badge = " 🏷️ Steuerfrei" if len(legs) >= 3 else ""
 
     return (
-        f"{icon} KOMBI {size}er | {type_label}{tax_badge}\n"
+        f"🧩 KOMBI {size}er | Lotto{tax_badge}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"Status: {'✅ spielbar' if is_playable else '⚠️ watchlist'}\n"
         f"Gesamtquote: {combined_odds:.2f} ({len(legs)} Legs)\n"
@@ -310,6 +307,7 @@ def _format_combo_card(combo_data: dict) -> str:
 
 
 async def combo_suggestions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show 10/20/30-leg Tipico-friendly Lotto combos."""
     from src.core.live_feed import get_cached_combos
     combos = get_cached_combos()
 
@@ -324,7 +322,7 @@ async def combo_suggestions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Keine Kombi-Daten vorhanden. Bitte später erneut versuchen.")
         return
 
-    await update.message.reply_text(f"🧩 {len(combos)} Kombi-Vorschläge")
+    await update.message.reply_text(f"🧩 {len(combos)} Lotto-Kombis (10/20/30 Legs)")
     for combo_data in combos:
         card = _format_combo_card(combo_data)
         await update.message.reply_text(card)
@@ -394,7 +392,7 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
-# Callback Handler: Pagination + Mark + Agent Actions
+# Callback Handler: Pagination + Mark + Settings Toggles + Agent Actions
 # ---------------------------------------------------------------------------
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -454,6 +452,37 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur.add(key)
         cache.set_json(ck, sorted(cur), ttl_seconds=2 * 24 * 3600)
         await q.edit_message_text("Als platziert gespeichert ✅")
+        return
+
+    # --- Dynamic Settings Toggles (EPIC 2) ---
+    if data.startswith("settings:"):
+        from src.core.dynamic_settings import dynamic_settings
+        parts = data.split(":", 2)
+        if len(parts) < 3:
+            return
+
+        category, key = parts[1], parts[2]
+        if category == "sport":
+            dynamic_settings.toggle_sport(key)
+        elif category == "market":
+            dynamic_settings.toggle_market(key)
+        elif category == "combo":
+            try:
+                dynamic_settings.toggle_combo_size(int(key))
+            except ValueError:
+                pass
+        elif category == "min_odds":
+            try:
+                dynamic_settings.set_min_odds(float(key))
+            except ValueError:
+                pass
+
+        # Re-render settings dashboard
+        keyboard = _build_settings_keyboard()
+        try:
+            await q.edit_message_reply_markup(reply_markup=keyboard)
+        except Exception:
+            pass
         return
 
     # --- Agent alert: Ask Analyst for deep dive ---
@@ -531,25 +560,165 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
-# Agentic Chat Mode: Reply to any message to ask the LLM
+# Dynamic Settings Dashboard (EPIC 2)
 # ---------------------------------------------------------------------------
 
-async def agentic_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle free-text questions about betting decisions.
+def _build_settings_keyboard() -> InlineKeyboardMarkup:
+    """Build the categorized InlineKeyboardMarkup toggle dashboard."""
+    from src.core.dynamic_settings import (
+        AVAILABLE_SPORTS,
+        AVAILABLE_MARKETS,
+        AVAILABLE_COMBO_SIZES,
+        dynamic_settings,
+    )
+    ds = dynamic_settings.get_all()
+    active_sports = set(ds.get("active_sports", []))
+    active_markets = set(ds.get("active_markets", []))
+    active_combos = set(ds.get("target_combo_sizes", []))
+    min_odds = float(ds.get("min_odds_threshold", 1.20))
 
-    Users can ask "Why is the model fading the Lakers tonight?" and the bot
-    routes the question to the Analyst LLM for a natural language answer.
-    """
-    text = (update.message.text or "").strip()
-    if not text or len(text) < 10:
+    rows = []
+
+    # Sports row(s)
+    sport_row: List[InlineKeyboardButton] = []
+    for key, label in AVAILABLE_SPORTS.items():
+        icon = "✅" if key in active_sports else "❌"
+        sport_row.append(InlineKeyboardButton(f"{icon} {label}", callback_data=f"settings:sport:{key}"))
+        if len(sport_row) == 3:
+            rows.append(sport_row)
+            sport_row = []
+    if sport_row:
+        rows.append(sport_row)
+
+    # Markets row(s)
+    mkt_row: List[InlineKeyboardButton] = []
+    for key, label in AVAILABLE_MARKETS.items():
+        icon = "✅" if key in active_markets else "❌"
+        mkt_row.append(InlineKeyboardButton(f"{icon} {label}", callback_data=f"settings:market:{key}"))
+        if len(mkt_row) == 3:
+            rows.append(mkt_row)
+            mkt_row = []
+    if mkt_row:
+        rows.append(mkt_row)
+
+    # Min odds threshold row
+    odds_row = []
+    for val in [1.10, 1.20, 1.30, 1.50]:
+        check = " ✓" if abs(min_odds - val) < 0.01 else ""
+        odds_row.append(InlineKeyboardButton(f"{val:.2f}{check}", callback_data=f"settings:min_odds:{val}"))
+    rows.append(odds_row)
+
+    # Combo sizes row
+    combo_row = []
+    for size in AVAILABLE_COMBO_SIZES:
+        icon = "✅" if size in active_combos else "❌"
+        combo_row.append(InlineKeyboardButton(f"{icon} {size}er", callback_data=f"settings:combo:{size}"))
+    rows.append(combo_row)
+
+    return InlineKeyboardMarkup(rows)
+
+
+async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Interactive settings dashboard with toggle buttons."""
+    from src.core.dynamic_settings import dynamic_settings
+    ds = dynamic_settings.get_all()
+
+    msg = (
+        f"⚙️ Einstellungen\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Bankroll: {await asyncio.to_thread(_get_bankroll):.2f} EUR\n"
+        f"Min Quote: {ds.get('min_odds_threshold', 1.20):.2f}\n"
+        f"Fetch: 07:00 + 13:00\n"
+        f"LLM: {settings.ollama_model}\n\n"
+        f"Tippe auf die Buttons um Einstellungen zu ändern:"
+    )
+    keyboard = _build_settings_keyboard()
+    await update.message.reply_text(msg, reply_markup=keyboard)
+
+
+# ---------------------------------------------------------------------------
+# NLP Intent Router (EPIC 7): Free-text -> Structured Intent -> Action
+# ---------------------------------------------------------------------------
+
+async def _classify_intent(text: str) -> dict:
+    """Send text to Gemma 3 4B for intent classification."""
+    try:
+        from src.integrations.ollama_sentiment import OllamaSentimentClient
+        nlp = OllamaSentimentClient()
+
+        prompt = (
+            "Klassifiziere die Nutzer-Nachricht als JSON-Intent.\n"
+            "Mögliche Intents:\n"
+            '{"intent":"get_top_bets","limit":N} - Nutzer will Top Wetten sehen\n'
+            '{"intent":"get_combos","size":N} - Nutzer will Kombis (10,20,30)\n'
+            '{"intent":"explain_bet","query":"..."} - Nutzer stellt eine Frage\n\n'
+            "Antworte NUR mit dem JSON. Keine Erklärung.\n\n"
+            f"Nachricht: {text}"
+        )
+
+        result = await asyncio.to_thread(nlp.generate_json, prompt)
+        if isinstance(result, dict) and "intent" in result:
+            return result
+    except Exception:
+        pass
+
+    return {"intent": "explain_bet", "query": text}
+
+
+async def _handle_get_top_bets(update: Update, context: ContextTypes.DEFAULT_TYPE, limit: int = 5):
+    """Handle get_top_bets intent from NLP."""
+    items, _ = get_cached_signals()
+    placed = _placed_keys_today()
+    items = [
+        x for x in items
+        if float(x.get("expected_value", 0)) > 0
+        and f"{x.get('event_id')}|{x.get('selection')}" not in placed
+    ]
+
+    if not items:
+        await update.message.reply_text("Keine spielbaren Value Bets verfügbar.")
         return
 
-    question_markers = ["?", "why", "warum", "explain", "erkläre", "how", "wie", "what", "was"]
-    if not any(m in text.lower() for m in question_markers):
+    limit = min(limit, len(items), 10)
+    items = items[:limit]
+
+    await update.message.reply_text(f"🎯 Top {limit} Einzelwetten:")
+    for i, b in enumerate(items):
+        sport = str(b.get("sport", "")).replace("_", " ").upper()
+        model_p = float(b.get("model_probability", 0))
+        badge = _calibration_badge(model_p)
+        msg = (
+            f"🎯 {i+1}. {sport} {badge}\n"
+            f"Tipp: {b['selection']}\n"
+            f"Quote: {float(b['bookmaker_odds']):.2f} | "
+            f"Modell: {_progress_bar(model_p)}\n"
+            f"EV: {float(b['expected_value']):+.4f}"
+        )
+        await update.message.reply_text(msg)
+
+
+async def _handle_get_combos(update: Update, context: ContextTypes.DEFAULT_TYPE, size: int = 10):
+    """Handle get_combos intent from NLP."""
+    from src.core.live_feed import get_cached_combos
+    combos = get_cached_combos()
+
+    if not combos:
+        await update.message.reply_text("Keine Kombis verfügbar. Bitte 'Daten aktualisieren'.")
         return
 
-    await update.message.reply_text("🤔 Analysiere deine Frage...")
+    # Filter by requested size if specified
+    if size in (10, 20, 30):
+        filtered = [c for c in combos if c.get("size") == size]
+        if filtered:
+            combos = filtered
 
+    for combo_data in combos:
+        card = _format_combo_card(combo_data)
+        await update.message.reply_text(card)
+
+
+async def _handle_explain_bet(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str):
+    """Handle explain_bet intent from NLP."""
     try:
         from src.integrations.ollama_sentiment import OllamaSentimentClient
         nlp = OllamaSentimentClient()
@@ -559,19 +728,19 @@ async def agentic_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if items:
             for b in items[:3]:
                 context_str += (
-                    f"- {b.get('selection')}: odds={b.get('bookmaker_odds')}, "
-                    f"model_p={b.get('model_probability')}, ev={b.get('expected_value')}\n"
+                    f"- {b.get('selection')}: quote={b.get('bookmaker_odds')}, "
+                    f"modell_wk={b.get('model_probability')}, ev={b.get('expected_value')}\n"
                 )
 
         prompt = (
-            f"The user asks about their betting bot: \"{text}\"\n\n"
-            f"Current signals:\n{context_str}\n"
-            f"Give a concise, helpful answer in 2-3 sentences. "
-            f"Focus on the model features and EV reasoning."
+            "Basiere deine Antwort STRIKT auf den Daten. "
+            "Antworte in 2-3 Sätzen auf Deutsch.\n\n"
+            f"Frage: {query}\n\n"
+            f"Aktuelle Signals:\n{context_str}"
         )
 
-        result = await asyncio.to_thread(nlp.analyze, text=prompt, context="betting_qa")
-        answer = f"💡 {result.label}" if hasattr(result, "label") else "Keine Antwort verfügbar."
+        result = await asyncio.to_thread(nlp.generate_raw, prompt)
+        answer = f"💡 {result}" if result else "Keine Antwort verfügbar."
         await update.message.reply_text(answer)
     except ImportError:
         await update.message.reply_text("LLM nicht verfügbar. Stelle sicher, dass Ollama läuft.")
@@ -579,8 +748,38 @@ async def agentic_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Analyse fehlgeschlagen: {type(exc).__name__}")
 
 
+async def agentic_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """NLP Intent Router: classifies free-text messages and routes to handlers.
+
+    Supported intents:
+    - get_top_bets: Show top N value bets
+    - get_combos: Show combo suggestions with specific size
+    - explain_bet: Answer questions about betting decisions
+    """
+    text = (update.message.text or "").strip()
+    if not text or len(text) < 3:
+        return
+
+    await update.message.reply_text("🤔 Analysiere deine Nachricht...")
+
+    intent_data = await _classify_intent(text)
+    intent = intent_data.get("intent", "explain_bet")
+
+    if intent == "get_top_bets":
+        limit = int(intent_data.get("limit", 5))
+        await _handle_get_top_bets(update, context, limit=max(1, min(10, limit)))
+    elif intent == "get_combos":
+        size = int(intent_data.get("size", 10))
+        await _handle_get_combos(update, context, size=size)
+    elif intent == "explain_bet":
+        query = str(intent_data.get("query", text))
+        await _handle_explain_bet(update, context, query=query)
+    else:
+        await _handle_explain_bet(update, context, query=text)
+
+
 # ---------------------------------------------------------------------------
-# Refresh / Settings / Help
+# Refresh / Help
 # ---------------------------------------------------------------------------
 
 async def _refresh_job(bot, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
@@ -615,39 +814,26 @@ async def refresh_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.application.create_task(_refresh_job(context.bot, update.effective_chat.id, context))
 
 
-async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    bankroll = await asyncio.to_thread(_get_bankroll)
-    tax_mode = "Steuerfrei" if settings.tax_free_mode else f"{settings.tipico_tax_rate:.0%} Steuer"
-    twitter_status = "✅ Aktiv" if settings.twitter_enabled else "❌ Inaktiv"
-    msg = (
-        f"⚙️ Einstellungen\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"Bankroll: {bankroll:.2f} EUR\n"
-        f"Steuer: {tax_mode}\n"
-        f"Twitter/X: {twitter_status}\n"
-        f"Enrichment: {'✅' if settings.enrichment_enabled else '❌'}\n"
-        f"Sports: {settings.live_sports}\n"
-        f"Fetch: 07:00 + 13:00 | Agent: 60s/5min\n"
-        f"Auto-Grading: ✅ aktiv"
-    )
-    await update.message.reply_text(msg)
-
-
 async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "📖 Hilfe\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "🎯 Heutige Value Bets — Top 10 mit Inline-Navigation\n"
-        "🧩 Kombi-Vorschläge — 5/10/20/30er Kombis\n"
+        "🎯 Heutige Top 10 Einzelwetten — Beste Einzelwetten nach Trefferquote\n"
+        "🧩 10/20/30 Kombis — Tipico-freundliche Lotto-Kombis\n"
         "📊 Kontostand — PnL-Dashboard mit Chart\n"
         "🔄 Daten aktualisieren — Odds-Refresh\n"
-        "⚙️ Einstellungen — Bot-Konfiguration\n\n"
-        "💬 Frage stellen: Einfach eine Frage tippen!\n"
-        "z.B. \"Warum empfiehlt das Modell diesen Tipp?\"\n\n"
-        "🤖 Agent Alerts haben interaktive Buttons:\n"
+        "⚙️ Einstellungen — Sportarten, Märkte, Min-Quote umschalten\n\n"
+        "💬 Natürliche Sprache (einfach schreiben):\n"
+        '  • "Gib mir die Top 5 für heute"\n'
+        '  • "Zeig mir 10er Kombis"\n'
+        '  • "Erkläre mir den Lakers Tipp"\n'
+        '  • "Zeig mir die besten 3 Fußball Wetten"\n\n'
+        "🤖 Agent Alerts:\n"
         "  🔍 Deep Dive — Analyst-Analyse\n"
         "  💰 Ghost Bet — Virtuelle Wette\n"
-        "  🛑 Ignorieren — Alert verwerfen"
+        "  🛑 Ignorieren — Alert verwerfen\n\n"
+        "📡 Datenquellen: Odds API (Pro), Ollama gemma:4b, NewsAPI\n"
+        "⏰ Automatische Fetches: 07:00 + 13:00"
     )
     await update.message.reply_text(msg)
 
@@ -673,7 +859,7 @@ async def push_daily_signals(bot, chat_id: str):
     if not singles:
         await bot.send_message(chat_id=chat_id, text="Keine spielbaren Einzelwetten heute.")
     else:
-        await bot.send_message(chat_id=chat_id, text=f"🎯 {len(singles[:10])} Value Bets")
+        await bot.send_message(chat_id=chat_id, text=f"🎯 {len(singles[:10])} Top Einzelwetten")
         for b in singles[:10]:
             sport = str(b.get("sport", "")).replace("_", " ").upper()
             model_p = float(b.get("model_probability", 0))
@@ -695,7 +881,7 @@ async def push_daily_signals(bot, chat_id: str):
         await bot.send_message(chat_id=chat_id, text="Keine Kombi-Vorschläge heute.")
         return
 
-    await bot.send_message(chat_id=chat_id, text=f"🧩 {len(cached_combos)} Kombi-Vorschläge")
+    await bot.send_message(chat_id=chat_id, text=f"🧩 {len(cached_combos)} Lotto-Kombis")
     for combo_data in cached_combos:
         if float(combo_data.get("expected_value", 0)) <= 0:
             continue

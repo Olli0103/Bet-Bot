@@ -1,7 +1,7 @@
 """Poisson goal-distribution model for soccer match prediction.
 
 Uses per-team attack/defense strength ratings (cached in Redis) and a score
-matrix approach to derive 1X2, over/under 2.5, and BTTS probabilities.
+matrix approach to derive 1X2, over/under 0.5/1.5/2.5/3.5, and BTTS probabilities.
 """
 from __future__ import annotations
 
@@ -135,12 +135,16 @@ class PoissonSoccerModel:
         p_home = 0.0
         p_draw = 0.0
         p_away = 0.0
+        p_over_0_5 = 0.0
+        p_over_1_5 = 0.0
         p_over_2_5 = 0.0
+        p_over_3_5 = 0.0
         p_btts = 0.0
 
         for i in range(SCORE_RANGE):
             for j in range(SCORE_RANGE):
                 p = matrix[i][j]
+                total = i + j
                 if i > j:
                     p_home += p
                 elif i == j:
@@ -148,8 +152,14 @@ class PoissonSoccerModel:
                 else:
                     p_away += p
 
-                if i + j > 2:
+                if total > 0:
+                    p_over_0_5 += p
+                if total > 1:
+                    p_over_1_5 += p
+                if total > 2:
                     p_over_2_5 += p
+                if total > 3:
+                    p_over_3_5 += p
 
                 if i >= 1 and j >= 1:
                     p_btts += p
@@ -158,8 +168,14 @@ class PoissonSoccerModel:
             "h2h_home": round(p_home, 6),
             "h2h_draw": round(p_draw, 6),
             "h2h_away": round(p_away, 6),
+            "over_0_5": round(p_over_0_5, 6),
+            "under_0_5": round(1.0 - p_over_0_5, 6),
+            "over_1_5": round(p_over_1_5, 6),
+            "under_1_5": round(1.0 - p_over_1_5, 6),
             "over_2_5": round(p_over_2_5, 6),
             "under_2_5": round(1.0 - p_over_2_5, 6),
+            "over_3_5": round(p_over_3_5, 6),
+            "under_3_5": round(1.0 - p_over_3_5, 6),
             "btts_yes": round(p_btts, 6),
             "btts_no": round(1.0 - p_btts, 6),
             "home_xg": round(home_xg, 4),

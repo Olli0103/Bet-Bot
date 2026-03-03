@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
+from src.core.dynamic_settings import dynamic_settings
 from src.core.settings import settings
 from src.core.volatility_tracker import (
     detect_steam_move,
@@ -40,11 +41,26 @@ class ScoutAgent:
         prev = cache.get_json(SNAPSHOT_KEY) or {}
         self._previous_snapshot = prev
 
-        sports = [s.strip() for s in settings.live_sports.split(",") if s.strip()]
+        # Use dynamic settings for active sports (fallback to env var)
+        active_sports = dynamic_settings.get_active_sports()
+        if not active_sports:
+            active_sports = [s.strip() for s in settings.live_sports.split(",") if s.strip()]
         current_snapshot: Dict[str, Dict[str, float]] = {}
         kickoff_times: List[str] = []
 
-        for sport in sports:
+        # Fetch 12h-ago momentum data per sport
+        momentum_data: Dict[str, Dict[str, float]] = {}
+        for sport in active_sports:
+            try:
+                sport_momentum = self.odds_fetcher.get_odds_12h_ago(sport)
+                if sport_momentum:
+                    for eid, sels in sport_momentum.items():
+                        for sel, ip_val in sels.items():
+                            momentum_data[f"{eid}:{sel}"] = ip_val
+            except Exception:
+                pass
+
+        for sport in active_sports:
             try:
                 events = await self.odds_fetcher.get_sport_odds_async(
                     sport_key=sport, regions="eu", markets="h2h", ttl_seconds=60,
@@ -97,6 +113,10 @@ class ScoutAgent:
                             is_steam = detect_steam_move(current_odds, prev_odds, team_vol)
 
                             if is_steam:
+                                # Compute 12h momentum if available
+                                hist_ip = momentum_data.get(key)
+                                market_momentum = round(current_ip - hist_ip, 4) if hist_ip else 0.0
+
                                 alerts.append({
                                     "type": "steam_move",
                                     "event_id": event_id,
@@ -108,6 +128,7 @@ class ScoutAgent:
                                     "current_odds": current_odds,
                                     "movement_pct": round(abs(1.0 / current_odds - 1.0 / prev_odds) * 100, 2),
                                     "team_volatility": team_vol,
+                                    "market_momentum": market_momentum,
                                 })
                                 log.info("Steam move detected: %s %s %.2f -> %.2f", sport, name, prev_odds, current_odds)
 
@@ -140,7 +161,8 @@ class ScoutAgent:
             return alerts
 
         # Get teams from currently tracked events
-        sports = [s.strip() for s in settings.live_sports.split(",") if s.strip()]
+        active_sports = dynamic_settings.get_active_sports()
+        sports = active_sports if active_sports else [s.strip() for s in settings.live_sports.split(",") if s.strip()]
         teams: set = set()
 
         for sport in sports:
