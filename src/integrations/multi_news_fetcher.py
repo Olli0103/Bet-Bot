@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from src.core.settings import settings
@@ -183,6 +182,27 @@ class MultiNewsFetcher:
         self.min_articles = min_articles
         self.max_articles = max_articles
 
+    def _dedup_add(
+        self,
+        articles: List[Dict[str, Any]],
+        seen: set,
+        entry: Dict[str, Any],
+    ) -> None:
+        """Add entry to articles list if not a duplicate (by title/URL hash)."""
+        th = _title_hash(entry.get("title", ""))
+        url = entry.get("url", "")
+        uh = _url_hash(url) if url else None
+
+        if th in seen:
+            return
+        if uh and uh in seen:
+            return
+
+        seen.add(th)
+        if uh:
+            seen.add(uh)
+        articles.append(entry)
+
     async def search_async(
         self,
         query: str,
@@ -197,85 +217,70 @@ class MultiNewsFetcher:
         all_articles: List[Dict[str, Any]] = []
         seen_hashes: set = set()
 
-        # 1. Rotowire RSS (injury/sports news)
+        # 1. Rotowire RSS (injury/sports news) — search across all feeds
         try:
-            from src.integrations.rss_fetcher import RSSFetcher
+            from src.integrations.rss_fetcher import RSSFetcher, SPORT_TO_FEED
             rss = RSSFetcher()
-            rss_results = rss.fetch_injury_news(
-                sport_key="",  # will return empty for unknown key, so use direct feed
+            # Use OddsAPI sport keys so _sport_key_to_feed can resolve them
+            all_sport_keys = list(SPORT_TO_FEED.keys()) + ["soccer_epl"]
+            rss_results = rss.fetch_all_sports_news(
+                active_sports=all_sport_keys,
                 team_names=[query],
                 max_age_hours=48,
             )
             for entry in rss_results:
-                th = _title_hash(entry.get("title", ""))
-                if th not in seen_hashes:
-                    seen_hashes.add(th)
-                    all_articles.append({
-                        **entry,
-                        "source": "rotowire",
-                        "confidence": SOURCE_CONFIDENCE["rotowire"],
-                    })
+                self._dedup_add(all_articles, seen_hashes, {
+                    **entry,
+                    "source": "rotowire",
+                    "confidence": SOURCE_CONFIDENCE["rotowire"],
+                })
         except Exception as exc:
             log.debug("Rotowire RSS failed for '%s': %s", query, exc)
 
         # 2. GNews (if we need more articles)
         if len(all_articles) < self.min_articles:
+            gnews = GNewsFetcher()
             try:
-                gnews = GNewsFetcher()
                 gnews_results = await gnews.search_async(query, language)
                 for a in gnews_results:
-                    uh = _url_hash(a.get("url", ""))
-                    th = _title_hash(a.get("title", ""))
-                    if uh not in seen_hashes and th not in seen_hashes:
-                        seen_hashes.add(uh)
-                        seen_hashes.add(th)
-                        all_articles.append(a)
-                await gnews.close()
+                    self._dedup_add(all_articles, seen_hashes, a)
             except Exception as exc:
                 log.debug("GNews failed for '%s': %s", query, exc)
+            finally:
+                await gnews.close()
 
         # 3. NewsData.io (if still not enough)
         if len(all_articles) < self.min_articles:
+            newsdata = NewsDataFetcher()
             try:
-                newsdata = NewsDataFetcher()
                 newsdata_results = await newsdata.search_async(query, language)
                 for a in newsdata_results:
-                    uh = _url_hash(a.get("url", ""))
-                    th = _title_hash(a.get("title", ""))
-                    if uh not in seen_hashes and th not in seen_hashes:
-                        seen_hashes.add(uh)
-                        seen_hashes.add(th)
-                        all_articles.append(a)
-                await newsdata.close()
+                    self._dedup_add(all_articles, seen_hashes, a)
             except Exception as exc:
                 log.debug("NewsData failed for '%s': %s", query, exc)
+            finally:
+                await newsdata.close()
 
         # 4. NewsAPI (final fallback)
         if len(all_articles) < self.min_articles:
+            from src.integrations.news_fetcher import NewsFetcher
+            nf = NewsFetcher()
             try:
-                from src.integrations.news_fetcher import NewsFetcher
-                nf = NewsFetcher()
                 payload = await nf.search_news_async(query, language)
                 for a in (payload.get("articles") or []):
-                    url = a.get("url", "")
-                    title = a.get("title", "")
-                    uh = _url_hash(url)
-                    th = _title_hash(title)
-                    if uh not in seen_hashes and th not in seen_hashes:
-                        seen_hashes.add(uh)
-                        seen_hashes.add(th)
-                        all_articles.append({
-                            "title": title,
-                            "summary": (a.get("description") or "")[:500],
-                            "url": url,
-                            "published": a.get("publishedAt", ""),
-                            "source": "newsapi",
-                            "source_name": (a.get("source") or {}).get("name", ""),
-                            "confidence": SOURCE_CONFIDENCE["newsapi"],
-                        })
-                await nf.close()
+                    self._dedup_add(all_articles, seen_hashes, {
+                        "title": a.get("title", ""),
+                        "summary": (a.get("description") or "")[:500],
+                        "url": a.get("url", ""),
+                        "published": a.get("publishedAt", ""),
+                        "source": "newsapi",
+                        "source_name": (a.get("source") or {}).get("name", ""),
+                        "confidence": SOURCE_CONFIDENCE["newsapi"],
+                    })
             except Exception as exc:
                 log.debug("NewsAPI failed for '%s': %s", query, exc)
+            finally:
+                await nf.close()
 
         # Trim to max
         all_articles = all_articles[:self.max_articles]
