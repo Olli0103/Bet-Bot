@@ -242,7 +242,7 @@ class AnalystAgent:
         net_injury_effect = sel_injury_penalty - opp_injury_penalty
         # Apply as a direct probability adjustment (clamped)
         if abs(net_injury_effect) > 0.01:
-            model_p = max(0.01, min(0.99, model_p + net_injury_effect * 0.15))
+            model_p = max(0.01, min(0.99, model_p + net_injury_effect * 0.50))
 
         # 12. EV calculation
         tax_rate = settings.tipico_tax_rate if not settings.tax_free_mode else 0.0
@@ -299,13 +299,14 @@ class AnalystAgent:
 
             prompt = (
                 "Basiere deine Analyse STRIKT auf den Daten. "
-                "Antworte in genau 2 Sätzen auf Deutsch.\n\n"
+                "Erstelle eine ultrakurze, praegnante Zusammenfassung (maximal 30 Woerter) auf Deutsch. "
+                "Verwende KEINE Formatierungen wie Sterne, fett oder kursiv. Antworte in reinem Text.\n\n"
                 f"Sport: {context.get('sport')}\n"
                 f"Match: {context.get('home')} vs {context.get('away')}\n"
                 f"Tipp: {context.get('selection')}\n"
                 f"Modell-Wk: {model_p:.0%}\n"
-                f"EV: {ev:+.4f}\n"
-                f"Momentum: {momentum:+.3f}\n"
+                f"Erwarteter Profit (EV): {ev * 100:+.2f}%\n"
+                f"Wettmarkt-Momentum: {momentum * 100:+.1f}%\n"
                 f"Empfehlung: {'Wetten' if ev > 0.01 else 'Nicht wetten'}"
                 f"{inj_text}"
             )

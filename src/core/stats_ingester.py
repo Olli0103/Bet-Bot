@@ -20,7 +20,22 @@ from src.data.postgres import SessionLocal
 log = logging.getLogger(__name__)
 
 ROLLING_WINDOW = 10  # number of recent matches to consider
-LEAGUE_AVG_GOALS = 1.35  # fallback league average per team per match
+
+# Sport-specific average scores per team per match.
+# Used to normalise attack/defense strength across different sports.
+SPORT_AVG_SCORES: Dict[str, float] = {
+    "soccer": 1.35,
+    "icehockey": 3.1,
+    "basketball": 112.0,
+    "americanfootball": 22.0,
+    "tennis": 6.0,
+}
+
+
+def _league_avg_for_sport(sport_key: str) -> float:
+    """Return the sport-appropriate average score per team per match."""
+    base = sport_key.split("_")[0]
+    return SPORT_AVG_SCORES.get(base, 1.35)
 
 
 def _normalize_team(name: str) -> str:
@@ -100,8 +115,8 @@ def _upsert_match_stats(db, event: Dict[str, Any], sport_key: str, source: str) 
     if not match_id:
         return 0
 
-    home = event["home_team"]
-    away = event["away_team"]
+    home = _normalize_team(event["home_team"])
+    away = _normalize_team(event["away_team"])
     home_score = event["home_score"]
     away_score = event["away_score"]
 
@@ -166,8 +181,8 @@ def _upsert_match_stats_fdata(db, match: Dict[str, Any], sport_key: str, source:
     if not match_id:
         return 0
 
-    home = match["home_team"]
-    away = match["away_team"]
+    home = _normalize_team(match["home_team"])
+    away = _normalize_team(match["away_team"])
     home_score = match["home_score"]
     away_score = match["away_score"]
 
@@ -243,6 +258,7 @@ def compute_team_snapshot(
 
     Only uses matches before `before_date` to prevent data leakage.
     """
+    team = _normalize_team(team)
     with SessionLocal() as db:
         query = (
             select(TeamMatchStats)
@@ -275,8 +291,9 @@ def compute_team_snapshot(
     # --- Attack / defense strength ---
     # attack_strength = team_goals_avg / league_avg
     # defense_strength = team_conceded_avg / league_avg (lower = better defense)
-    attack_strength = goals_scored_avg / LEAGUE_AVG_GOALS if LEAGUE_AVG_GOALS > 0 else 1.0
-    defense_strength = goals_conceded_avg / LEAGUE_AVG_GOALS if LEAGUE_AVG_GOALS > 0 else 1.0
+    avg_goals = _league_avg_for_sport(sport)
+    attack_strength = goals_scored_avg / avg_goals if avg_goals > 0 else 1.0
+    defense_strength = goals_conceded_avg / avg_goals if avg_goals > 0 else 1.0
 
     # --- Form trend slope (linear regression over points per match) ---
     points = []

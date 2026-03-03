@@ -137,21 +137,20 @@ async def _extract_with_llm(
         nlp = OllamaSentimentClient()
 
         combined_text = "\n".join(snippets[:30])  # cap at 30 snippets
+        example_json = (
+            '{"injuries": [{"player": "LeBron James", '
+            f'"team": "{home}", "status": "Out"}}]}}'
+        )
         prompt = (
-            "Extract only critical injury news for the match "
-            f"{home} vs {away} from the provided text.\n"
-            "Note: Teams may appear as abbreviations or nicknames "
-            "(e.g. 'Man Utd' for 'Manchester United', 'LAL' for "
-            "'Los Angeles Lakers', 'BVB' for 'Borussia Dortmund', "
-            "'Spurs' for 'Tottenham Hotspur'). "
-            "Use smart context matching to resolve aliases.\n"
-            "Answer with a JSON object containing a single key 'injuries' "
-            "whose value is a list of objects with keys: player, team, status. "
-            "For 'team', always use the FULL official team name from the "
-            f"match context ({home} or {away}), not the abbreviation.\n"
-            "Status must be one of: Out, Doubtful, Questionable, Day-to-Day. "
-            "If no missing players are found, return {\"injuries\": []}.\n\n"
-            f"Text:\n{combined_text}"
+            "Extract critical injury news from the <text>. "
+            f"The ONLY valid teams are: '{home}' and '{away}'. "
+            "Map any abbreviations (e.g., 'LAL', 'Man Utd', 'BVB', 'Spurs') "
+            "strictly to one of these two teams. "
+            "Answer ONLY with a valid JSON object. Do not include markdown formatting.\n\n"
+            "Status must be one of: Out, Doubtful, Questionable, Day-to-Day.\n"
+            "If no injuries are found, return: {\"injuries\": []}\n\n"
+            f"Expected JSON format:\n{example_json}\n\n"
+            f"<text>\n{combined_text}\n</text>"
         )
 
         result = await asyncio.to_thread(nlp.generate_json, prompt)
