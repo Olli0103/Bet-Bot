@@ -839,9 +839,18 @@ def import_nhl(folder: Path, max_rows: int = 50000) -> int:
 
 
 def _extract_nhl_meta(row, prefix: str = "") -> Dict[str, Any]:
-    """Extract NHL advanced stats from a row into a meta dict."""
+    """Extract NHL advanced stats from a row into a meta dict.
+
+    Includes core game stats, betting context (spread, total_line,
+    favorite_moneyline), pre-game strength indicators, and rolling
+    goal/diff averages.
+    """
     pfx = f"{prefix}_" if prefix else ""
     return _clean_meta({
+        # Core game stats
+        f"{pfx}goals_for": _safe_int(row.get("goals_for") or row.get("GF") or row.get("goals")),
+        f"{pfx}goals_against": _safe_int(row.get("goals_against") or row.get("GA")),
+        f"{pfx}won": _safe_int(row.get("won") or row.get("W")),
         f"{pfx}shots": _safe_int(row.get("shots") or row.get("Shots")),
         f"{pfx}power_play_goals": _safe_int(row.get("powerPlayGoals") or row.get("PPG")),
         f"{pfx}power_play_opps": _safe_int(row.get("powerPlayOpportunities") or row.get("PPO")),
@@ -852,13 +861,37 @@ def _extract_nhl_meta(row, prefix: str = "") -> Dict[str, Any]:
         f"{pfx}takeaways": _safe_int(row.get("takeaways") or row.get("Takeaways")),
         f"{pfx}giveaways": _safe_int(row.get("giveaways") or row.get("Giveaways")),
         f"{pfx}rest_days": _safe_int(row.get("rest_days") or row.get("DaysRest")),
-        # Rolling averages
+        # Betting context
+        f"{pfx}spread": _safe_float(row.get("spread") or row.get("Spread")),
+        f"{pfx}total_line": _safe_float(
+            row.get("total") or row.get("Total") or row.get("OU")
+            or row.get("over_under") or row.get("total_line")
+        ),
+        f"{pfx}favorite_moneyline": _safe_float(
+            row.get("favorite_moneyline") or row.get("Favorite ML")
+        ),
+        # Pre-game strength
+        f"{pfx}pre_game_point_pct": _safe_float(
+            row.get("pre_game_point_pct") or row.get("point_pct")
+        ),
+        f"{pfx}opp_pre_game_point_pct": _safe_float(
+            row.get("opp_pre_game_point_pct") or row.get("opp_point_pct")
+        ),
+        f"{pfx}season_goal_diff": _safe_float(
+            row.get("season_goal_diff") or row.get("goal_diff")
+        ),
+        f"{pfx}opp_season_goal_diff": _safe_float(
+            row.get("opp_season_goal_diff") or row.get("opp_goal_diff")
+        ),
+        # Rolling averages (goals)
         f"{pfx}roll_3_goals": _safe_float(row.get("roll_3_goals")),
         f"{pfx}roll_3_shots": _safe_float(row.get("roll_3_shots")),
         f"{pfx}roll_3_save_pct": _safe_float(row.get("roll_3_save_pct")),
+        f"{pfx}roll_3_goal_diff": _safe_float(row.get("roll_3_goal_diff")),
         f"{pfx}roll_10_goals": _safe_float(row.get("roll_10_goals")),
         f"{pfx}roll_10_shots": _safe_float(row.get("roll_10_shots")),
         f"{pfx}roll_10_save_pct": _safe_float(row.get("roll_10_save_pct")),
+        f"{pfx}roll_10_goal_diff": _safe_float(row.get("roll_10_goal_diff")),
     })
 
 
@@ -988,6 +1021,7 @@ def _import_nhl_is_home(
         if any(pat in c.lower() for pat in [
             "goals", "shots", "hit", "block", "pim",
             "faceoff", "roll_", "moneyline", "spread", "total",
+            "over_under", "point_pct", "goal_diff", "won",
         ]):
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
@@ -1037,6 +1071,17 @@ def _import_nhl_is_home(
             ar.get("moneyline") or ar.get("ML") or ar.get("team_moneyline")
         )
 
+        # Fallback: derive from favorite_moneyline + spread context
+        if not home_ml_raw and not away_ml_raw:
+            fav_ml = _safe_float(hr.get("favorite_moneyline") or hr.get("Favorite ML"))
+            spread_val = _safe_float(hr.get("spread") or hr.get("Spread"))
+            if fav_ml is not None and spread_val is not None:
+                # Negative spread means the team in this row is favored
+                if spread_val < 0:
+                    home_ml_raw = fav_ml
+                else:
+                    away_ml_raw = fav_ml
+
         home_ml_dec = _american_to_decimal(home_ml_raw) if home_ml_raw else None
         away_ml_dec = _american_to_decimal(away_ml_raw) if away_ml_raw else None
 
@@ -1069,9 +1114,17 @@ def _import_nhl_is_home(
                 inserted += 1
 
         # --- TOTALS (Over) ---
+        # Fallback: try over_under column used in nhl_data_extensive.csv
         total_line = _safe_float(
             hr.get("total") or hr.get("Total") or hr.get("OU")
+            or hr.get("over_under") or hr.get("total_line")
         )
+        # Also try from away row if home row has no total
+        if total_line is None:
+            total_line = _safe_float(
+                ar.get("total") or ar.get("Total") or ar.get("OU")
+                or ar.get("over_under") or ar.get("total_line")
+            )
         if total_line is not None:
             actual_total = goals_h + goals_a
             tot_eid = _mk_event_id(["nhl", str(gid), date_str, home, away, f"o{total_line}"])
