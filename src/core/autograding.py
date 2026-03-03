@@ -9,6 +9,7 @@ from src.core.elo_ratings import EloSystem
 from src.core.form_tracker import update_form
 from src.core.poisson_model import PoissonSoccerModel
 from src.core.settings import settings
+from src.core.sport_mapping import normalize_team
 from src.data.postgres import SessionLocal
 from src.data.models import PlacedBet
 from src.integrations.odds_fetcher import OddsFetcher
@@ -43,19 +44,22 @@ def _evaluate_match_result(row: dict) -> dict:
     home_team = row.get("home_team") or ""
     away_team = row.get("away_team") or ""
     home_score, away_score = 0, 0
+    norm_home = normalize_team(home_team)
+    norm_away = normalize_team(away_team)
 
     for score_obj in scores:
         if not isinstance(score_obj, dict):
             continue
-        team_name = score_obj.get("name")
+        team_name = score_obj.get("name") or ""
         try:
             points = int(score_obj.get("score", 0))
         except (ValueError, TypeError):
             points = 0
 
-        if team_name == home_team:
+        norm_score_team = normalize_team(team_name)
+        if norm_score_team == norm_home:
             home_score = points
-        elif team_name == away_team:
+        elif norm_score_team == norm_away:
             away_score = points
 
     if home_score > away_score:
@@ -131,7 +135,7 @@ async def run_auto_grading() -> int:
                 continue
 
             pick = _selection_token(str(bet.selection))
-            is_won = _normalize_name(pick) == _normalize_name(winner)
+            is_won = normalize_team(pick) == normalize_team(winner)
             if is_won:
                 bet.status = "won"
                 bet.pnl = round(float(bet.stake) * (float(bet.odds) - 1.0), 2)

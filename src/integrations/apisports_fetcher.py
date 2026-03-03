@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from src.core.settings import settings
+from src.core.sport_mapping import normalize_team
 from src.data.redis_cache import cache
 from src.integrations.base_fetcher import AsyncBaseFetcher, _safe_sync_run
 
@@ -155,13 +156,13 @@ class APISportsFetcher(AsyncBaseFetcher):
 
             raw = data.get("response") or []
             result: List[Dict[str, str]] = []
-            home_l = home_team.lower()
-            away_l = away_team.lower()
+            norm_home = normalize_team(home_team)
+            norm_away = normalize_team(away_team)
 
             for entry in raw:
-                team_name = (entry.get("team", {}).get("name") or "").lower()
-                if home_l not in team_name and team_name not in home_l and \
-                   away_l not in team_name and team_name not in away_l:
+                team_name = entry.get("team", {}).get("name") or ""
+                norm_entry = normalize_team(team_name)
+                if norm_entry != norm_home and norm_entry != norm_away:
                     continue
                 player_name = entry.get("player", {}).get("name") or "Unknown"
                 status = entry.get("status") or entry.get("player", {}).get("type") or "Unknown"
@@ -199,16 +200,15 @@ class APISportsFetcher(AsyncBaseFetcher):
     def _match_fixture_ids(
         fixtures: list, home_team: str, away_team: str
     ) -> List[int]:
-        """Find fixture IDs where the team names fuzzy-match."""
+        """Find fixture IDs where the team names match via canonical normalization."""
         ids: List[int] = []
-        home_l = home_team.lower()
-        away_l = away_team.lower()
+        norm_home = normalize_team(home_team)
+        norm_away = normalize_team(away_team)
         for fx in fixtures:
             teams = fx.get("teams", {})
-            fx_home = (teams.get("home", {}).get("name") or "").lower()
-            fx_away = (teams.get("away", {}).get("name") or "").lower()
-            if (home_l in fx_home or fx_home in home_l) and \
-               (away_l in fx_away or fx_away in away_l):
+            fx_home = normalize_team(teams.get("home", {}).get("name") or "")
+            fx_away = normalize_team(teams.get("away", {}).get("name") or "")
+            if fx_home == norm_home and fx_away == norm_away:
                 fid = fx.get("fixture", {}).get("id")
                 if fid:
                     ids.append(int(fid))

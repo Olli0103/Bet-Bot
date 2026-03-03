@@ -15,6 +15,7 @@ import asyncio
 import logging
 from typing import Any, Dict, List
 
+from src.core.sport_mapping import normalize_team
 from src.data.redis_cache import cache
 
 log = logging.getLogger(__name__)
@@ -200,9 +201,10 @@ def get_injury_impact_score(
     Returns a float: 0.0 (no injuries) to -1.0 (severe: 3+ key players out).
     Used to penalize model probability / EV for the affected team.
     """
+    norm_team = normalize_team(team)
     team_injuries = [
         inj for inj in injuries
-        if inj.get("team", "").lower() == team.lower()
+        if normalize_team(inj.get("team", "")) == norm_team
     ]
 
     if not team_injuries:

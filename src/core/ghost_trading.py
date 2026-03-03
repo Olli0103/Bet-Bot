@@ -2,6 +2,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
+from sqlalchemy.exc import IntegrityError
+
 from src.data.postgres import SessionLocal
 from src.data.models import PlacedBet
 
@@ -92,6 +94,9 @@ def place_virtual_bet(
             db.add(new_bet)
             db.commit()
         return True
+    except IntegrityError:
+        log.info("Duplicate bet skipped: event=%s sel=%s market=%s", event_id, selection, market)
+        return False
     except Exception as exc:
         log.warning("place_virtual_bet failed: %s", exc)
         return False

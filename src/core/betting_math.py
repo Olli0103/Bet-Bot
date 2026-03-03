@@ -43,15 +43,25 @@ def expected_value(
     return model_probability * net_profit - (1.0 - model_probability)
 
 
-def kelly_fraction(model_probability: float, decimal_odds: float, frac: float = 0.2, tax_rate: float = 0.0) -> float:
-    """Kelly criterion using net odds after tax."""
+def kelly_fraction(
+    model_probability: float,
+    decimal_odds: float,
+    frac: float = 0.2,
+    tax_rate: float = 0.0,
+    max_fraction: float = 0.05,
+) -> float:
+    """Kelly criterion using net odds after tax.
+
+    Hard-capped at ``max_fraction`` (default 5 %) of bankroll to prevent
+    a single bet from risking too much, regardless of model confidence.
+    """
     gross_b = decimal_odds - 1.0
     net_b = gross_b * (1.0 - tax_rate)
     q = 1.0 - model_probability
     if net_b <= 0:
         return 0.0
     raw = (net_b * model_probability - q) / net_b
-    return max(0.0, raw) * frac
+    return min(max(0.0, raw) * frac, max_fraction)
 
 
 def kelly_stake(bankroll: float, kelly_f: float) -> float:
