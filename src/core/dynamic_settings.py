@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List
 
+from src.core.sport_mapping import SPORT_DISPLAY_NAMES
 from src.data.redis_cache import cache
 
 log = logging.getLogger(__name__)
@@ -15,20 +16,30 @@ log = logging.getLogger(__name__)
 REDIS_KEY = "dynamic_settings:v1"
 
 
-# Available sports (OddsAPI keys)
+# Available sports: sourced from the central SPORT_MAPPING.
+# Only expose leagues that Odds API supports for live odds.
+_LIVE_SPORTS_KEYS = [
+    "soccer_germany_bundesliga",
+    "soccer_germany_bundesliga2",
+    "soccer_epl",
+    "soccer_england_championship",
+    "soccer_spain_la_liga",
+    "soccer_spain_segunda_division",
+    "soccer_italy_serie_a",
+    "soccer_italy_serie_b",
+    "soccer_france_ligue_one",
+    "soccer_france_ligue_two",
+    "soccer_uefa_champs_league",
+    "basketball_nba",
+    "basketball_euroleague",
+    "americanfootball_nfl",
+    "icehockey_nhl",
+    "tennis_atp",
+    "tennis_wta",
+]
+
 AVAILABLE_SPORTS: Dict[str, str] = {
-    "soccer_germany_bundesliga": "Bundesliga",
-    "soccer_epl": "EPL",
-    "soccer_spain_la_liga": "La Liga",
-    "soccer_italy_serie_a": "Serie A",
-    "soccer_france_ligue_one": "Ligue 1",
-    "soccer_uefa_champs_league": "CL",
-    "basketball_nba": "NBA",
-    "basketball_euroleague": "EuroLeague",
-    "americanfootball_nfl": "NFL",
-    "icehockey_nhl": "NHL",
-    "tennis_atp": "ATP",
-    "tennis_wta": "WTA",
+    k: SPORT_DISPLAY_NAMES.get(k, k) for k in _LIVE_SPORTS_KEYS
 }
 
 AVAILABLE_MARKETS: Dict[str, str] = {
