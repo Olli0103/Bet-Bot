@@ -22,7 +22,7 @@ from src.bot.handlers import (
 from src.agents.orchestrator import AgentOrchestrator
 from src.core.api_health import format_api_health_report, run_api_health_check
 from src.core.autograding import run_auto_grading
-from src.core.live_feed import fetch_and_build_signals
+from src.core.live_feed import fetch_and_build_signals, run_enrichment_pass
 from src.core.learning_monitor import learning_health
 from src.core.ml_trainer import auto_train_all_models, auto_train_model
 from src.core.performance_monitor import PerformanceMonitor
@@ -130,13 +130,31 @@ async def _broadcast(bot, text: str, target: str = "broadcast"):
 
 
 async def scheduled_fetch(context: ContextTypes.DEFAULT_TYPE):
+    import logging
+    _log = logging.getLogger(__name__)
     try:
-        items = await asyncio.to_thread(fetch_and_build_signals)
-        await _broadcast(context.bot, f"📡 Datenupdate fertig: {len(items)} Signals")
+        # Phase 1: Core fetch (fast, no enrichment)
+        items = await asyncio.to_thread(fetch_and_build_signals, skip_enrichment=True)
+        await _broadcast(context.bot, f"📡 Data update done (core): {len(items)} Signals")
         push = bool((context.job.data or {}).get("push", False)) if context.job else False
         if push:
             for cid in chat_router.broadcast_ids():
                 await push_daily_signals(context.bot, cid)
+
+        # Phase 2: Enrichment in background
+        try:
+            result = await asyncio.to_thread(run_enrichment_pass)
+            if result.get("status") == "done":
+                n_sig = result.get("signals", 0)
+                n_ev = result.get("events", 0)
+                await _broadcast(
+                    context.bot,
+                    f"🧠 Enrichment done: {n_sig} Signals aus {n_ev} Events angereichert",
+                )
+            else:
+                _log.info("Enrichment skipped: %s", result.get("reason"))
+        except Exception as exc:
+            _log.warning("Background enrichment failed: %s", exc)
     except Exception:
         pass
 

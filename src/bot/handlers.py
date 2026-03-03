@@ -24,6 +24,7 @@ from src.core.live_feed import (
     get_cached_combo_legs,
     get_cached_meta,
     get_cached_signals,
+    run_enrichment_pass,
 )
 from src.core.settings import settings
 from src.data.postgres import SessionLocal
@@ -1219,6 +1220,31 @@ def _render_progress_display(info: dict) -> str:
     return "\n".join(lines)
 
 
+async def _enrichment_job(bot, chat_id: int):
+    """Phase 2: run enrichment in background, then send a status update."""
+    try:
+        result = await asyncio.to_thread(run_enrichment_pass)
+        if result.get("status") == "done":
+            n_signals = result.get("signals", 0)
+            n_events = result.get("events", 0)
+            text = (
+                f"🧠 Enrichment done: {n_signals} Signals "
+                f"aus {n_events} Events angereichert"
+            )
+        else:
+            text = f"🧠 Enrichment übersprungen: {result.get('reason', '?')}"
+        await bot.send_message(chat_id=chat_id, text=text)
+    except Exception as exc:
+        log.warning("Background enrichment failed: %s", exc)
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"🧠 Enrichment fehlgeschlagen: {type(exc).__name__}",
+            )
+        except Exception:
+            pass
+
+
 async def _refresh_job(bot, chat_id: int, msg_id: int, context: ContextTypes.DEFAULT_TYPE):
     progress_queue = asyncio.Queue()
     last_text = ""
@@ -1257,37 +1283,48 @@ async def _refresh_job(bot, chat_id: int, msg_id: int, context: ContextTypes.DEF
     display_task = asyncio.create_task(update_display())
 
     try:
+        # --- Phase 1: Core fetch (odds + signals + combos, NO enrichment) ---
         items = await asyncio.wait_for(
-            asyncio.to_thread(fetch_and_build_signals, progress_callback=on_progress),
-            timeout=180,
+            asyncio.to_thread(
+                fetch_and_build_signals,
+                progress_callback=on_progress,
+                skip_enrichment=True,
+            ),
+            timeout=120,
         )
         # Wait for display to catch the "done" message
         await asyncio.sleep(0.5)
         display_task.cancel()
 
         meta = get_cached_meta()
-        final_text = (
-            "✅ Datenupdate abgeschlossen\n"
+        core_text = (
+            "✅ Data update done (core)\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"🎯 Signals: {len(items)}\n"
             f"📡 Sports: {meta.get('sports_expanded', 0)} | "
             f"Events: {meta.get('events_seen', 0)}\n"
-            f"🧩 Kombis im Cache"
+            f"🧩 Kombis im Cache\n"
+            f"🧠 Enrichment läuft im Hintergrund..."
         )
         try:
-            await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=final_text)
+            await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=core_text)
         except Exception:
-            await bot.send_message(chat_id=chat_id, text=final_text)
+            await bot.send_message(chat_id=chat_id, text=core_text)
+
+        # --- Phase 2: Enrichment in background (non-blocking) ---
+        context.application.create_task(
+            _enrichment_job(bot, chat_id)
+        )
 
     except asyncio.TimeoutError:
         display_task.cancel()
         try:
             await bot.edit_message_text(
                 chat_id=chat_id, message_id=msg_id,
-                text="⏰ Datenupdate Timeout (180s). Teilweise Daten im Cache."
+                text="⏰ Datenupdate Timeout (120s). Teilweise Daten im Cache."
             )
         except Exception:
-            await bot.send_message(chat_id=chat_id, text="⏰ Datenupdate Timeout (180s).")
+            await bot.send_message(chat_id=chat_id, text="⏰ Datenupdate Timeout (120s).")
     except Exception as e:
         display_task.cancel()
         try:

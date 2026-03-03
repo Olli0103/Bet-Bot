@@ -33,6 +33,8 @@ SNAPSHOT_KEY = "live_snapshot:value_bets"
 COMBO_KEY = "live_snapshot:combo_bets"
 COMBO_LEGS_KEY = "live_snapshot:combo_legs"
 META_KEY = "live_snapshot:meta"
+RAW_EVENTS_KEY = "live_snapshot:raw_events"
+ENRICHMENT_CTX_KEY = "live_snapshot:enrichment_ctx"
 
 SHARP_PRIORITY = ["pinnacle", "betfair_ex_uk", "bet365"]
 SHARP_WEIGHTS = {"pinnacle": 0.50, "betfair_ex_uk": 0.30, "bet365": 0.20}
@@ -173,6 +175,9 @@ def _build_top_combos(engine: BettingEngine, legs: List[Dict[str, Any]]) -> List
 def fetch_and_build_signals(
     bankroll: float | None = None,
     progress_callback=None,
+    skip_enrichment: bool = False,
+    _cached_events: Optional[List[Tuple[str, Dict[str, Any]]]] = None,
+    _cached_momentum: Optional[Dict[str, Dict[str, Dict[str, float]]]] = None,
 ) -> List[BetSignal]:
     """Build signals for today's events.
 
@@ -185,6 +190,14 @@ def fetch_and_build_signals(
         "sport_idx": int, "sport_total": int, "events": int, "signals": int,
         "done_sports": list[str]}`` at each major step.
         Used by the Telegram UI for live progress display.
+    skip_enrichment : bool
+        When True, skip sentiment/injury enrichment (Phase 1 fast path).
+        Raw events are cached so ``run_enrichment_pass`` can pick them up.
+    _cached_events : list, optional
+        Pre-loaded ``(sport_key, event_dict)`` pairs.  When provided the odds
+        fetch is skipped entirely (used by the enrichment rebuild pass).
+    _cached_momentum : dict, optional
+        Pre-loaded momentum data (used with ``_cached_events``).
     """
     from src.core.dynamic_settings import dynamic_settings
 
@@ -243,36 +256,58 @@ def fetch_and_build_signals(
     momentum_data: Dict[str, Dict[str, Dict[str, float]]] = {}
     done_sports: List[str] = []
 
-    for sport_idx, sport in enumerate(expanded_sports):
-        try:
-            events = odds.get_sport_odds(sport_key=sport, regions="eu", markets="h2h,spreads,totals", ttl_seconds=120)
-        except Exception:
-            continue
-        if not isinstance(events, list):
-            continue
+    if _cached_events is not None:
+        # Enrichment rebuild: reuse previously fetched events
+        raw_events = _cached_events
+        momentum_data = _cached_momentum or {}
+        expanded_sports = list(dict.fromkeys(s for s, _ in raw_events))
+        done_sports = list(expanded_sports)
+        stats["events_seen"] = len(raw_events)
+        _progress("fetch_odds", "Cached Events geladen", 50,
+                  sport_idx=len(expanded_sports), sport_total=len(expanded_sports),
+                  events=stats["events_seen"], done_sports=done_sports)
+    else:
+        for sport_idx, sport in enumerate(expanded_sports):
+            try:
+                events = odds.get_sport_odds(sport_key=sport, regions="eu", markets="h2h,spreads,totals", ttl_seconds=120)
+            except Exception:
+                continue
+            if not isinstance(events, list):
+                continue
 
-        # Fetch 12h-ago odds for momentum (best-effort, non-blocking)
-        try:
-            momentum_data[sport] = odds.get_odds_12h_ago(sport_key=sport)
-        except Exception:
-            momentum_data[sport] = {}
+            # Fetch 12h-ago odds for momentum (best-effort, non-blocking)
+            try:
+                momentum_data[sport] = odds.get_odds_12h_ago(sport_key=sport)
+            except Exception:
+                momentum_data[sport] = {}
 
-        for e in events:
-            stats["events_seen"] += 1
-            raw_events.append((sport, e))
+            for e in events:
+                stats["events_seen"] += 1
+                raw_events.append((sport, e))
 
-        done_sports.append(sport)
-        fetch_pct = 5 + int((sport_idx + 1) / max(1, len(expanded_sports)) * 45)
-        _progress("fetch_odds", sport, fetch_pct,
-                  sport_idx=sport_idx + 1, sport_total=len(expanded_sports),
-                  events=stats["events_seen"], done_sports=list(done_sports))
+            done_sports.append(sport)
+            fetch_pct = 5 + int((sport_idx + 1) / max(1, len(expanded_sports)) * 45)
+            _progress("fetch_odds", sport, fetch_pct,
+                      sport_idx=sport_idx + 1, sport_total=len(expanded_sports),
+                      events=stats["events_seen"], done_sports=list(done_sports))
+
+        # Cache raw events + context for background enrichment pass
+        if skip_enrichment:
+            cache.set_json(RAW_EVENTS_KEY, raw_events, ttl_seconds=12 * 3600)
+            cache.set_json(ENRICHMENT_CTX_KEY, {
+                "momentum_data": momentum_data,
+                "bankroll": bankroll,
+            }, ttl_seconds=12 * 3600)
 
     # --- Enrichment: sentiment analysis ---
-    _progress("enrichment", f"Enrichment für {stats['events_seen']} Events...", 55,
-              events=stats["events_seen"])
     sentiment: Dict[str, float] = {}
     injury_sentiment: Dict[str, float] = {}
-    if settings.enrichment_enabled:
+    if skip_enrichment:
+        _progress("enrichment", "Enrichment übersprungen (async)", 55,
+                  events=stats["events_seen"])
+    elif settings.enrichment_enabled:
+        _progress("enrichment", f"Enrichment für {stats['events_seen']} Events...", 55,
+                  events=stats["events_seen"])
         all_teams: List[str] = []
         for _, e in raw_events:
             home = e.get("home_team") or ""
@@ -814,6 +849,37 @@ def fetch_and_build_signals(
               combos=len(combos), done_sports=list(done_sports))
 
     return top10
+
+
+def run_enrichment_pass(progress_callback=None) -> Dict[str, Any]:
+    """Background enrichment: reload cached raw events, run enrichment, rebuild signals.
+
+    Returns a status dict, e.g.
+    ``{"status": "done", "signals": 8, "events": 120}``
+    or ``{"status": "skipped", "reason": "..."}``
+    """
+    raw_events = cache.get_json(RAW_EVENTS_KEY)
+    ctx = cache.get_json(ENRICHMENT_CTX_KEY)
+
+    if not raw_events:
+        return {"status": "skipped", "reason": "no cached raw events"}
+
+    momentum = (ctx or {}).get("momentum_data", {})
+    bankroll = (ctx or {}).get("bankroll")
+
+    # Convert JSON arrays back to (str, dict) pairs
+    events = [(e[0], e[1]) for e in raw_events]
+
+    signals = fetch_and_build_signals(
+        bankroll=bankroll,
+        progress_callback=progress_callback,
+        skip_enrichment=False,
+        _cached_events=events,
+        _cached_momentum=momentum,
+    )
+
+    enriched_events = len(events)
+    return {"status": "done", "signals": len(signals), "events": enriched_events}
 
 
 def get_cached_signals() -> Tuple[List[Dict[str, Any]], str]:
