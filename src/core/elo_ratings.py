@@ -1,9 +1,9 @@
 """Redis-backed Elo power rating system for team strength estimation."""
 from __future__ import annotations
 
-import re
 from typing import Dict
 
+from src.core.sport_mapping import normalize_team as _normalize_team
 from src.data.redis_cache import cache
 
 DEFAULT_RATING = 1500.0
@@ -15,10 +15,6 @@ SPORT_K: Dict[str, int] = {
     "basketball": 20,
     "tennis": 32,
 }
-
-
-def _normalize_team(team: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", (team or "").lower())
 
 
 def _cache_key(team: str) -> str:

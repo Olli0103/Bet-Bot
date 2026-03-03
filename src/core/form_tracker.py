@@ -2,17 +2,13 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Tuple
 
+from src.core.sport_mapping import normalize_team as _normalize_team
 from src.data.redis_cache import cache
 
 FORM_WINDOW = 5
 FORM_TTL = 7 * 24 * 3600  # 7 days
-
-
-def _normalize_team(team: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", (team or "").lower())
 
 
 def _cache_key(team: str) -> str:

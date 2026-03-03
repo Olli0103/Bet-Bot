@@ -7,13 +7,13 @@ Designed to run periodically (every 6h via APScheduler or manually).
 from __future__ import annotations
 
 import logging
-import re
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import select, and_
 
 from src.core.settings import settings
+from src.core.sport_mapping import normalize_team as _normalize_team
 from src.data.models import TeamMatchStats, EventStatsSnapshot
 from src.data.postgres import SessionLocal
 
@@ -36,10 +36,6 @@ def _league_avg_for_sport(sport_key: str) -> float:
     """Return the sport-appropriate average score per team per match."""
     base = sport_key.split("_")[0]
     return SPORT_AVG_SCORES.get(base, 1.35)
-
-
-def _normalize_team(name: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
 
 
 # --------------------------------------------------------------------------
