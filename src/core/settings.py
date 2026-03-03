@@ -41,10 +41,6 @@ class Settings(BaseModel):
     tipico_tax_rate: float = float(os.getenv("TIPICO_TAX_RATE", "0.05"))
     tax_free_mode: bool = os.getenv("TAX_FREE_MODE", "false").lower() == "true"
 
-    # Reddit (for injury intelligence via PRAW)
-    reddit_client_id: str = os.getenv("REDDIT_CLIENT_ID", "")
-    reddit_client_secret: str = os.getenv("REDDIT_CLIENT_SECRET", "")
-    reddit_user_agent: str = os.getenv("REDDIT_USER_AGENT", "BetBot/1.0 by u/betbot")
 
 
 settings = Settings()

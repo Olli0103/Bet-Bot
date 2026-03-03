@@ -1,6 +1,6 @@
-"""Unified Injury Aggregator: merges API-Sports, RSS, and Reddit signals.
+"""Unified Injury Aggregator: merges API-Sports and Rotowire RSS signals.
 
-Collects injury/lineup intelligence from all three sources in parallel,
+Collects injury/lineup intelligence from both sources in parallel,
 deduplicates, and uses Gemma 3 4B to extract a structured JSON list of
 confirmed missing key players.
 
@@ -9,7 +9,6 @@ Replaces the legacy Twitter/X integration with 100% free data sources.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from typing import Any, Dict, List
 
@@ -20,7 +19,7 @@ log = logging.getLogger(__name__)
 AGGREGATOR_CACHE_TTL = 15 * 60  # 15 minutes
 
 
-async def aggregate_injury_intel(
+async def get_match_injuries_async(
     home_team: str,
     away_team: str,
     sport: str,
@@ -28,8 +27,8 @@ async def aggregate_injury_intel(
 ) -> Dict[str, Any]:
     """Aggregate injury intelligence for a match from all sources.
 
-    Calls API-Sports, Rotowire RSS, and Reddit in parallel, merges text
-    snippets, and passes them through Gemma 3 4B for structured extraction.
+    Calls API-Sports and Rotowire RSS in parallel, merges text snippets,
+    and passes them through Gemma 3 4B for structured extraction.
 
     Parameters
     ----------
@@ -54,13 +53,12 @@ async def aggregate_injury_intel(
 
     team_names = [home_team, away_team]
 
-    # Collect from all three sources in parallel
+    # Collect from both sources in parallel
     api_sports_task = _fetch_apisports(home_team, away_team, sport, event_date)
     rss_task = _fetch_rss(sport, team_names)
-    reddit_task = _fetch_reddit(sport, team_names)
 
-    api_results, rss_results, reddit_results = await asyncio.gather(
-        api_sports_task, rss_task, reddit_task, return_exceptions=True
+    api_results, rss_results = await asyncio.gather(
+        api_sports_task, rss_task, return_exceptions=True
     )
 
     # Safely unpack results (exceptions become empty lists)
@@ -70,9 +68,6 @@ async def aggregate_injury_intel(
     if isinstance(rss_results, BaseException):
         log.warning("RSS aggregation failed: %s", rss_results)
         rss_results = []
-    if isinstance(reddit_results, BaseException):
-        log.warning("Reddit aggregation failed: %s", reddit_results)
-        reddit_results = []
 
     # Build combined text dump for LLM
     snippets: List[str] = []
@@ -92,15 +87,9 @@ async def aggregate_injury_intel(
         for item in rss_results:
             snippets.append(f"[Rotowire] {item.get('title', '')} — {item.get('summary', '')[:200]}")
 
-    # Reddit results
-    if reddit_results:
-        sources_used.append("reddit")
-        for post in reddit_results:
-            snippets.append(f"[Reddit r/{post.get('subreddit', '?')}] {post.get('title', '')} — {post.get('text', '')[:200]}")
-
     # If no data from any source, return empty
     if not snippets:
-        result = {"injuries": [], "raw_snippets": 0, "sources": []}
+        result: Dict[str, Any] = {"injuries": [], "raw_snippets": 0, "sources": []}
         cache.set_json(cache_key, result, AGGREGATOR_CACHE_TTL)
         return result
 
@@ -116,10 +105,14 @@ async def aggregate_injury_intel(
     return result
 
 
+# Keep backward-compatible alias
+aggregate_injury_intel = get_match_injuries_async
+
+
 async def _fetch_apisports(
     home: str, away: str, sport: str, event_date: str
 ) -> List[Dict[str, str]]:
-    """Fetch from API-Sports (async via thread)."""
+    """Fetch from API-Sports (async)."""
     from src.integrations.apisports_fetcher import APISportsFetcher
     ap = APISportsFetcher()
     return await ap.get_injuries_for_event_async(home, away, sport, event_date)
@@ -130,13 +123,6 @@ async def _fetch_rss(sport: str, team_names: List[str]) -> List[Dict[str, str]]:
     from src.integrations.rss_fetcher import RSSFetcher
     rss = RSSFetcher()
     return await asyncio.to_thread(rss.fetch_injury_news, sport, team_names, 24)
-
-
-async def _fetch_reddit(sport: str, team_names: List[str]) -> List[Dict[str, str]]:
-    """Fetch from Reddit (sync PRAW, run in thread)."""
-    from src.integrations.reddit_fetcher import RedditFetcher
-    reddit = RedditFetcher()
-    return await asyncio.to_thread(reddit.fetch_injury_posts, sport, team_names, 12)
 
 
 async def _extract_with_llm(
@@ -157,7 +143,7 @@ async def _extract_with_llm(
             "Answer with a JSON object containing a single key 'injuries' "
             "whose value is a list of objects with keys: player, team, status. "
             "Status must be one of: Out, Doubtful, Questionable, Day-to-Day. "
-            "If no injuries are found, return {\"injuries\": []}.\n\n"
+            "If no missing players are found, return {\"injuries\": []}.\n\n"
             f"Text:\n{combined_text}"
         )
 
@@ -180,7 +166,6 @@ async def _extract_with_llm(
 
     except Exception as exc:
         log.warning("LLM injury extraction failed: %s", exc)
-        # Fallback: return raw API-Sports data if available (no LLM)
         return []
 
 

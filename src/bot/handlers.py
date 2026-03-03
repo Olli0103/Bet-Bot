@@ -832,7 +832,7 @@ async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  🔍 Deep Dive — Analyst-Analyse\n"
         "  💰 Ghost Bet — Virtuelle Wette\n"
         "  🛑 Ignorieren — Alert verwerfen\n\n"
-        "📡 Datenquellen: Odds API (Pro), Ollama gemma:4b, NewsAPI, Rotowire RSS, Reddit\n"
+        "📡 Datenquellen: Odds API (Pro), Ollama gemma:4b, NewsAPI, API-Sports, Rotowire RSS\n"
         "⏰ Automatische Fetches: 07:00 + 13:00"
     )
     await update.message.reply_text(msg)

@@ -23,7 +23,7 @@ Agent Orchestrator (adaptive: 60s pre-kickoff / 5min normal)
 ### Core Pipeline
 
 1. **Data Ingestion** -- The-Odds-API (Pro Tier) provides real-time and historical odds across h2h, spreads, totals, double_chance, and draw_no_bet markets from 6+ bookmakers
-2. **Enrichment** -- News sentiment (NewsAPI + Ollama Gemma 3 4B), injury data (API-Sports + Rotowire RSS + Reddit), weather (Open-Meteo), LLM-structured injury extraction
+2. **Enrichment** -- News sentiment (NewsAPI + Ollama Gemma 3 4B), injury data (API-Sports + Rotowire RSS), weather (Open-Meteo), LLM-structured injury extraction
 3. **Feature Engineering** -- 22+ features including CLV, Elo differential, Poisson-derived probabilities, form tracking, H2H history, odds volatility, public bias, market momentum (12h delta)
 4. **Model Prediction** -- XGBoost with isotonic calibration, sport-specific models (soccer/basketball/tennis), TimeSeriesSplit validation, reliability diagrams
 5. **Value Detection** -- Tax-adjusted EV calculation (Tipico 5% tax + combo tax-free mode), consensus sharp line from weighted Pinnacle/Betfair/bet365, public bias detection
@@ -116,7 +116,7 @@ Kombi-Grossen:
 | `home_advantage` | Binary: selection is home team |
 | `public_bias` | Tipico market shading vs sharp (retail over-bet detection) |
 | `market_momentum` | Implied probability delta over 12h (Pro API history) |
-| `injury_news_delta` | Aggregated injury news sentiment (RSS + Reddit) |
+| `injury_news_delta` | Aggregated injury news sentiment (Rotowire RSS) |
 | `time_to_kickoff_hours` | Hours until event starts |
 
 - Weekly automatic retraining with post-training validation (Brier score, calibration check, feature importance audit)
@@ -194,7 +194,7 @@ Free-text messages are classified by Gemma 3 4B into intents:
 
 The bot uses a multi-agent architecture with **adaptive polling**:
 
-- **Scout Agent** -- Monitors odds for steam moves (price changes exceeding 2x historical volatility), aggregated injury intel (API-Sports + Rotowire RSS + Reddit + LLM), and 12h market momentum via Pro API
+- **Scout Agent** -- Monitors odds for steam moves (price changes exceeding 2x historical volatility), aggregated injury intel (API-Sports + Rotowire RSS + LLM), and 12h market momentum via Pro API
 - **Analyst Agent** -- Triggered by Scout alerts; performs full enrichment, injury aggregation (with EV penalty for confirmed absentees), feature engineering, ML prediction, public bias detection, market momentum integration, and Gemma 3 4B reasoning. Uses **dynamic Poisson/XGBoost blending** with momentum adjustment.
 - **Executioner Agent** -- Applies circuit breakers, computes **calibration-adjusted** Kelly sizing, sends Telegram alerts with interactive inline buttons, places virtual bets
 - **Orchestrator** -- Adaptive polling: **60-second intervals** when events kick off within 1 hour, **5-minute intervals** during quiet periods. Daily self-evaluation at 22:00.
@@ -318,10 +318,8 @@ TAX_FREE_MODE=false
 ENRICHMENT_ENABLED=true
 ENRICHMENT_TIMEOUT=30
 
-# Reddit (optional, for injury intelligence)
-REDDIT_CLIENT_ID=
-REDDIT_CLIENT_SECRET=
-REDDIT_USER_AGENT=BetBot/1.0 by u/betbot
+# Enrichment toggle
+# RSS injury feeds (Rotowire) are always-on; no API key needed
 ```
 
 ### Running
@@ -390,8 +388,7 @@ Bet-Bot/
 │   │   ├── news_fetcher.py             # NewsAPI client
 │   │   ├── weather_fetcher.py          # Open-Meteo weather client
 │   │   ├── rss_fetcher.py              # Rotowire RSS injury/lineup scraper
-│   │   ├── reddit_fetcher.py           # Reddit PRAW injury intelligence
-│   │   ├── injury_aggregator.py        # Unified aggregator (API-Sports + RSS + Reddit + LLM)
+│   │   ├── injury_aggregator.py        # Unified aggregator (API-Sports + RSS + LLM)
 │   │   ├── apisports_fetcher.py        # API-Sports injuries/lineups
 │   │   └── ollama_sentiment.py         # Ollama Gemma 3 4B (sentiment + intents)
 │   ├── models/
@@ -479,7 +476,6 @@ See `requirements.txt`. Key dependencies:
 | API-Sports | Free | Injury data and lineups |
 | Open-Meteo | Free | Weather conditions for outdoor sports |
 | Ollama (local) | -- | Gemma 3 4B for sentiment, reasoning, NLP intents |
-| Reddit (PRAW) | Free | Crowdsourced injury intel from sport subreddits |
 | Rotowire RSS | Free | Player injury/lineup news feeds (NBA/NFL/NHL/Soccer) |
 
 ## License

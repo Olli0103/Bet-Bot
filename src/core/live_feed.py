@@ -251,7 +251,7 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
         except Exception as exc:
             log.warning("Batch sentiment enrichment failed: %s", exc)
 
-        # --- Injury news enrichment (RSS + Reddit, best-effort) ---
+        # --- Injury news enrichment (Rotowire RSS, best-effort) ---
         try:
             from src.integrations.rss_fetcher import RSSFetcher
             rss = RSSFetcher()
@@ -352,7 +352,7 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
             except Exception:
                 poisson_pred = None
 
-        # --- Injury sentiment delta (from RSS/Reddit enrichment) ---
+        # --- Injury sentiment delta (from Rotowire RSS enrichment) ---
         inj_sent_home = injury_sentiment.get(home, 0.0)
         inj_sent_away = injury_sentiment.get(away, 0.0)
 

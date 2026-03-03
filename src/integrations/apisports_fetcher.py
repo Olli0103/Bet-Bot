@@ -1,7 +1,8 @@
 """API-Sports fetcher for official injuries and fixture data.
 
-Supports soccer injuries natively via /injuries endpoint.
-For other sports, returns empty lists (fallback to RSS/Reddit).
+Supports soccer injuries via /injuries endpoint and basketball injuries
+via the API-Basketball /injuries endpoint. For other sports, returns
+empty lists (fallback to Rotowire RSS).
 """
 from __future__ import annotations
 
@@ -15,6 +16,9 @@ from src.integrations.base_fetcher import AsyncBaseFetcher, _safe_sync_run
 
 log = logging.getLogger(__name__)
 
+# API-Basketball base URL (separate host from football API)
+API_BASKETBALL_BASE = "https://v1.basketball.api-sports.io"
+
 
 class APISportsFetcher(AsyncBaseFetcher):
     def __init__(self):
@@ -25,7 +29,7 @@ class APISportsFetcher(AsyncBaseFetcher):
         super().__init__(base_url=settings.apisports_base_url, headers=headers)
 
     # ------------------------------------------------------------------
-    # Existing fixture/injury methods
+    # Existing fixture/injury methods (soccer)
     # ------------------------------------------------------------------
 
     async def get_fixtures_by_ids_async(self, fixture_ids: List[int], ttl_seconds: int = 120) -> Dict[str, Any]:
@@ -55,7 +59,7 @@ class APISportsFetcher(AsyncBaseFetcher):
         return _safe_sync_run(self.get_injuries_by_fixture_ids_async(fixture_ids, ttl_seconds))
 
     # ------------------------------------------------------------------
-    # EPIC 1: Official injury data for today's events
+    # Official injury data for today's events
     # ------------------------------------------------------------------
 
     async def get_injuries_for_event_async(
@@ -68,67 +72,103 @@ class APISportsFetcher(AsyncBaseFetcher):
     ) -> List[Dict[str, str]]:
         """Fetch official injuries for a specific match.
 
-        For soccer: uses /injuries endpoint via fixture ID lookup.
-        For other sports: API-Sports doesn't have a universal injury endpoint,
-        so we return an empty list and rely on RSS/Reddit fallback.
+        - Soccer: /injuries endpoint via fixture ID lookup.
+        - Basketball: /injuries endpoint via API-Basketball host.
+        - Other sports: returns empty list (fallback to Rotowire RSS).
 
-        Returns a list of dicts: [{"player": "...", "status": "Out|Doubtful|..."}]
+        Returns a list of dicts: [{"player": "...", "team": "...", "status": "...", "source": "api-sports"}]
         """
         if not settings.apisports_api_key:
             return []
 
-        # Only soccer has reliable injury endpoint on API-Sports
-        if not sport.startswith("soccer"):
-            return []
+        if sport.startswith("soccer"):
+            return await self._soccer_injuries(home_team, away_team, event_date, ttl_seconds)
+        if sport.startswith("basketball"):
+            return await self._basketball_injuries(home_team, away_team, event_date, ttl_seconds)
 
-        cache_key = f"apisports:injuries:match:{home_team}:{away_team}".lower().replace(" ", "_")
+        # NFL, NHL, Tennis — no API-Sports endpoint; rely on RSS
+        return []
+
+    async def _soccer_injuries(
+        self, home_team: str, away_team: str, event_date: str, ttl_seconds: int
+    ) -> List[Dict[str, str]]:
+        """Soccer injuries via v3.football.api-sports.io /injuries."""
+        cache_key = f"apisports:inj:soccer:{home_team}:{away_team}".lower().replace(" ", "_")
         cached = cache.get_json(cache_key)
         if cached is not None:
             return cached
 
         try:
-            date_str = event_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            try:
-                dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-                date_str = dt.strftime("%Y-%m-%d")
-            except (ValueError, TypeError):
-                pass
+            date_str = self._resolve_date(event_date)
 
-            # Step 1: Find fixture IDs for today matching these teams
+            # Step 1: find fixture IDs matching these teams today
             fixtures_data = await self.get("fixtures", params={"date": date_str})
-            fixtures = fixtures_data.get("response") or []
-
-            fixture_ids: List[int] = []
-            for fx in fixtures:
-                teams = fx.get("teams", {})
-                fx_home = (teams.get("home", {}).get("name") or "").lower()
-                fx_away = (teams.get("away", {}).get("name") or "").lower()
-                if (home_team.lower() in fx_home or fx_home in home_team.lower() or
-                        away_team.lower() in fx_away or fx_away in away_team.lower()):
-                    fid = fx.get("fixture", {}).get("id")
-                    if fid:
-                        fixture_ids.append(int(fid))
-
+            fixture_ids = self._match_fixture_ids(
+                fixtures_data.get("response") or [], home_team, away_team
+            )
             if not fixture_ids:
                 cache.set_json(cache_key, [], ttl_seconds)
                 return []
 
-            # Step 2: Fetch injuries for matched fixtures
+            # Step 2: fetch injuries for those fixtures
             injuries_data = await self.get_injuries_by_fixture_ids_async(
                 fixture_ids[:5], ttl_seconds=ttl_seconds
             )
-            raw_injuries = injuries_data.get("response") or []
+            result = self._parse_football_injuries(injuries_data.get("response") or [])
+            cache.set_json(cache_key, result, ttl_seconds)
+            return result
 
+        except Exception as exc:
+            log.warning("API-Sports soccer injury fetch failed for %s vs %s: %s", home_team, away_team, exc)
+            cache.set_json(cache_key, [], ttl_seconds)
+            return []
+
+    async def _basketball_injuries(
+        self, home_team: str, away_team: str, event_date: str, ttl_seconds: int
+    ) -> List[Dict[str, str]]:
+        """Basketball injuries via v1.basketball.api-sports.io /injuries.
+
+        The API-Basketball /injuries endpoint accepts a date filter.
+        We query by date to get all injuries for today, then filter by team.
+        """
+        cache_key = f"apisports:inj:bball:{home_team}:{away_team}".lower().replace(" ", "_")
+        cached = cache.get_json(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            import httpx
+            date_str = self._resolve_date(event_date)
+            headers = {
+                "x-apisports-key": settings.apisports_api_key,
+                "Accept": "application/json",
+            }
+            url = f"{API_BASKETBALL_BASE}/injuries"
+            params = {"date": date_str}
+
+            async with httpx.AsyncClient(timeout=20) as client:
+                resp = await client.get(url, headers=headers, params=params)
+                if resp.status_code != 200:
+                    cache.set_json(cache_key, [], ttl_seconds)
+                    return []
+                data = resp.json()
+
+            raw = data.get("response") or []
             result: List[Dict[str, str]] = []
-            for inj in raw_injuries:
-                player = inj.get("player", {})
-                player_name = player.get("name") or "Unknown"
-                reason = player.get("reason") or inj.get("player", {}).get("type") or "Unknown"
-                team_name = inj.get("team", {}).get("name") or ""
+            home_l = home_team.lower()
+            away_l = away_team.lower()
+
+            for entry in raw:
+                team_name = (entry.get("team", {}).get("name") or "").lower()
+                if home_l not in team_name and team_name not in home_l and \
+                   away_l not in team_name and team_name not in away_l:
+                    continue
+                player_name = entry.get("player", {}).get("name") or "Unknown"
+                status = entry.get("status") or entry.get("player", {}).get("type") or "Unknown"
                 result.append({
                     "player": player_name,
-                    "team": team_name,
-                    "status": reason,
+                    "team": entry.get("team", {}).get("name") or "",
+                    "status": status,
                     "source": "api-sports",
                 })
 
@@ -136,9 +176,57 @@ class APISportsFetcher(AsyncBaseFetcher):
             return result
 
         except Exception as exc:
-            log.warning("API-Sports injury fetch failed for %s vs %s: %s", home_team, away_team, exc)
+            log.warning("API-Sports basketball injury fetch failed for %s vs %s: %s", home_team, away_team, exc)
             cache.set_json(cache_key, [], ttl_seconds)
             return []
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_date(event_date: str) -> str:
+        """Normalise an event date string to YYYY-MM-DD."""
+        if not event_date:
+            return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        try:
+            dt = datetime.fromisoformat(event_date.replace("Z", "+00:00"))
+            return dt.strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    @staticmethod
+    def _match_fixture_ids(
+        fixtures: list, home_team: str, away_team: str
+    ) -> List[int]:
+        """Find fixture IDs where the team names fuzzy-match."""
+        ids: List[int] = []
+        home_l = home_team.lower()
+        away_l = away_team.lower()
+        for fx in fixtures:
+            teams = fx.get("teams", {})
+            fx_home = (teams.get("home", {}).get("name") or "").lower()
+            fx_away = (teams.get("away", {}).get("name") or "").lower()
+            if (home_l in fx_home or fx_home in home_l) and \
+               (away_l in fx_away or fx_away in away_l):
+                fid = fx.get("fixture", {}).get("id")
+                if fid:
+                    ids.append(int(fid))
+        return ids
+
+    @staticmethod
+    def _parse_football_injuries(raw: list) -> List[Dict[str, str]]:
+        """Parse the API-Football /injuries response format."""
+        result: List[Dict[str, str]] = []
+        for inj in raw:
+            player = inj.get("player", {})
+            result.append({
+                "player": player.get("name") or "Unknown",
+                "team": inj.get("team", {}).get("name") or "",
+                "status": player.get("reason") or player.get("type") or "Unknown",
+                "source": "api-sports",
+            })
+        return result
 
     def get_injuries_for_event(
         self, home_team: str, away_team: str, sport: str, event_date: str = ""

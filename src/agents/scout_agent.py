@@ -1,7 +1,7 @@
 """Scout Agent: Monitors odds for steam moves and aggregates injury intel.
 
 The Scout is the first agent in the pipeline. It detects anomalous price
-movements and breaking injury news (via API-Sports + RSS + Reddit),
+movements and breaking injury news (via API-Sports + Rotowire RSS),
 then triggers the Analyst for deeper investigation.
 """
 from __future__ import annotations
@@ -158,7 +158,7 @@ class ScoutAgent:
     async def monitor_injuries(self) -> List[Dict[str, Any]]:
         """Monitor for breaking injury news via aggregated sources.
 
-        Uses the unified injury aggregator (API-Sports + RSS + Reddit + LLM)
+        Uses the unified injury aggregator (API-Sports + Rotowire RSS + LLM)
         to detect key player absences for today's events.
         """
         alerts: List[Dict[str, Any]] = []

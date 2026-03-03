@@ -65,7 +65,7 @@ class AnalystAgent:
         except Exception:
             sent_home = sent_away = 0.0
 
-        # 2. Injury aggregation (API-Sports + RSS + Reddit + LLM)
+        # 2. Injury aggregation (API-Sports + Rotowire RSS + LLM)
         inj_home = inj_away = 0
         injury_penalty_home = 0.0
         injury_penalty_away = 0.0
