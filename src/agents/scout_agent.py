@@ -1,13 +1,13 @@
-"""Scout Agent: Continuously monitors odds for steam moves and Twitter for breaking news.
+"""Scout Agent: Monitors odds for steam moves and aggregates injury intel.
 
 The Scout is the first agent in the pipeline. It detects anomalous price
-movements and breaking injury news, then triggers the Analyst for deeper
-investigation when something interesting is found.
+movements and breaking injury news (via API-Sports + Rotowire RSS),
+then triggers the Analyst for deeper investigation.
 """
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from src.core.dynamic_settings import dynamic_settings
 from src.core.settings import settings
@@ -27,7 +27,7 @@ KICKOFF_TIMES_KEY = "orchestrator:kickoff_times"
 
 
 class ScoutAgent:
-    """Monitors OddsAPI for steam moves (rapid price changes) and Twitter for injuries."""
+    """Monitors OddsAPI for steam moves and aggregates injury intelligence."""
 
     def __init__(self) -> None:
         self.odds_fetcher = OddsFetcher()
@@ -155,18 +155,13 @@ class ScoutAgent:
 
         return alerts
 
-    async def monitor_twitter(self) -> List[Dict[str, Any]]:
-        """Monitor Twitter/X for breaking injury news."""
+    async def monitor_injuries(self) -> List[Dict[str, Any]]:
+        """Monitor for breaking injury news via aggregated sources.
+
+        Uses the unified injury aggregator (API-Sports + Rotowire RSS + LLM)
+        to detect key player absences for today's events.
+        """
         alerts: List[Dict[str, Any]] = []
-
-        if not settings.twitter_enabled:
-            return alerts
-
-        try:
-            from src.integrations.twitter_fetcher import TwitterFetcher
-            tw = TwitterFetcher()
-        except ImportError:
-            return alerts
 
         # Get teams from currently tracked events (use resolved keys)
         base_sports = dynamic_settings.get_active_sports()
@@ -177,8 +172,9 @@ class ScoutAgent:
         except Exception:
             api_active = []
         sports = OddsFetcher.resolve_sport_keys(base_sports, api_active)
-        teams: set = set()
 
+        # Collect today's events
+        events_to_check: List[Dict[str, str]] = []
         for sport in sports:
             try:
                 events = await self.odds_fetcher.get_sport_odds_async(
@@ -186,25 +182,58 @@ class ScoutAgent:
                 )
                 if isinstance(events, list):
                     for e in events:
-                        if e.get("home_team"):
-                            teams.add(e["home_team"])
-                        if e.get("away_team"):
-                            teams.add(e["away_team"])
+                        home = e.get("home_team", "")
+                        away = e.get("away_team", "")
+                        if home and away:
+                            events_to_check.append({
+                                "home": home,
+                                "away": away,
+                                "sport": sport,
+                                "event_id": str(e.get("id", "")),
+                                "commence_time": str(e.get("commence_time", "")),
+                            })
             except Exception:
                 continue
 
-        for team in list(teams)[:20]:
+        # Run injury aggregation for each event (cap at 15 events)
+        from src.integrations.injury_aggregator import aggregate_injury_intel
+
+        for ev in events_to_check[:15]:
             try:
-                breaking = tw.check_breaking_injury(team)
-                if breaking:
-                    alerts.append({
-                        "type": "breaking_injury",
-                        "team": team,
-                        "text": breaking,
-                    })
-                    log.info("Breaking injury detected: %s - %s", team, breaking[:80])
-            except Exception:
-                pass
+                result = await aggregate_injury_intel(
+                    home_team=ev["home"],
+                    away_team=ev["away"],
+                    sport=ev["sport"],
+                    event_date=ev.get("commence_time", ""),
+                )
+                injuries = result.get("injuries", [])
+                if injuries:
+                    # Check for confirmed "Out" status players
+                    out_players = [
+                        inj for inj in injuries
+                        if inj.get("status", "").lower() == "out"
+                    ]
+                    if out_players:
+                        alerts.append({
+                            "type": "breaking_injury",
+                            "event_id": ev["event_id"],
+                            "sport": ev["sport"],
+                            "home": ev["home"],
+                            "away": ev["away"],
+                            "injuries": injuries,
+                            "out_players": out_players,
+                            "sources": result.get("sources", []),
+                            "text": "; ".join(
+                                f"{p['player']} ({p['team']}): {p['status']}"
+                                for p in out_players
+                            ),
+                        })
+                        log.info(
+                            "Breaking injury detected: %s vs %s — %d players out",
+                            ev["home"], ev["away"], len(out_players),
+                        )
+            except Exception as exc:
+                log.warning("Injury aggregation failed for %s vs %s: %s", ev["home"], ev["away"], exc)
 
         return alerts
 

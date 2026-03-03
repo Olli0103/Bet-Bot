@@ -236,7 +236,7 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
 
     # --- Enrichment: sentiment analysis ---
     sentiment: Dict[str, float] = {}
-    twitter_sentiment: Dict[str, float] = {}
+    injury_sentiment: Dict[str, float] = {}
     if settings.enrichment_enabled:
         all_teams: List[str] = []
         for _, e in raw_events:
@@ -251,20 +251,22 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
         except Exception as exc:
             log.warning("Batch sentiment enrichment failed: %s", exc)
 
-        # --- Twitter breaking news enrichment ---
-        if settings.twitter_enabled:
-            try:
-                from src.integrations.twitter_fetcher import TwitterFetcher
-                tw = TwitterFetcher()
-                for team in list({t for t in all_teams if t})[:20]:
-                    try:
-                        result = tw.check_breaking_injury(team)
-                        if result:
-                            twitter_sentiment[team] = -0.8  # breaking injury = strong negative
-                    except Exception:
-                        pass
-            except Exception as exc:
-                log.warning("Twitter enrichment failed: %s", exc)
+        # --- Injury news enrichment (Rotowire RSS, best-effort) ---
+        try:
+            from src.integrations.rss_fetcher import RSSFetcher
+            rss = RSSFetcher()
+            unique_teams = list({t for t in all_teams if t})
+            for sport_key in expanded_sports:
+                try:
+                    rss_hits = rss.fetch_injury_news(sport_key, unique_teams[:20], max_age_hours=24)
+                    for hit in rss_hits:
+                        matched = hit.get("team_match", "")
+                        if matched:
+                            injury_sentiment[matched] = -0.8  # injury news = strong negative
+                except Exception:
+                    pass
+        except Exception as exc:
+            log.warning("RSS injury enrichment failed: %s", exc)
 
     now_utc = datetime.now(timezone.utc)
     _, window_end = _bet_window(now_utc)
@@ -350,9 +352,9 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
             except Exception:
                 poisson_pred = None
 
-        # --- Twitter sentiment delta ---
-        tw_sent_home = twitter_sentiment.get(home, 0.0)
-        tw_sent_away = twitter_sentiment.get(away, 0.0)
+        # --- Injury sentiment delta (from Rotowire RSS enrichment) ---
+        inj_sent_home = injury_sentiment.get(home, 0.0)
+        inj_sent_away = injury_sentiment.get(away, 0.0)
 
         # Determine effective tax rate (only for Tipico)
         effective_tax = tax_rate if target_book == "tipico_de" else 0.0
@@ -404,7 +406,7 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
                 else:
                     poisson_prob = poisson_pred.get("h2h_away")
 
-            tw_delta = (tw_sent_home - tw_sent_away) if is_home else (tw_sent_away - tw_sent_home)
+            inj_delta_sent = (inj_sent_home - inj_sent_away) if is_home else (inj_sent_away - inj_sent_home)
 
             # Market momentum: implied probability delta over 12h (Pro API)
             current_ip = 1.0 / float(sharp_odds) if float(sharp_odds) > 1.0 else 0.5
@@ -433,7 +435,7 @@ def fetch_and_build_signals(bankroll: float | None = None) -> List[BetSignal]:
                 is_steam_move=steam,
                 line_staleness=staleness_min,
                 poisson_true_prob=poisson_prob,
-                twitter_sentiment_delta=tw_delta,
+                injury_news_delta=inj_delta_sent,
                 time_to_kickoff_hours=time_to_kickoff,
                 public_bias=bias_scores.get(selection, 0.0),
                 market_momentum=market_momentum,

@@ -65,8 +65,8 @@ class AgentOrchestrator:
         # 1. Scout: detect steam moves and breaking news
         try:
             odds_alerts = await self.scout.monitor_odds()
-            twitter_alerts = await self.scout.monitor_twitter()
-            all_alerts = odds_alerts + twitter_alerts
+            injury_alerts = await self.scout.monitor_injuries()
+            all_alerts = odds_alerts + injury_alerts
             summary["scout_alerts"] = len(all_alerts)
         except Exception as exc:
             log.error("Scout failed: %s", exc)
