@@ -42,6 +42,13 @@ class Settings(BaseModel):
     tipico_tax_rate: float = float(os.getenv("TIPICO_TAX_RATE", "0.05"))
     tax_free_mode: bool = os.getenv("TAX_FREE_MODE", "false").lower() == "true"
 
+    # Data sources (TheSportsDB, football-data.org)
+    sportsdb_api_key: str = os.getenv("SPORTSDB_API_KEY", "3")
+    football_data_api_key: str = os.getenv("FOOTBALL_DATA_API_KEY", "")
+
+    # Stats ingestion
+    stats_ingestion_enabled: bool = os.getenv("STATS_INGESTION_ENABLED", "true").lower() == "true"
+    stats_ingestion_interval_hours: int = int(os.getenv("STATS_INGESTION_INTERVAL_HOURS", "6"))
 
 
 settings = Settings()

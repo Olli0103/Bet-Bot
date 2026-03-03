@@ -118,6 +118,160 @@ def _retail_trap_badge(bet: dict) -> str:
     return ""
 
 
+def _format_form_blocks(form_str: str) -> str:
+    """Render a form string (e.g. 'WDWLW') as colored blocks."""
+    mapping = {"W": "🟩", "D": "🟨", "L": "🟥"}
+    return "".join(mapping.get(c.upper(), "⬜") for c in form_str)
+
+
+def _format_stats_card(
+    home: str,
+    away: str,
+    home_stats: dict,
+    away_stats: dict,
+    sport: str = "",
+) -> str:
+    """Format a Tipico-style stats overview card for a match.
+
+    Shows form blocks, goals for/against, O/U rate, BTTS rate,
+    attack/defense strength, and rest days.
+    """
+    # Form blocks
+    h_form = home_stats.get("form_str", "")
+    a_form = away_stats.get("form_str", "")
+    h_form_blocks = _format_form_blocks(h_form) if h_form else "---"
+    a_form_blocks = _format_form_blocks(a_form) if a_form else "---"
+
+    # Win rate
+    h_wr = home_stats.get("win_rate", 0)
+    a_wr = away_stats.get("win_rate", 0)
+
+    # Goals
+    h_gf = home_stats.get("goals_scored_avg", 0.0)
+    h_ga = home_stats.get("goals_conceded_avg", 0.0)
+    a_gf = away_stats.get("goals_scored_avg", 0.0)
+    a_ga = away_stats.get("goals_conceded_avg", 0.0)
+
+    # O/U and BTTS rates
+    h_o25 = home_stats.get("over25_rate", 0.0)
+    a_o25 = away_stats.get("over25_rate", 0.0)
+    h_btts = home_stats.get("btts_rate", 0.0)
+    a_btts = away_stats.get("btts_rate", 0.0)
+
+    # Attack/Defense strength
+    h_atk = home_stats.get("attack_strength", 1.0)
+    h_def = home_stats.get("defense_strength", 1.0)
+    a_atk = away_stats.get("attack_strength", 1.0)
+    a_def = away_stats.get("defense_strength", 1.0)
+
+    # Rest days
+    h_rest = home_stats.get("rest_days")
+    a_rest = away_stats.get("rest_days")
+    h_rest_str = f"{h_rest}d" if h_rest is not None else "?"
+    a_rest_str = f"{a_rest}d" if a_rest is not None else "?"
+
+    # League position
+    h_pos = home_stats.get("league_position")
+    a_pos = away_stats.get("league_position")
+    h_pos_str = f"#{h_pos}" if h_pos else ""
+    a_pos_str = f"#{a_pos}" if a_pos else ""
+
+    # Home/Away splits
+    h_home_wr = home_stats.get("home_win_rate")
+    a_away_wr = away_stats.get("away_win_rate")
+
+    lines = [
+        f"📊 Match-Statistik",
+        f"━━━━━━━━━━━━━━━━━━━━",
+        f"{'':>15} {'Heim':>8} {'Ausw.':>8}",
+        f"{'Form:':>15} {h_form_blocks:>8} {a_form_blocks:>8}",
+    ]
+
+    if h_pos_str or a_pos_str:
+        lines.append(f"{'Platz:':>15} {h_pos_str:>8} {a_pos_str:>8}")
+
+    lines.extend([
+        f"{'Siege:':>15} {h_wr:>7.0%} {a_wr:>7.0%}",
+        f"{'Tore/Spiel:':>15} {h_gf:>7.1f} {a_gf:>7.1f}",
+        f"{'Gegentore:':>15} {h_ga:>7.1f} {a_ga:>7.1f}",
+        f"{'O2.5-Rate:':>15} {h_o25:>7.0%} {a_o25:>7.0%}",
+        f"{'BTTS-Rate:':>15} {h_btts:>7.0%} {a_btts:>7.0%}",
+        f"{'Angriff:':>15} {h_atk:>7.2f} {a_atk:>7.2f}",
+        f"{'Abwehr:':>15} {h_def:>7.2f} {a_def:>7.2f}",
+        f"{'Pause:':>15} {h_rest_str:>8} {a_rest_str:>8}",
+    ])
+
+    if h_home_wr is not None or a_away_wr is not None:
+        h_hwr_str = f"{h_home_wr:.0%}" if h_home_wr is not None else "?"
+        a_awr_str = f"{a_away_wr:.0%}" if a_away_wr is not None else "?"
+        lines.append(f"{'Heim/Ausw.:':>15} {h_hwr_str:>8} {a_awr_str:>8}")
+
+    return "\n".join(lines)
+
+
+def build_stats_for_event(
+    event_id: str,
+    home: str,
+    away: str,
+    sport: str,
+) -> str:
+    """Build a stats card for a specific event using stored snapshots.
+
+    Returns formatted text or a fallback message if no data.
+    """
+    try:
+        from src.core.stats_ingester import get_event_snapshot
+        home_snap = get_event_snapshot(event_id, home) or {}
+        away_snap = get_event_snapshot(event_id, away) or {}
+    except Exception:
+        home_snap = {}
+        away_snap = {}
+
+    if not home_snap and not away_snap:
+        return ""
+
+    # Derive form string from recent results
+    def _derive_form(snap: dict) -> str:
+        w = snap.get("wins", 0)
+        d = snap.get("draws", 0)
+        l_ = snap.get("losses", 0)
+        n = snap.get("matches_played", 0)
+        if n == 0:
+            return ""
+        # Build approximate form: most recent first (W/D/L proportional)
+        form = "W" * w + "D" * d + "L" * l_
+        return form[:5]
+
+    home_stats = {
+        "form_str": _derive_form(home_snap),
+        "win_rate": home_snap.get("wins", 0) / max(1, home_snap.get("matches_played", 1)),
+        "goals_scored_avg": home_snap.get("goals_scored_avg", 0.0),
+        "goals_conceded_avg": home_snap.get("goals_conceded_avg", 0.0),
+        "over25_rate": home_snap.get("over25_rate", 0.0),
+        "btts_rate": home_snap.get("btts_rate", 0.0),
+        "attack_strength": home_snap.get("attack_strength", 1.0),
+        "defense_strength": home_snap.get("defense_strength", 1.0),
+        "rest_days": home_snap.get("rest_days"),
+        "league_position": home_snap.get("league_position"),
+        "home_win_rate": home_snap.get("home_win_rate"),
+    }
+    away_stats = {
+        "form_str": _derive_form(away_snap),
+        "win_rate": away_snap.get("wins", 0) / max(1, away_snap.get("matches_played", 1)),
+        "goals_scored_avg": away_snap.get("goals_scored_avg", 0.0),
+        "goals_conceded_avg": away_snap.get("goals_conceded_avg", 0.0),
+        "over25_rate": away_snap.get("over25_rate", 0.0),
+        "btts_rate": away_snap.get("btts_rate", 0.0),
+        "attack_strength": away_snap.get("attack_strength", 1.0),
+        "defense_strength": away_snap.get("defense_strength", 1.0),
+        "rest_days": away_snap.get("rest_days"),
+        "league_position": away_snap.get("league_position"),
+        "away_win_rate": away_snap.get("away_win_rate"),
+    }
+
+    return _format_stats_card(home, away, home_stats, away_stats, sport)
+
+
 # ---------------------------------------------------------------------------
 # Cache / state helpers
 # ---------------------------------------------------------------------------
@@ -338,8 +492,12 @@ def _format_leg_line(i: int, leg: dict) -> str:
     return f" {i+1:2d}. {emoji} {league} | {event} | {sel_display} | @{odds:.2f} | {prob:.0%}"
 
 
-def _format_combo_card(combo_data: dict) -> str:
-    """Format a combo as a rich card with FULL context per leg."""
+def _format_combo_card(combo_data: dict) -> Optional[str]:
+    """Format a combo as a rich card with FULL context per leg.
+
+    Returns None if no legs have valid event context (avoids sending
+    confusing '0 legs' cards to the user).
+    """
     size = combo_data.get("size", 0)
     stake = float(combo_data.get("stake", 1.00))
     combined_odds = float(combo_data.get("combined_odds", 0))
@@ -358,6 +516,10 @@ def _format_combo_card(combo_data: dict) -> str:
             complete_legs.append(leg)
         else:
             incomplete_count += 1
+
+    # No usable legs → return None so callers can skip this combo
+    if not complete_legs:
+        return None
 
     legs_lines = [_format_leg_line(i, leg) for i, leg in enumerate(complete_legs)]
     legs_txt = "\n".join(legs_lines)
@@ -399,10 +561,19 @@ async def combo_suggestions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Keine Kombi-Daten vorhanden. Bitte später erneut versuchen.")
         return
 
-    await update.message.reply_text(f"🧩 {len(combos)} Lotto-Kombis (10/20/30 Legs)")
+    sent = 0
     for combo_data in combos:
         card = _format_combo_card(combo_data)
-        await update.message.reply_text(card)
+        if card:
+            if sent == 0:
+                await update.message.reply_text(f"🧩 Lotto-Kombis (10/20/30 Legs)")
+            await update.message.reply_text(card)
+            sent += 1
+
+    if sent == 0:
+        await update.message.reply_text(
+            "Keine Kombi-Vorschläge mit vollständigem Event-Kontext verfügbar."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -585,13 +756,27 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             public_bias = float(alert_data.get("public_bias", 0))
             momentum = float(alert_data.get("market_momentum", 0))
             trigger = alert_data.get("trigger", "")
+            commence = str(alert_data.get("commence_time", ""))
+
+            # Format event time
+            event_time_str = ""
+            if commence:
+                try:
+                    ct = datetime.fromisoformat(commence.replace("Z", "+00:00"))
+                    local = ct.astimezone(ZoneInfo("Europe/Berlin"))
+                    event_time_str = local.strftime("%d.%m. %H:%M")
+                except Exception:
+                    event_time_str = commence[:16] if len(commence) >= 16 else commence
 
             # Format poisson display
             poisson_display = f"{poisson_prob:.0%}" if poisson_prob is not None else "n/a"
 
+            time_line = f"Anstoss: {event_time_str}\n" if event_time_str else ""
+
             msg = (
                 f"🔬 Deep Dive | {alert_data.get('home', '')} vs {alert_data.get('away', '')}\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"{time_line}"
                 f"Tipp: {alert_data.get('selection', '')}\n"
                 f"Quote: {float(alert_data.get('target_odds', 0)):.2f}\n"
                 f"Modell: {_progress_bar(model_p)} {badge}\n"
@@ -606,6 +791,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Momentum: {momentum:+.3f}\n"
                 f"Trigger: {trigger}\n"
             )
+
+            # Add stats card if data is available
+            stats_text = build_stats_for_event(
+                event_id=str(alert_data.get("event_id", "")),
+                home=alert_data.get("home", ""),
+                away=alert_data.get("away", ""),
+                sport=str(alert_data.get("sport", "")),
+            )
+            if stats_text:
+                msg += f"\n{stats_text}\n"
 
             # Generate fresh LLM reasoning (lightweight, uses cached data)
             try:
@@ -806,9 +1001,16 @@ async def _handle_get_combos(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if filtered:
             combos = filtered
 
+    sent = 0
     for combo_data in combos:
         card = _format_combo_card(combo_data)
-        await update.message.reply_text(card)
+        if card:
+            await update.message.reply_text(card)
+            sent += 1
+    if sent == 0:
+        await update.message.reply_text(
+            "Keine Kombi-Vorschläge mit vollständigem Event-Kontext verfügbar."
+        )
 
 
 async def _handle_explain_bet(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str):
@@ -1110,9 +1312,18 @@ async def push_daily_signals(bot, chat_id: str):
         await bot.send_message(chat_id=chat_id, text="Keine Kombi-Vorschläge heute.")
         return
 
-    await bot.send_message(chat_id=chat_id, text=f"🧩 {len(cached_combos)} Lotto-Kombis")
+    sent = 0
     for combo_data in cached_combos:
         if float(combo_data.get("expected_value", 0)) <= 0:
             continue
         card = _format_combo_card(combo_data)
-        await bot.send_message(chat_id=chat_id, text=card)
+        if card:
+            if sent == 0:
+                await bot.send_message(chat_id=chat_id, text=f"🧩 {len(cached_combos)} Lotto-Kombis")
+            await bot.send_message(chat_id=chat_id, text=card)
+            sent += 1
+    if sent == 0:
+        await bot.send_message(
+            chat_id=chat_id,
+            text="Keine Kombi-Vorschläge mit vollständigem Event-Kontext verfügbar.",
+        )

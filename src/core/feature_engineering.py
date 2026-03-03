@@ -61,6 +61,20 @@ class FeatureEngineer:
         time_to_kickoff_hours: float = 24.0,
         public_bias: float = 0.0,
         market_momentum: float = 0.0,
+        # --- Phase 4: stats-based features (from EventStatsSnapshot) ---
+        team_attack_strength: float = 1.0,
+        team_defense_strength: float = 1.0,
+        opp_attack_strength: float = 1.0,
+        opp_defense_strength: float = 1.0,
+        form_trend_slope: float = 0.0,
+        rest_days: Optional[int] = None,
+        schedule_congestion: float = 0.0,
+        over25_rate: float = 0.0,
+        btts_rate: float = 0.0,
+        home_away_split_delta: float = 0.0,
+        league_position_delta: float = 0.0,
+        goals_scored_avg: float = 0.0,
+        goals_conceded_avg: float = 0.0,
     ) -> Dict[str, float]:
         clv_proxy = FeatureEngineer.calculate_clv_proxy(target_odds, sharp_odds)
         sharp_prob = 1.0 / sharp_odds if sharp_odds > 1.0 else 0.0
@@ -69,6 +83,20 @@ class FeatureEngineer:
         is_home = selection == home_team
         sent_delta = (sentiment_home - sentiment_away) if is_home else (sentiment_away - sentiment_home)
         inj_delta = (injuries_away - injuries_home) if is_home else (injuries_home - injuries_away)
+
+        # Expected total goals proxy: team_atk * opp_def * league_avg + opp_atk * team_def * league_avg
+        expected_total_proxy = (team_attack_strength * opp_defense_strength * 1.35 +
+                                opp_attack_strength * team_defense_strength * 1.35)
+
+        # Rest fatigue score: 0 = well rested, 1 = congested
+        rest_fatigue = 0.0
+        if rest_days is not None:
+            if rest_days <= 2:
+                rest_fatigue = 1.0
+            elif rest_days <= 4:
+                rest_fatigue = 0.5
+            elif rest_days >= 10:
+                rest_fatigue = 0.3  # rustiness penalty
 
         features = {
             "sharp_implied_prob": float(sharp_prob),
@@ -91,10 +119,23 @@ class FeatureEngineer:
             "line_staleness": float(line_staleness),
             "injury_news_delta": float(injury_news_delta),
             "time_to_kickoff_hours": float(time_to_kickoff_hours),
-            # Public bias: positive = Tipico shading this selection (retail over-bet)
             "public_bias": float(public_bias),
-            # Market momentum: implied probability delta over 12h (Pro API)
             "market_momentum": float(market_momentum),
+            # Phase 4: stats-based features
+            "team_attack_strength": float(team_attack_strength),
+            "team_defense_strength": float(team_defense_strength),
+            "opp_attack_strength": float(opp_attack_strength),
+            "opp_defense_strength": float(opp_defense_strength),
+            "expected_total_proxy": round(expected_total_proxy, 4),
+            "form_trend_slope": float(form_trend_slope),
+            "rest_fatigue_score": float(rest_fatigue),
+            "schedule_congestion": float(schedule_congestion),
+            "over25_rate": float(over25_rate),
+            "btts_rate": float(btts_rate),
+            "home_away_split_delta": float(home_away_split_delta),
+            "league_position_delta": float(league_position_delta),
+            "goals_scored_avg": float(goals_scored_avg),
+            "goals_conceded_avg": float(goals_conceded_avg),
         }
         if poisson_true_prob is not None:
             features["poisson_true_prob"] = float(poisson_true_prob)

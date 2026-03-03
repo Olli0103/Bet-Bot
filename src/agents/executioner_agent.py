@@ -143,8 +143,8 @@ class ExecutionerAgent:
                 stake=stake,
                 features=analysis.get("features", {}),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Ghost bet placement failed: %s", exc)
 
         return result
 
@@ -162,6 +162,7 @@ class ExecutionerAgent:
             "home": str(analysis.get("home", "")),
             "away": str(analysis.get("away", "")),
             "selection": str(analysis.get("selection", "")),
+            "commence_time": str(analysis.get("commence_time", "")),
             "target_odds": float(analysis.get("bookmaker_odds", 0)),
             "sharp_odds": float(analysis.get("sharp_odds", 0)),
             "sharp_market": analysis.get("sharp_market", {}),
@@ -202,17 +203,33 @@ class ExecutionerAgent:
         trigger = analysis.get("trigger", "")
         model_p = float(analysis.get("model_probability", 0))
         ev = float(analysis.get("expected_value", 0))
+        commence = str(analysis.get("commence_time", ""))
 
         trigger_emoji = "⚡" if trigger == "steam_move" else "🏥" if trigger == "breaking_injury" else "🎯"
+
+        # Format event time (ISO -> readable German format)
+        event_time_str = ""
+        if commence:
+            try:
+                from datetime import datetime as dt
+                from zoneinfo import ZoneInfo
+                ct = dt.fromisoformat(commence.replace("Z", "+00:00"))
+                local = ct.astimezone(ZoneInfo("Europe/Berlin"))
+                event_time_str = local.strftime("%d.%m. %H:%M")
+            except Exception:
+                event_time_str = commence[:16] if len(commence) >= 16 else commence
 
         # Progress bar for model probability
         filled = int(round(model_p * 10))
         bar = "█" * filled + "░" * (10 - filled)
 
+        time_line = f"Anstoss: {event_time_str}\n" if event_time_str else ""
+
         msg = (
             f"{trigger_emoji} AGENT ALERT | {sport}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"Match: {home} vs {away}\n"
+            f"{time_line}"
             f"Tipp: {selection}\n"
             f"Trigger: {trigger}\n"
             f"Modell: [{bar}] {model_p:.0%}\n"

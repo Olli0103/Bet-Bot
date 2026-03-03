@@ -75,6 +75,22 @@ class AgentOrchestrator:
         if not all_alerts:
             return summary
 
+        # Deduplicate: keep only the strongest alert per event_id.
+        # Without this, the Scout can emit contradictory 1X2 picks for the
+        # same match (e.g. Home win + Away win + Draw), all as separate alerts.
+        # We pick the one with the largest odds movement per event.
+        deduped: Dict[str, Dict[str, Any]] = {}
+        for alert in all_alerts:
+            eid = alert.get("event_id", "")
+            if not eid:
+                continue
+            movement = float(alert.get("movement_pct", 0))
+            existing = deduped.get(eid)
+            if existing is None or movement > float(existing.get("movement_pct", 0)):
+                deduped[eid] = alert
+        all_alerts = list(deduped.values())
+        log.info("Deduped alerts: %d events (from %d raw alerts)", len(all_alerts), summary["scout_alerts"])
+
         # 2. Analyst: deep analysis for each alert
         odds_fetcher = OddsFetcher()
 
@@ -104,7 +120,10 @@ class AgentOrchestrator:
                     sharp_odds=sharp_odds,
                     sharp_market={selection: sharp_odds},
                     trigger=alert.get("type", "unknown"),
+                    market_momentum=float(alert.get("market_momentum", 0)),
                 )
+                # Attach event commence time so it flows into the alert cache
+                analysis["commence_time"] = alert.get("commence_time", "")
                 summary["analyses"] += 1
 
                 # 3. Executioner: final decision

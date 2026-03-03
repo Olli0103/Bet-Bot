@@ -4,10 +4,10 @@ Fetches sport-specific RSS feeds and filters for injury-related entries
 published within the last 24 hours. Zero API cost.
 
 Rotowire RSS source reliability (researched 2026-03):
-  - NBA:    https://www.rotowire.com/rss/news.htm?sport=nba     ✅ reliable
-  - NFL:    https://www.rotowire.com/rss/news.htm?sport=nfl     ✅ reliable (off-season: sparse)
-  - NHL:    https://www.rotowire.com/rss/news.htm?sport=nhl     ✅ reliable
-  - Soccer: https://www.rotowire.com/rss/news.htm?sport=soccer  ✅ reliable (US-centric)
+  - NBA:    https://www.rotowire.com/rss/news.php?sport=NBA     ✅ reliable
+  - NFL:    https://www.rotowire.com/rss/news.php?sport=NFL     ✅ reliable (off-season: sparse)
+  - NHL:    https://www.rotowire.com/rss/news.php?sport=NHL     ✅ reliable
+  - Soccer: https://www.rotowire.com/rss/news.php?sport=SOCCER  ✅ reliable (US-centric)
 
   Rotowire officially offers RSS feeds for all four sports at no cost for
   blogs/personal use (must link back to rotowire.com, which is embedded in
@@ -51,11 +51,12 @@ from src.data.redis_cache import cache
 log = logging.getLogger(__name__)
 
 # Rotowire RSS feed URLs per sport category
+# NOTE: .php endpoints return proper RSS; .htm returned empty XML declarations.
 ROTOWIRE_FEEDS: Dict[str, str] = {
-    "nba": "https://www.rotowire.com/rss/news.htm?sport=nba",
-    "nfl": "https://www.rotowire.com/rss/news.htm?sport=nfl",
-    "nhl": "https://www.rotowire.com/rss/news.htm?sport=nhl",
-    "soccer": "https://www.rotowire.com/rss/news.htm?sport=soccer",
+    "nba": "https://www.rotowire.com/rss/news.php?sport=NBA",
+    "nfl": "https://www.rotowire.com/rss/news.php?sport=NFL",
+    "nhl": "https://www.rotowire.com/rss/news.php?sport=NHL",
+    "soccer": "https://www.rotowire.com/rss/news.php?sport=SOCCER",
 }
 
 # Map OddsAPI sport keys to Rotowire feed categories
@@ -248,9 +249,10 @@ class RSSFetcher:
         for attempt in range(MAX_RETRIES):
             try:
                 result = self._fetch_feed(url)
-                # Track health
+                # Track health: mark degraded if fetch succeeded but returned 0
+                status = "ok" if result else "degraded"
                 _feed_health[feed_key] = {
-                    "status": "ok",
+                    "status": status,
                     "entries": len(result) if result else 0,
                     "ts": datetime.now(timezone.utc).isoformat(),
                     "attempts": attempt + 1,
@@ -302,15 +304,22 @@ class RSSFetcher:
         except (urllib.error.URLError, OSError) as exc:
             raise RuntimeError(f"RSS network error for {url}: {exc}") from exc
 
+        # Body sanity check: if the response contains neither <rss nor <feed,
+        # it's likely an empty XML declaration or error page — skip parsing.
+        head = raw_bytes[:500].lower() if raw_bytes else b""
+        if b"<rss" not in head and b"<feed" not in head:
+            log.info("RSS empty/degraded body for %s (no <rss>/<feed> tag)", url)
+            return []
+
         # Parse the fetched bytes
         try:
             feed = feedparser.parse(raw_bytes)
         except Exception as exc:
-            log.warning("RSS feedparser.parse() crashed for %s: %s", url, exc)
+            log.info("RSS feedparser.parse() failed for %s: %s", url, exc)
             return []
 
         if feed.bozo and not feed.entries:
-            log.warning("RSS bozo error for %s: %s", url, getattr(feed, "bozo_exception", "unknown"))
+            log.info("RSS bozo/empty for %s: %s", url, getattr(feed, "bozo_exception", "unknown"))
             return []
 
         entries: List[Dict[str, str]] = []
