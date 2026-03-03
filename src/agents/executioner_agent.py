@@ -104,8 +104,9 @@ class ExecutionerAgent:
         calib_adj = get_reliability_adjustment(model_p, sport_group)
         kelly_mult *= min(1.3, max(0.5, calib_adj))  # clamp to [0.5, 1.3]
 
-        # Use reduced Kelly for reactive bets (steam moves)
-        frac = 0.15 if analysis.get("trigger") == "steam_move" else 0.2
+        # Use reduced Kelly for reactive bets (steam moves incl. totals)
+        trigger = analysis.get("trigger", "")
+        frac = 0.15 if trigger in ("steam_move", "totals_steam") else 0.2
         frac *= kelly_mult
 
         # We need bookmaker_odds to compute kelly; extract from features or analysis
@@ -205,7 +206,12 @@ class ExecutionerAgent:
         ev = float(analysis.get("expected_value", 0))
         commence = str(analysis.get("commence_time", ""))
 
-        trigger_emoji = "⚡" if trigger == "steam_move" else "🏥" if trigger == "breaking_injury" else "🎯"
+        market = analysis.get("market", "h2h")
+        trigger_emoji = (
+            "📊" if trigger == "totals_steam" else
+            "⚡" if trigger == "steam_move" else
+            "🏥" if trigger == "breaking_injury" else "🎯"
+        )
 
         # Format event time (ISO -> readable German format)
         event_time_str = ""
@@ -225,8 +231,9 @@ class ExecutionerAgent:
 
         time_line = f"Anstoss: {event_time_str}\n" if event_time_str else ""
 
+        market_tag = f" | {market}" if market != "h2h" else ""
         msg = (
-            f"{trigger_emoji} AGENT ALERT | {sport}\n"
+            f"{trigger_emoji} AGENT ALERT | {sport}{market_tag}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"Match: {home} vs {away}\n"
             f"{time_line}"

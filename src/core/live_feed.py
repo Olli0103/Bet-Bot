@@ -30,6 +30,7 @@ from src.models.betting import BetSignal, ComboBet
 log = logging.getLogger(__name__)
 
 SNAPSHOT_KEY = "live_snapshot:value_bets"
+ALL_RANKED_KEY = "live_snapshot:all_ranked"
 COMBO_KEY = "live_snapshot:combo_bets"
 COMBO_LEGS_KEY = "live_snapshot:combo_legs"
 META_KEY = "live_snapshot:meta"
@@ -827,14 +828,27 @@ def fetch_and_build_signals(
     eligible_legs = [l for l in combo_legs if l["probability"] >= 0.50]
     combos = optimizer.build_all_combos(eligible_legs, target_sizes=combo_sizes)
 
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    # Cache global top-10 snapshot (used by daily push + backward compat)
     payload = {
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": now_iso,
         "count": len(top10),
         "items": [r.model_dump() for r in top10],
     }
     stats["signals"] = len(top10)
+    stats["signals_ranked"] = len(ranked)
 
     cache.set_json(SNAPSHOT_KEY, payload, ttl_seconds=12 * 3600)
+
+    # Cache ALL ranked signals so per-sport Top10 can draw from a full pool
+    all_ranked_payload = {
+        "ts": now_iso,
+        "count": len(ranked),
+        "items": [r.model_dump() for r in ranked],
+    }
+    cache.set_json(ALL_RANKED_KEY, all_ranked_payload, ttl_seconds=12 * 3600)
+
     cache.set_json(COMBO_KEY, combos, ttl_seconds=12 * 3600)
     cache.set_json(COMBO_LEGS_KEY, combo_legs, ttl_seconds=12 * 3600)
     cache.set_json(META_KEY, stats, ttl_seconds=12 * 3600)
@@ -883,7 +897,14 @@ def run_enrichment_pass(progress_callback=None) -> Dict[str, Any]:
 
 
 def get_cached_signals() -> Tuple[List[Dict[str, Any]], str]:
+    """Return global top-10 snapshot (backward compat, daily push)."""
     snap = cache.get_json(SNAPSHOT_KEY) or {}
+    return snap.get("items") or [], snap.get("ts") or ""
+
+
+def get_all_ranked_signals() -> Tuple[List[Dict[str, Any]], str]:
+    """Return ALL EV>0 ranked signals (full pool for per-sport Top10)."""
+    snap = cache.get_json(ALL_RANKED_KEY) or {}
     return snap.get("items") or [], snap.get("ts") or ""
 
 

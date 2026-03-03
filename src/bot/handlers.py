@@ -21,6 +21,7 @@ from src.core.bankroll import BankrollManager
 from src.core.betting_engine import BettingEngine
 from src.core.live_feed import (
     fetch_and_build_signals,
+    get_all_ranked_signals,
     get_cached_combo_legs,
     get_cached_meta,
     get_cached_signals,
@@ -322,6 +323,7 @@ def _fetched_within(hours: int = 4) -> bool:
 def _format_signal_card(b: dict, index: int, total: int) -> str:
     """Format a single signal as a rich card with progress bar and badges."""
     sport = str(b.get("sport", "")).replace("_", " ").upper()
+    market = str(b.get("market", "h2h"))
     model_p = float(b.get("model_probability", 0))
     ev = float(b.get("expected_value", 0))
     odds = float(b.get("bookmaker_odds", 0))
@@ -333,8 +335,11 @@ def _format_signal_card(b: dict, index: int, total: int) -> str:
     badge = _calibration_badge(model_p)
     trap = _retail_trap_badge(b)
 
+    # Show market type if not plain h2h
+    market_tag = f" | {market}" if market != "h2h" else ""
+
     return (
-        f"🎯 Signal {index + 1}/{total} | {sport}\n"
+        f"🎯 Signal {index + 1}/{total} | {sport}{market_tag}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"Tipp: {b['selection']}\n"
         f"Quote: {odds:.2f}\n"
@@ -358,9 +363,12 @@ def _signal_nav_keyboard(index: int, total: int, bet_data: Optional[dict] = None
         mark_id = _store_mark_payload(bet_data)
         action_row.append(InlineKeyboardButton("✅ Als platziert", callback_data=f"markid:{mark_id}"))
 
+    back_row = [InlineKeyboardButton("↩️ Zurück zur Sportauswahl", callback_data="top10:back")]
+
     rows = [nav_row]
     if action_row:
         rows.append(action_row)
+    rows.append(back_row)
     return InlineKeyboardMarkup(rows)
 
 
@@ -401,8 +409,19 @@ async def _show_top10_for_sport(
     sport_filter: str = "all",
     edit_message: bool = False,
 ) -> None:
-    """Core logic for showing Top10 value bets, optionally filtered by sport."""
-    items, ts = get_cached_signals()
+    """Core logic for showing Top10 value bets, optionally filtered by sport.
+
+    Pipeline: load ALL ranked → filter placed → filter sport → top 10 → paginate.
+    Each sport filter operates independently on the full pool — no cross-view
+    dedup or global cap.
+    """
+    # Load the FULL ranked pool (not just global top 10)
+    items, ts = get_all_ranked_signals()
+    if not items:
+        # Fallback to legacy top-10 snapshot
+        items, ts = get_cached_signals()
+
+    total_candidates = len(items)
 
     if not items:
         engine = BettingEngine(bankroll=await asyncio.to_thread(_get_bankroll))
@@ -416,16 +435,19 @@ async def _show_top10_for_sport(
             ])
         ]
 
+    # Filter out non-playable and already-placed bets
     placed = _placed_keys_today()
-    items = [
+    playable = [
         x for x in items
         if float(x.get("expected_value", 0)) > 0
         and float(x.get("recommended_stake", 0)) > 0
         and f"{x.get('event_id')}|{x.get('selection')}" not in placed
     ]
+    n_placed_filtered = len(items) - len(playable)
 
-    # Apply sport filter
-    items = _filter_items_by_sport(items, sport_filter)
+    # Apply sport filter AFTER playability check
+    filtered = _filter_items_by_sport(playable, sport_filter)
+    n_sport_filtered = len(playable) - len(filtered)
 
     sport_label = {
         "all": "Alle Sportarten",
@@ -436,34 +458,41 @@ async def _show_top10_for_sport(
         "icehockey": "🏒 NHL",
     }.get(sport_filter, sport_filter)
 
-    if not items:
+    log.info(
+        "Top10 [%s]: pool=%d, playable=%d (placed_out=%d), "
+        "after_sport_filter=%d (sport_out=%d), showing=%d",
+        sport_filter, total_candidates, len(playable), n_placed_filtered,
+        len(filtered), n_sport_filtered, min(len(filtered), 10),
+    )
+
+    if not filtered:
         msg = f"Keine spielbaren Value Bets für {sport_label}."
         if edit_message:
             q = update.callback_query
             await q.edit_message_text(msg, reply_markup=_sport_filter_keyboard())
         else:
-            await update.message.reply_text(msg)
+            await update.message.reply_text(msg, reply_markup=_sport_filter_keyboard())
         return
 
-    items = items[:10]
-    context.user_data["signal_items"] = items
+    top_n = filtered[:10]
+    context.user_data["signal_items"] = top_n
     context.user_data["top10_sport_filter"] = sport_filter
 
-    header = f"🎯 Top {len(items)} Einzelwetten | {sport_label}"
+    header = f"🎯 Top {len(top_n)} Einzelwetten | {sport_label}"
     if ts:
         header += f"\nStand: {ts[:16]}"
 
     # Show first signal with navigation
-    card = _format_signal_card(items[0], 0, len(items))
+    card = _format_signal_card(top_n[0], 0, len(top_n))
     bet_data = {
-        "event_id": items[0].get("event_id", ""),
-        "sport": items[0].get("sport", ""),
-        "market": items[0].get("market", "h2h"),
-        "selection": items[0].get("selection", ""),
-        "odds": float(items[0].get("bookmaker_odds", 0)),
-        "stake": float(items[0].get("recommended_stake", 0)),
+        "event_id": top_n[0].get("event_id", ""),
+        "sport": top_n[0].get("sport", ""),
+        "market": top_n[0].get("market", "h2h"),
+        "selection": top_n[0].get("selection", ""),
+        "odds": float(top_n[0].get("bookmaker_odds", 0)),
+        "stake": float(top_n[0].get("recommended_stake", 0)),
     }
-    keyboard = _signal_nav_keyboard(0, len(items), bet_data)
+    keyboard = _signal_nav_keyboard(0, len(top_n), bet_data)
 
     if edit_message:
         q = update.callback_query
@@ -711,6 +740,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- Top10 sport filter ---
     if data.startswith("top10:"):
         sport_filter = data.split(":", 1)[1]
+        if sport_filter == "back":
+            await q.edit_message_text(
+                "🎯 Top 10 Einzelwetten\nWähle eine Sportart:",
+                reply_markup=_sport_filter_keyboard(),
+            )
+            return
         try:
             await _show_top10_for_sport(update, context, sport_filter=sport_filter, edit_message=True)
         except Exception:
