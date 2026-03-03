@@ -6,11 +6,11 @@ matrix approach to derive 1X2, over/under 0.5/1.5/2.5/3.5, and BTTS probabilitie
 from __future__ import annotations
 
 import logging
-import re
 from typing import Dict, Optional
 
 from scipy.stats import poisson
 
+from src.core.sport_mapping import normalize_team as _normalize_team
 from src.data.redis_cache import cache
 
 log = logging.getLogger(__name__)
@@ -24,11 +24,6 @@ DEFAULT_DEFENSE: float = 1.0            # league-average defense strength
 SCORE_RANGE: int = 7                    # compute P(goals=0..6) per side
 STRENGTH_TTL: int = 30 * 24 * 3600     # 30 days in seconds
 LEARNING_RATE: float = 0.05            # how fast strengths move per result
-
-
-def _normalize_team(name: str) -> str:
-    """Lower-case, strip non-alphanumeric chars for stable cache keys."""
-    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
 
 
 def _cache_key(team: str) -> str:

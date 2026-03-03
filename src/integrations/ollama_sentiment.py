@@ -14,10 +14,10 @@ from src.models.sentiment import SentimentResult
 
 
 def _strip_markdown_json(raw: str) -> str:
-    """Remove markdown code fences that small LLMs sometimes wrap around JSON."""
-    raw = raw.strip()
-    raw = re.sub(r"^```(?:json)?\s*", "", raw)
-    raw = re.sub(r"\s*```$", "", raw)
+    """Extract JSON from LLM output, ignoring any surrounding text or markdown."""
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if match:
+        return match.group(0)
     return raw.strip()
 
 
