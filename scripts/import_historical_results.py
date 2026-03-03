@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 
 from src.core.sport_mapping import csv_code_to_api_key
 from src.data.models import Base, PlacedBet
@@ -144,6 +144,28 @@ def _pnl(odds: float, status: str) -> float:
     elif status == "lost":
         return -1.0
     return 0.0
+
+
+def _ensure_schema() -> None:
+    """Add any columns present in the ORM model but missing from the DB table.
+
+    This resolves the ``meta_features column missing`` error that occurs when
+    the ``placed_bets`` table was originally created from an older model that
+    lacked the JSONB column.  Uses ``ADD COLUMN IF NOT EXISTS`` so it is safe
+    to call on every run.
+    """
+    migrations = [
+        "ALTER TABLE placed_bets ADD COLUMN IF NOT EXISTS meta_features JSONB",
+        "ALTER TABLE placed_bets ADD COLUMN IF NOT EXISTS odds_open DOUBLE PRECISION",
+        "ALTER TABLE placed_bets ADD COLUMN IF NOT EXISTS odds_close DOUBLE PRECISION",
+        "ALTER TABLE placed_bets ADD COLUMN IF NOT EXISTS clv DOUBLE PRECISION DEFAULT 0.0",
+        "ALTER TABLE placed_bets ADD COLUMN IF NOT EXISTS form_winrate_l5 DOUBLE PRECISION",
+        "ALTER TABLE placed_bets ADD COLUMN IF NOT EXISTS form_games_l5 DOUBLE PRECISION",
+    ]
+    with engine.begin() as conn:
+        for stmt in migrations:
+            conn.execute(text(stmt))
+    log.info("Schema check passed – all required columns present.")
 
 
 # ---------------------------------------------------------------------------
@@ -504,13 +526,13 @@ def import_nba(folder: Path, max_rows: int = 50000) -> int:
                     df[c] = pd.to_numeric(df[c], errors="coerce")
 
             for _, r in df.iterrows():
-                home = _first_str(r, ["team_home", "Home Team", "HomeTeam", "Home", "home_team"]) or ""
-                away = _first_str(r, ["team_away", "Away Team", "AwayTeam", "Away", "away_team"]) or ""
+                home = _first_str(r, ["team_home", "Home Team", "HomeTeam", "Home", "home_team", "home"]) or ""
+                away = _first_str(r, ["team_away", "Away Team", "AwayTeam", "Away", "away_team", "away"]) or ""
                 if not home or not away:
                     continue
 
-                pts_h = _first_int(r, ["pts_home", "Home Score", "HomeScore", "PtsH", "Home Points"])
-                pts_a = _first_int(r, ["pts_away", "Away Score", "AwayScore", "PtsA", "Away Points"])
+                pts_h = _first_int(r, ["pts_home", "Home Score", "HomeScore", "PtsH", "Home Points", "score_home"])
+                pts_a = _first_int(r, ["pts_away", "Away Score", "AwayScore", "PtsA", "Away Points", "score_away"])
                 if pts_h is None or pts_a is None:
                     continue
 
@@ -628,7 +650,10 @@ def import_nba(folder: Path, max_rows: int = 50000) -> int:
 def import_nfl(folder: Path, max_rows: int = 50000) -> int:
     """Import NFL data with momentum (open vs close) and playoff flags."""
     sport = csv_code_to_api_key("nfl") or "americanfootball_nfl"
-    files = sorted(folder.glob("*.csv"))
+    csv_files = sorted(folder.glob("*.csv"))
+    xlsx_files = sorted(folder.glob("*.xlsx"))
+    xls_files = sorted(folder.glob("*.xls"))
+    files = csv_files + xlsx_files + xls_files
     if not files:
         return 0
 
@@ -637,7 +662,14 @@ def import_nfl(folder: Path, max_rows: int = 50000) -> int:
         existing = set(db.query(PlacedBet.event_id, PlacedBet.selection).all())
 
         for p in files:
-            df = _safe_read_csv(p)
+            if p.suffix == ".csv":
+                df = _safe_read_csv(p)
+            else:
+                try:
+                    df = pd.read_excel(p)
+                except Exception:
+                    log.warning("Cannot read Excel file %s", p)
+                    continue
             if df is None or df.empty:
                 continue
             if max_rows > 0 and len(df) > max_rows:
@@ -792,8 +824,11 @@ def import_nhl(folder: Path, max_rows: int = 50000) -> int:
 
             # Detect format
             has_home_away_col = any(c in df.columns for c in ["home_away", "HoA", "Home/Away"])
+            has_is_home_col = "is_home" in df.columns
 
-            if has_home_away_col:
+            if has_is_home_col:
+                n = _import_nhl_is_home(df, sport, existing, db)
+            elif has_home_away_col:
                 n = _import_nhl_per_team(df, sport, existing, db)
             else:
                 n = _import_nhl_per_game(df, sport, existing, db)
@@ -915,6 +950,134 @@ def _import_nhl_per_team(
             actual_total = goals_h + goals_a
             tot_eid = _mk_event_id(["nhl", str(gid), date_str, home, away, f"o{total_line}"])
             tot_st = "won" if actual_total > total_line else ("lost" if actual_total < total_line else "void")
+            k_t = (tot_eid, f"Over {total_line}")
+            if k_t not in existing:
+                db.add(PlacedBet(
+                    event_id=tot_eid, sport=sport, market="totals",
+                    selection=f"Over {total_line}", odds=1.91,
+                    stake=1.0, status=tot_st, pnl=_pnl(1.91, tot_st),
+                    meta_features=meta,
+                ))
+                existing.add(k_t)
+                inserted += 1
+
+    return inserted
+
+
+def _import_nhl_is_home(
+    df: pd.DataFrame, sport: str, existing: set, db,
+) -> int:
+    """Parse NHL data in team-perspective format with ``is_home`` boolean.
+
+    Expected columns: ``game_id``, ``is_home``, ``team_name``, ``opp_team_name``,
+    ``goals_for``, ``goals_against``, and optionally moneyline / totals odds.
+    Each game appears as two rows (one per team).  We group by ``game_id``
+    and pick the home row to build a canonical per-game record.
+    """
+    inserted = 0
+
+    gid_col = next(
+        (c for c in ["game_id", "Game ID", "gameId"] if c in df.columns), None
+    )
+    if gid_col is None:
+        log.warning("NHL is_home format detected but no game_id column found")
+        return 0
+
+    # Coerce numerics
+    for c in df.columns:
+        if any(pat in c.lower() for pat in [
+            "goals", "shots", "hit", "block", "pim",
+            "faceoff", "roll_", "moneyline", "spread", "total",
+        ]):
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    for gid, group in df.groupby(gid_col):
+        # Normalise is_home to boolean
+        home_mask = group["is_home"].astype(str).str.strip().str.lower().isin(
+            ["1", "true", "yes", "1.0"]
+        )
+        away_mask = ~home_mask
+
+        home_rows = group[home_mask]
+        away_rows = group[away_mask]
+        if home_rows.empty or away_rows.empty:
+            continue
+
+        hr = home_rows.iloc[0]
+        ar = away_rows.iloc[0]
+
+        home = str(hr.get("team_name") or hr.get("team") or "").strip()
+        away = str(ar.get("team_name") or ar.get("team") or "").strip()
+        if not home or not away:
+            continue
+
+        goals_h = _safe_int(hr.get("goals_for") or hr.get("GF") or hr.get("goals"))
+        goals_a = _safe_int(ar.get("goals_for") or ar.get("GF") or ar.get("goals"))
+        if goals_h is None or goals_a is None:
+            # Fallback: try goals_against from the opposite row
+            if goals_h is None:
+                goals_h = _safe_int(ar.get("goals_against") or ar.get("GA"))
+            if goals_a is None:
+                goals_a = _safe_int(hr.get("goals_against") or hr.get("GA"))
+        if goals_h is None or goals_a is None:
+            continue
+
+        date_str = _first_str(hr, ["game_date", "Date", "date"]) or str(gid)
+
+        # --- Build meta from both rows ---
+        meta_home = _extract_nhl_meta(hr, "home")
+        meta_away = _extract_nhl_meta(ar, "away")
+        meta = {**meta_home, **meta_away}
+
+        # --- MONEYLINE (American odds -> decimal) ---
+        home_ml_raw = _safe_float(
+            hr.get("moneyline") or hr.get("ML") or hr.get("team_moneyline")
+        )
+        away_ml_raw = _safe_float(
+            ar.get("moneyline") or ar.get("ML") or ar.get("team_moneyline")
+        )
+
+        home_ml_dec = _american_to_decimal(home_ml_raw) if home_ml_raw else None
+        away_ml_dec = _american_to_decimal(away_ml_raw) if away_ml_raw else None
+
+        if home_ml_dec and home_ml_dec > 1.0:
+            eid = _mk_event_id(["nhl", str(gid), date_str, home, away, "ml_h"])
+            st = "won" if goals_h > goals_a else "lost"
+            k = (eid, home)
+            if k not in existing:
+                db.add(PlacedBet(
+                    event_id=eid, sport=sport, market="h2h",
+                    selection=home, odds=float(home_ml_dec),
+                    stake=1.0, status=st, pnl=_pnl(home_ml_dec, st),
+                    meta_features=meta,
+                ))
+                existing.add(k)
+                inserted += 1
+
+        if away_ml_dec and away_ml_dec > 1.0:
+            eid_a = _mk_event_id(["nhl", str(gid), date_str, home, away, "ml_a"])
+            st_a = "won" if goals_a > goals_h else "lost"
+            k_a = (eid_a, away)
+            if k_a not in existing:
+                db.add(PlacedBet(
+                    event_id=eid_a, sport=sport, market="h2h",
+                    selection=away, odds=float(away_ml_dec),
+                    stake=1.0, status=st_a, pnl=_pnl(away_ml_dec, st_a),
+                    meta_features=meta,
+                ))
+                existing.add(k_a)
+                inserted += 1
+
+        # --- TOTALS (Over) ---
+        total_line = _safe_float(
+            hr.get("total") or hr.get("Total") or hr.get("OU")
+        )
+        if total_line is not None:
+            actual_total = goals_h + goals_a
+            tot_eid = _mk_event_id(["nhl", str(gid), date_str, home, away, f"o{total_line}"])
+            tot_st = "won" if actual_total > total_line else (
+                "lost" if actual_total < total_line else "void"
+            )
             k_t = (tot_eid, f"Over {total_line}")
             if k_t not in existing:
                 db.add(PlacedBet(
@@ -1056,6 +1219,7 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     Base.metadata.create_all(bind=engine)
+    _ensure_schema()
 
     base = Path(args.imports_dir)
     counts: Dict[str, int] = {}
