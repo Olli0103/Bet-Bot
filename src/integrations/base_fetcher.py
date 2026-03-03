@@ -14,18 +14,26 @@ class APIFetchError(Exception):
 def _safe_sync_run(coro, timeout: float = 30):
     """Run a coroutine synchronously, safely handling nested event loops.
 
+    Always wraps the coroutine in ``asyncio.wait_for(...)`` to ensure it is
+    properly awaited and bounded by a timeout — this prevents the
+    ``RuntimeWarning: coroutine was never awaited`` leak that occurred when
+    the thread pool or loop lifecycle discarded an un-awaited coroutine.
+
     If called from within a running event loop (e.g. the Telegram bot's loop),
     spawns a new thread with its own event loop to avoid the
     ``asyncio.run() cannot be called from a running event loop`` error.
     """
+    async def _with_timeout():
+        return await asyncio.wait_for(coro, timeout=timeout)
+
     try:
         asyncio.get_running_loop()
         # Already inside an event loop — offload to a thread with its own loop
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, coro).result(timeout=timeout)
+            return pool.submit(asyncio.run, _with_timeout()).result(timeout=timeout + 5)
     except RuntimeError:
         # No running loop — safe to use asyncio.run() directly
-        return asyncio.run(coro)
+        return asyncio.run(_with_timeout())
 
 
 class AsyncBaseFetcher:

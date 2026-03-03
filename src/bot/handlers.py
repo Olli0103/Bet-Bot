@@ -371,8 +371,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def menu_value_bets(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show Top 10 value bets ranked by hit probability + positive EV."""
+def _sport_filter_keyboard() -> InlineKeyboardMarkup:
+    """Build inline sport filter keyboard for Top10 Einzelwetten."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Alle", callback_data="top10:all"),
+            InlineKeyboardButton("⚽ Soccer", callback_data="top10:soccer"),
+            InlineKeyboardButton("🏀 Basketball", callback_data="top10:basketball"),
+        ],
+        [
+            InlineKeyboardButton("🎾 Tennis", callback_data="top10:tennis"),
+            InlineKeyboardButton("🏈 NFL", callback_data="top10:americanfootball"),
+            InlineKeyboardButton("🏒 NHL", callback_data="top10:icehockey"),
+        ],
+    ])
+
+
+def _filter_items_by_sport(items: list, sport_filter: str) -> list:
+    """Filter signal items by sport category prefix."""
+    if sport_filter == "all":
+        return items
+    return [x for x in items if str(x.get("sport", "")).startswith(sport_filter)]
+
+
+async def _show_top10_for_sport(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    sport_filter: str = "all",
+    edit_message: bool = False,
+) -> None:
+    """Core logic for showing Top10 value bets, optionally filtered by sport."""
     items, ts = get_cached_signals()
 
     if not items:
@@ -395,17 +423,34 @@ async def menu_value_bets(update: Update, context: ContextTypes.DEFAULT_TYPE):
         and f"{x.get('event_id')}|{x.get('selection')}" not in placed
     ]
 
+    # Apply sport filter
+    items = _filter_items_by_sport(items, sport_filter)
+
+    sport_label = {
+        "all": "Alle Sportarten",
+        "soccer": "⚽ Soccer",
+        "basketball": "🏀 Basketball",
+        "tennis": "🎾 Tennis",
+        "americanfootball": "🏈 NFL",
+        "icehockey": "🏒 NHL",
+    }.get(sport_filter, sport_filter)
+
     if not items:
-        await update.message.reply_text("Keine spielbaren Value Bets (EV<=0 oder bereits platziert).")
+        msg = f"Keine spielbaren Value Bets für {sport_label}."
+        if edit_message:
+            q = update.callback_query
+            await q.edit_message_text(msg, reply_markup=_sport_filter_keyboard())
+        else:
+            await update.message.reply_text(msg)
         return
 
     items = items[:10]
     context.user_data["signal_items"] = items
+    context.user_data["top10_sport_filter"] = sport_filter
 
-    header = f"🎯 Top {len(items)} Einzelwetten"
+    header = f"🎯 Top {len(items)} Einzelwetten | {sport_label}"
     if ts:
-        header += f" | Stand: {ts[:16]}"
-    await update.message.reply_text(header)
+        header += f"\nStand: {ts[:16]}"
 
     # Show first signal with navigation
     card = _format_signal_card(items[0], 0, len(items))
@@ -418,7 +463,21 @@ async def menu_value_bets(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "stake": float(items[0].get("recommended_stake", 0)),
     }
     keyboard = _signal_nav_keyboard(0, len(items), bet_data)
-    await update.message.reply_text(card, reply_markup=keyboard)
+
+    if edit_message:
+        q = update.callback_query
+        await q.edit_message_text(f"{header}\n\n{card}", reply_markup=keyboard)
+    else:
+        await update.message.reply_text(header)
+        await update.message.reply_text(card, reply_markup=keyboard)
+
+
+async def menu_value_bets(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show sport filter selector, then Top 10 value bets."""
+    await update.message.reply_text(
+        "🎯 Top 10 Einzelwetten\nWähle eine Sportart:",
+        reply_markup=_sport_filter_keyboard(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -647,6 +706,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     data = q.data or ""
+
+    # --- Top10 sport filter ---
+    if data.startswith("top10:"):
+        sport_filter = data.split(":", 1)[1]
+        try:
+            await _show_top10_for_sport(update, context, sport_filter=sport_filter, edit_message=True)
+        except Exception:
+            await q.edit_message_text("Sport-Filter fehlgeschlagen.", reply_markup=_sport_filter_keyboard())
+        return
 
     # --- Signal pagination ---
     if data.startswith("sig_nav:"):

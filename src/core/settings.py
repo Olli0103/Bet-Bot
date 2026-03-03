@@ -16,6 +16,12 @@ class Settings(BaseModel):
     newsapi_key: str = os.getenv("NEWSAPI_KEY", "")
     newsapi_base_url: str = os.getenv("NEWSAPI_BASE_URL", "https://newsapi.org/v2")
 
+    gnews_api_key: str = os.getenv("GNEWS_API_KEY", "")
+    gnews_base_url: str = os.getenv("GNEWS_BASE_URL", "https://gnews.io/api/v4")
+
+    newsdata_api_key: str = os.getenv("NEWSDATA_API_KEY", "")
+    newsdata_base_url: str = os.getenv("NEWSDATA_BASE_URL", "https://newsdata.io/api/1")
+
     postgres_dsn: str = os.getenv("POSTGRES_DSN", "postgresql+psycopg://postgres:postgres@localhost:5432/signalbot")
     redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
