@@ -1,5 +1,100 @@
 # Changelog
 
+## [2026-03-03] Risk Guards + Confidence Gate + Stake Caps + Top10 Fix
+
+### Why false picks slipped through (root cause)
+
+Before this change, there was **no confidence gate** anywhere in the pipeline.
+Signals with model_probability as low as 18% could get high stakes because:
+1. Kelly fraction was applied to raw model_probability without a floor check
+2. `steam_move` triggers could amplify weak signals into actionable bets
+3. No stake cap existed -- Kelly alone decided the size, sometimes 3-5% bankroll
+4. Top10 was ranked by a hybrid formula `(prob*0.7 + ev*0.3)` that let high-EV/
+   low-confidence picks bubble up
+
+### A) Confidence Gate (hard block)
+
+**New file:** `src/core/risk_guards.py`
+
+| Sport / Market            | Min model_probability |
+|---------------------------|-----------------------|
+| Soccer h2h / draw         | 0.55                  |
+| Soccer totals / spread    | 0.56                  |
+| Tennis h2h                | 0.57                  |
+| NBA / NHL / NFL sides     | 0.55                  |
+| Default                   | 0.55                  |
+
+- Gate enforced in **BettingEngine.make_signal()** -- signals below gate get
+  `recommended_stake=0` and `rejected_reason` explaining why.
+- Gate also enforced in **ExecutionerAgent.execute()** -- steam_move / totals_steam
+  cannot override the gate. If confidence < gate, the bet is blocked regardless
+  of trigger.
+- All thresholds configurable via env vars (`MIN_CONF_SOCCER_H2H`, etc.).
+
+### B) Stake Caps
+
+- **General cap:** 1.5% of bankroll (`MAX_STAKE_PCT`)
+- **Draw / longshot cap:** 0.75% of bankroll (`MAX_STAKE_LONGSHOT_PCT`)
+  - Applies when odds >= 3.5 OR selection contains "Draw"
+- Applied in both BettingEngine (signal generation) and Executioner (agent bets)
+- `stake_cap_applied=true` flag on every capped signal for full transparency
+
+### C) steam_move is booster-only
+
+- `steam_move` and `totals_steam` still use reduced Kelly (0.15 vs 0.20)
+- But the confidence gate runs first -- if model_probability < threshold, the
+  bet is blocked regardless of how strong the steam move is
+- This prevents the scenario where a 44% confidence pick got a high-stake
+  recommendation purely because of a steam trigger
+
+### D) Top10 sorting fixed
+
+- **Before:** `(model_probability * 0.7 + min(ev*10, 1.0) * 0.3)` -- mixed formula
+- **After:** `confidence DESC -> expected_value DESC -> odds ASC`
+- Item #1 per sport is always the highest-confidence signal
+- Re-sort happens per-sport after filtering, not just globally
+
+### E) Output transparency
+
+Every signal card now shows:
+- `Kelly: <raw_fraction>` -- the raw Kelly value before any cap
+- `Stake: <before_cap> -> <final> EUR` -- before and after cap
+- `[CAP]` tag when cap was applied
+- `trigger=<reason>` when signal was agent-triggered
+- ASCII progress bars (`[########--]`) instead of Unicode block characters
+
+### F) Settings additions
+
+New env vars in `src/core/settings.py`:
+- `MIN_CONF_SOCCER_H2H` (0.55), `MIN_CONF_SOCCER_TOTALS` (0.56), etc.
+- `MAX_STAKE_PCT` (0.015), `MAX_STAKE_LONGSHOT_PCT` (0.0075)
+- `LONGSHOT_ODDS_THRESHOLD` (3.5)
+
+### G) Tests
+
+- `tests/test_risk_guards.py` -- 19 tests covering all 5 mandatory test cases:
+  1. `confidence_gate_blocks_low_confidence_even_with_steam_move`
+  2. `stake_cap_applied_for_draw_and_longshot`
+  3. `top10_per_sport_sorted_by_confidence_desc`
+  4. `top10_item_1_is_best_confidence`
+  5. `no_global_top10_leak_into_sport_filter`
+- All 62 tests pass (19 new + 13 from previous Top10 fix + 30 existing)
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `src/core/settings.py` | + confidence gate + stake cap env vars |
+| `src/core/risk_guards.py` | NEW: confidence gate + stake cap logic |
+| `src/core/betting_engine.py` | Enforce gate + cap in make_signal, add transparency fields |
+| `src/models/betting.py` | + kelly_raw, stake_before_cap, stake_cap_applied, trigger, rejected_reason |
+| `src/core/live_feed.py` | Ranking changed to confidence DESC; gate-rejected signals excluded |
+| `src/bot/handlers.py` | Per-sport re-sort by confidence; ASCII bars; full transparency card |
+| `src/agents/executioner_agent.py` | Confidence gate before Kelly; stake cap after Kelly |
+| `tests/test_risk_guards.py` | NEW: 19 tests |
+
+---
+
 ## [2026-03-03] Architecture Split + Multi-Chat + Combo UX + RSS Hardening
 
 ### A) Telegram / Core Architecture Separation

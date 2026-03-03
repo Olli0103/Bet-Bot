@@ -20,6 +20,12 @@ class BetSignal(BaseModel):
     point: Optional[float] = None
     odds_age_minutes: float = 0.0
     is_stale: bool = False
+    # Risk guard transparency fields
+    kelly_raw: float = 0.0
+    stake_before_cap: float = 0.0
+    stake_cap_applied: bool = False
+    trigger: str = ""
+    rejected_reason: str = ""
 
 
 class ComboLeg(BaseModel):
