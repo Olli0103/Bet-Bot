@@ -220,8 +220,20 @@ class MultiNewsFetcher:
         self,
         query: str,
         language: str = "en",
+        team_names: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
-        """Search across all sources with fallback cascade."""
+        """Search across all sources with fallback cascade.
+
+        Parameters
+        ----------
+        query : str
+            Full search string used for web-based APIs (GNews, NewsData, NewsAPI).
+        language : str
+            Language filter for API searches.
+        team_names : list[str], optional
+            Individual team names for RSS matching.  When ``None``, falls back
+            to ``[query]`` (which rarely matches RSS article text).
+        """
         cache_key = f"multinews:{_title_hash(query)}:{language}"
         cached = cache.get_json(cache_key)
         if cached is not None:
@@ -231,6 +243,7 @@ class MultiNewsFetcher:
         seen_hashes: set = set()
 
         # 1. Rotowire RSS (injury/sports news) — search across all feeds
+        rss_team_names = team_names if team_names else [query]
         try:
             from src.integrations.rss_fetcher import RSSFetcher, SPORT_TO_FEED
             rss = RSSFetcher()
@@ -238,7 +251,7 @@ class MultiNewsFetcher:
             all_sport_keys = list(SPORT_TO_FEED.keys()) + ["soccer_epl"]
             rss_results = rss.fetch_all_sports_news(
                 active_sports=all_sport_keys,
-                team_names=[query],
+                team_names=rss_team_names,
                 max_age_hours=48,
             )
             for entry in rss_results:
@@ -313,9 +326,14 @@ class MultiNewsFetcher:
 
         return all_articles
 
-    def search(self, query: str, language: str = "en") -> List[Dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        language: str = "en",
+        team_names: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
         """Sync wrapper for search_async."""
-        return _safe_sync_run(self.search_async(query, language))
+        return _safe_sync_run(self.search_async(query, language, team_names=team_names))
 
     def get_source_health(self) -> Dict[str, Dict[str, Any]]:
         """Return rate limit status for each source (current hour bucket)."""
