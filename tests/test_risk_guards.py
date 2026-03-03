@@ -22,21 +22,27 @@ from src.core.betting_engine import BettingEngine
 # ---------------------------------------------------------------------------
 
 def _make_signal_dict(sport: str, confidence: float, ev: float = 0.05,
-                      model_p: float = 0.60, event_id: str = "e1",
+                      model_p: float = 0.0, event_id: str = "e1",
                       selection: str = "Team A", odds: float = 2.0,
                       market: str = "h2h") -> dict:
-    """Build a minimal signal dict (as if from BetSignal.model_dump())."""
+    """Build a minimal signal dict (as if from BetSignal.model_dump()).
+
+    `confidence` parameter maps to model_probability (single source of truth).
+    If model_p is explicitly given and != 0, it overrides confidence.
+    """
+    mp = model_p if model_p > 0 else confidence
     return {
         "sport": sport,
         "event_id": event_id,
         "market": market,
         "selection": selection,
         "bookmaker_odds": odds,
-        "model_probability": model_p,
+        "model_probability": mp,
         "expected_value": ev,
         "kelly_fraction": 0.01,
         "recommended_stake": 2.0,
-        "confidence": confidence,
+        "confidence": mp,  # == model_probability (unified)
+        "source_quality": 1.0,
         "kelly_raw": 0.02,
         "stake_before_cap": 2.0,
         "stake_cap_applied": False,
@@ -72,7 +78,7 @@ class TestConfidenceGate:
             selection="Home",
             bookmaker_odds=2.10,
             model_probability=0.44,
-            confidence=1.0,
+            source_quality=1.0,
             trigger="steam_move",
         )
         assert sig.recommended_stake == 0.0
@@ -156,7 +162,7 @@ class TestStakeCap:
             selection="Home",
             bookmaker_odds=2.00,
             model_probability=0.80,
-            confidence=1.0,
+            source_quality=1.0,
         )
         # Max stake = 500 * 0.015 = 7.50
         assert sig.recommended_stake <= 7.50
@@ -168,11 +174,11 @@ class TestStakeCap:
 # ---------------------------------------------------------------------------
 
 def _sort_like_handler(items: list) -> list:
-    """Replicate the handler's sorting: confidence DESC -> EV DESC -> odds ASC."""
+    """Replicate the handler's sorting: model_probability DESC -> EV DESC -> odds ASC."""
     return sorted(
         items,
         key=lambda x: (
-            float(x.get("confidence", 0)),
+            float(x.get("model_probability", 0)),
             float(x.get("expected_value", 0)),
             -float(x.get("bookmaker_odds", 99)),
         ),
@@ -182,16 +188,16 @@ def _sort_like_handler(items: list) -> list:
 
 class TestTop10Sorting:
 
-    def test_per_sport_sorted_by_confidence_desc(self):
-        """Top10 must be sorted by confidence descending."""
+    def test_per_sport_sorted_by_model_conf_desc(self):
+        """Top10 must be sorted by model_probability descending."""
         items = [
             _make_signal_dict("soccer_epl", confidence=0.65, ev=0.10, event_id="a"),
-            _make_signal_dict("soccer_epl", confidence=1.0, ev=0.03, event_id="b"),
+            _make_signal_dict("soccer_epl", confidence=0.99, ev=0.03, event_id="b"),
             _make_signal_dict("soccer_epl", confidence=0.80, ev=0.08, event_id="c"),
         ]
         sorted_items = _sort_like_handler(items)
-        confs = [x["confidence"] for x in sorted_items]
-        assert confs == [1.0, 0.80, 0.65]
+        probs = [x["model_probability"] for x in sorted_items]
+        assert probs == [0.99, 0.80, 0.65]
 
     def test_ev_tiebreak(self):
         """When confidence is equal, higher EV should rank first."""
@@ -211,16 +217,16 @@ class TestTop10Sorting:
 class TestTop10Item1Best:
 
     def test_item_1_is_best_confidence(self):
-        """The first item in Top10 must have the highest confidence."""
+        """The first item in Top10 must have the highest model_probability."""
         items = [
             _make_signal_dict("basketball_nba", confidence=0.80, ev=0.05, event_id="b1"),
-            _make_signal_dict("basketball_nba", confidence=1.0, ev=0.03, event_id="b2"),
+            _make_signal_dict("basketball_nba", confidence=0.99, ev=0.03, event_id="b2"),
             _make_signal_dict("basketball_nba", confidence=0.65, ev=0.10, event_id="b3"),
             _make_signal_dict("basketball_nba", confidence=0.90, ev=0.07, event_id="b4"),
         ]
         sorted_items = _sort_like_handler(items)
         top1 = sorted_items[0]
-        assert top1["confidence"] == max(x["confidence"] for x in items)
+        assert top1["model_probability"] == max(x["model_probability"] for x in items)
         assert top1["event_id"] == "b2"
 
 
