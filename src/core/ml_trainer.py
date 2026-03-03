@@ -50,7 +50,7 @@ FEATURES = [
     "away_volatility",
     "is_steam_move",
     "line_staleness",
-    "twitter_sentiment_delta",
+    "injury_news_delta",
     "time_to_kickoff_hours",
     "public_bias",
 ]

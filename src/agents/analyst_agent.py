@@ -1,7 +1,7 @@
 """Analyst Agent: Deep event analysis triggered by Scout alerts.
 
 When the Scout detects a steam move or breaking injury, the Analyst
-performs full analysis: news enrichment, sentiment, injury check,
+performs full analysis: news enrichment, sentiment, injury aggregation,
 ML model prediction, EV computation, and optional LLM reasoning.
 """
 from __future__ import annotations
@@ -65,14 +65,32 @@ class AnalystAgent:
         except Exception:
             sent_home = sent_away = 0.0
 
-        # 2. Injuries (only for soccer, run in thread)
+        # 2. Injury aggregation (API-Sports + RSS + Reddit + LLM)
         inj_home = inj_away = 0
-        if sport.startswith("soccer"):
-            try:
-                from src.core.enrichment import soccer_injury_delta
-                inj_home, inj_away = await asyncio.to_thread(soccer_injury_delta, home, away, "")
-            except Exception:
-                pass
+        injury_penalty_home = 0.0
+        injury_penalty_away = 0.0
+        injury_details: list = []
+        try:
+            from src.integrations.injury_aggregator import (
+                aggregate_injury_intel,
+                get_injury_impact_score,
+            )
+            inj_result = await aggregate_injury_intel(home, away, sport)
+            injury_details = inj_result.get("injuries", [])
+
+            # Count injuries per team for feature engineering
+            for inj in injury_details:
+                team = (inj.get("team") or "").lower()
+                if team and (home.lower() in team or team in home.lower()):
+                    inj_home += 1
+                elif team and (away.lower() in team or team in away.lower()):
+                    inj_away += 1
+
+            # Compute impact scores for EV penalty
+            injury_penalty_home = get_injury_impact_score(injury_details, home)
+            injury_penalty_away = get_injury_impact_score(injury_details, away)
+        except Exception as exc:
+            log.warning("Injury aggregation in analyst failed: %s", exc)
 
         # 3. Form
         try:
@@ -179,7 +197,17 @@ class AnalystAgent:
             model_p = model_p + market_momentum * 0.15
             model_p = max(0.01, min(0.99, model_p))
 
-        # 11. EV calculation
+        # 11. Injury penalty: if key players are confirmed Out for the selected
+        # team, apply a negative confidence adjustment to model_p
+        sel_injury_penalty = injury_penalty_home if is_home else injury_penalty_away
+        opp_injury_penalty = injury_penalty_away if is_home else injury_penalty_home
+        # Net effect: injuries on selected team hurt, injuries on opponent help
+        net_injury_effect = -sel_injury_penalty + opp_injury_penalty  # both are <= 0
+        # Apply as a direct probability adjustment (clamped)
+        if abs(net_injury_effect) > 0.01:
+            model_p = max(0.01, min(0.99, model_p + net_injury_effect * 0.15))
+
+        # 12. EV calculation
         tax_rate = settings.tipico_tax_rate if not settings.tax_free_mode else 0.0
         ev = expected_value(model_p, target_odds, tax_rate=tax_rate)
 
@@ -195,6 +223,8 @@ class AnalystAgent:
             "features": ml_features,
             "sentiment": {"home": sent_home, "away": sent_away},
             "injuries": {"home": inj_home, "away": inj_away},
+            "injury_details": injury_details,
+            "injury_penalty": {"home": injury_penalty_home, "away": injury_penalty_away},
             "form": {"home_wr": home_wr, "away_wr": away_wr},
             "elo": elo_feats,
             "poisson_prob": poisson_prob,
@@ -219,6 +249,13 @@ class AnalystAgent:
             ev = context.get("expected_value", 0)
             momentum = context.get("market_momentum", 0.0)
 
+            # Include injury context if available
+            inj_details = context.get("injury_details", [])
+            inj_text = ""
+            if inj_details:
+                inj_lines = [f"  {i['player']} ({i['team']}): {i['status']}" for i in inj_details[:5]]
+                inj_text = f"\nVerletzungen:\n" + "\n".join(inj_lines)
+
             prompt = (
                 "Basiere deine Analyse STRIKT auf den Daten. "
                 "Antworte in genau 2 Sätzen auf Deutsch.\n\n"
@@ -229,6 +266,7 @@ class AnalystAgent:
                 f"EV: {ev:+.4f}\n"
                 f"Momentum: {momentum:+.3f}\n"
                 f"Empfehlung: {'Wetten' if ev > 0.01 else 'Nicht wetten'}"
+                f"{inj_text}"
             )
 
             result = await asyncio.to_thread(nlp.generate_raw, prompt)

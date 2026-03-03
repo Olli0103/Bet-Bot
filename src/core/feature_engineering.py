@@ -57,7 +57,7 @@ class FeatureEngineer:
         is_steam_move: bool = False,
         line_staleness: float = 0.0,
         poisson_true_prob: Optional[float] = None,
-        twitter_sentiment_delta: float = 0.0,
+        injury_news_delta: float = 0.0,
         time_to_kickoff_hours: float = 24.0,
         public_bias: float = 0.0,
         market_momentum: float = 0.0,
@@ -89,7 +89,7 @@ class FeatureEngineer:
             "away_volatility": float(away_volatility),
             "is_steam_move": 1.0 if is_steam_move else 0.0,
             "line_staleness": float(line_staleness),
-            "twitter_sentiment_delta": float(twitter_sentiment_delta),
+            "injury_news_delta": float(injury_news_delta),
             "time_to_kickoff_hours": float(time_to_kickoff_hours),
             # Public bias: positive = Tipico shading this selection (retail over-bet)
             "public_bias": float(public_bias),

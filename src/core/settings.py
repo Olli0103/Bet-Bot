@@ -41,11 +41,10 @@ class Settings(BaseModel):
     tipico_tax_rate: float = float(os.getenv("TIPICO_TAX_RATE", "0.05"))
     tax_free_mode: bool = os.getenv("TAX_FREE_MODE", "false").lower() == "true"
 
-    # Twitter/X (opt-in)
-    twitter_api_key: str = os.getenv("TWITTER_API_KEY", "")
-    twitter_api_secret: str = os.getenv("TWITTER_API_SECRET", "")
-    twitter_bearer_token: str = os.getenv("TWITTER_BEARER_TOKEN", "")
-    twitter_enabled: bool = os.getenv("TWITTER_ENABLED", "false").lower() == "true"
+    # Reddit (for injury intelligence via PRAW)
+    reddit_client_id: str = os.getenv("REDDIT_CLIENT_ID", "")
+    reddit_client_secret: str = os.getenv("REDDIT_CLIENT_SECRET", "")
+    reddit_user_agent: str = os.getenv("REDDIT_USER_AGENT", "BetBot/1.0 by u/betbot")
 
 
 settings = Settings()
