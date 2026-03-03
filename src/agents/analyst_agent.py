@@ -198,11 +198,14 @@ class AnalystAgent:
             model_p = max(0.01, min(0.99, model_p))
 
         # 11. Injury penalty: if key players are confirmed Out for the selected
-        # team, apply a negative confidence adjustment to model_p
+        # team, apply a negative confidence adjustment to model_p.
+        # Both penalty values are <= 0 (negative impact scores).
         sel_injury_penalty = injury_penalty_home if is_home else injury_penalty_away
         opp_injury_penalty = injury_penalty_away if is_home else injury_penalty_home
-        # Net effect: injuries on selected team hurt, injuries on opponent help
-        net_injury_effect = -sel_injury_penalty + opp_injury_penalty  # both are <= 0
+        # Net effect: injuries on selected team hurt (negative), opponent injuries help (positive).
+        # sel_injury_penalty is <= 0 → makes net negative (hurts selected team)
+        # opp_injury_penalty is <= 0 → subtracting it makes net positive (helps selected team)
+        net_injury_effect = sel_injury_penalty - opp_injury_penalty
         # Apply as a direct probability adjustment (clamped)
         if abs(net_injury_effect) > 0.01:
             model_p = max(0.01, min(0.99, model_p + net_injury_effect * 0.15))

@@ -122,6 +122,8 @@ class AgentOrchestrator:
                     trigger=alert.get("type", "unknown"),
                     market_momentum=float(alert.get("market_momentum", 0)),
                 )
+                # Attach event commence time so it flows into the alert cache
+                analysis["commence_time"] = alert.get("commence_time", "")
                 summary["analyses"] += 1
 
                 # 3. Executioner: final decision

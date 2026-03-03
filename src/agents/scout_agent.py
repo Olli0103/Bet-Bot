@@ -132,6 +132,7 @@ class ScoutAgent:
                                     "home": home,
                                     "away": away,
                                     "selection": name,
+                                    "commence_time": str(commence or ""),
                                     "prev_odds": prev_odds,
                                     "current_odds": current_odds,
                                     "movement_pct": round(abs(1.0 / current_odds - 1.0 / prev_odds) * 100, 2),

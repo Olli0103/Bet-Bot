@@ -602,13 +602,27 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             public_bias = float(alert_data.get("public_bias", 0))
             momentum = float(alert_data.get("market_momentum", 0))
             trigger = alert_data.get("trigger", "")
+            commence = str(alert_data.get("commence_time", ""))
+
+            # Format event time
+            event_time_str = ""
+            if commence:
+                try:
+                    ct = datetime.fromisoformat(commence.replace("Z", "+00:00"))
+                    local = ct.astimezone(ZoneInfo("Europe/Berlin"))
+                    event_time_str = local.strftime("%d.%m. %H:%M")
+                except Exception:
+                    event_time_str = commence[:16] if len(commence) >= 16 else commence
 
             # Format poisson display
             poisson_display = f"{poisson_prob:.0%}" if poisson_prob is not None else "n/a"
 
+            time_line = f"Anstoss: {event_time_str}\n" if event_time_str else ""
+
             msg = (
                 f"🔬 Deep Dive | {alert_data.get('home', '')} vs {alert_data.get('away', '')}\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"{time_line}"
                 f"Tipp: {alert_data.get('selection', '')}\n"
                 f"Quote: {float(alert_data.get('target_odds', 0)):.2f}\n"
                 f"Modell: {_progress_bar(model_p)} {badge}\n"
