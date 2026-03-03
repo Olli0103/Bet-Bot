@@ -34,12 +34,12 @@ SOURCE_CONFIDENCE: Dict[str, float] = {
     "newsapi": 0.75,
 }
 
-# Per-source rate limits (requests per hour)
+# Per-source rate limits (requests per HOUR, derived from daily quotas)
 _SOURCE_BUDGET: Dict[str, int] = {
-    "rotowire": 120,   # RSS, generous
-    "gnews": 100,       # free tier: 100/day, be conservative
-    "newsdata": 200,    # free tier: 200/day
-    "newsapi": 100,     # free tier: 100/day
+    "rotowire": 120,    # RSS, no API quota
+    "gnews": 4,          # free tier: 100/day → ~4/hour
+    "newsdata": 8,       # free tier: 200/day → ~8/hour
+    "newsapi": 4,        # free tier: 100/day → ~4/hour
 }
 
 _CACHE_TTL_SECONDS = 60 * 60  # 60 min default
