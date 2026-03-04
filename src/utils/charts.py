@@ -2,6 +2,10 @@
 
 Generates PnL equity curves, win/loss pie charts, and sport-breakdown
 bar charts. Returns bytes (PNG) suitable for Telegram send_photo().
+
+All figures are sized for mobile Telegram clients (~360-400 dp wide).
+Fonts are deliberately large so text stays legible after Telegram's
+JPEG recompression on small screens.
 """
 from __future__ import annotations
 
@@ -27,12 +31,18 @@ GOLD = "#f39c12"
 TEXT_COLOR = "#ecf0f1"
 GRID_COLOR = "#2c3e50"
 
+# Mobile-optimised sizing — smaller canvas + higher DPI keeps file size
+# reasonable while producing sharp text on retina screens.
+_DPI = 180
+_FIG_SINGLE = (7, 4)       # standalone charts (PnL, pie, sport)
+_FIG_DASHBOARD = (8, 10)   # combined dashboard (portrait orientation)
+
 
 def _apply_dark_theme(fig, ax):
     """Apply consistent dark theme to figure and axes."""
     fig.patch.set_facecolor(DARK_BG)
     ax.set_facecolor(CARD_BG)
-    ax.tick_params(colors=TEXT_COLOR, which="both")
+    ax.tick_params(colors=TEXT_COLOR, which="both", labelsize=11)
     ax.xaxis.label.set_color(TEXT_COLOR)
     ax.yaxis.label.set_color(TEXT_COLOR)
     ax.title.set_color(TEXT_COLOR)
@@ -47,7 +57,7 @@ def generate_pnl_chart(
     title: str = "Bankroll-Entwicklung",
 ) -> bytes:
     """Generate a PnL equity curve chart. Returns PNG bytes."""
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig, ax = plt.subplots(figsize=_FIG_SINGLE)
     _apply_dark_theme(fig, ax)
 
     x = list(range(len(equity_curve)))
@@ -60,7 +70,7 @@ def generate_pnl_chart(
     ax.fill_between(x, initial_bankroll, y,
                     where=[v < initial_bankroll for v in y],
                     alpha=0.3, color=RED, interpolate=True)
-    ax.plot(x, y, color=GOLD, linewidth=2, zorder=5)
+    ax.plot(x, y, color=GOLD, linewidth=2.5, zorder=5)
     ax.axhline(y=initial_bankroll, color=TEXT_COLOR, linestyle="--", alpha=0.5, linewidth=1)
 
     # Annotations
@@ -72,16 +82,16 @@ def generate_pnl_chart(
         ax.annotate(
             f"  {final:.0f} EUR ({pnl:+.0f}, {pnl_pct:+.1f}%)",
             xy=(len(y) - 1, final),
-            fontsize=11, fontweight="bold", color=color,
+            fontsize=13, fontweight="bold", color=color,
         )
 
-    ax.set_title(title, fontsize=14, fontweight="bold", pad=15)
-    ax.set_xlabel("Wetten", fontsize=10)
-    ax.set_ylabel("EUR", fontsize=10)
+    ax.set_title(title, fontsize=16, fontweight="bold", pad=12)
+    ax.set_xlabel("Wetten", fontsize=12)
+    ax.set_ylabel("EUR", fontsize=12)
 
     buf = io.BytesIO()
-    fig.tight_layout()
-    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight",
+    fig.tight_layout(pad=1.0)
+    fig.savefig(buf, format="png", dpi=_DPI, bbox_inches="tight",
                 facecolor=fig.get_facecolor())
     plt.close(fig)
     buf.seek(0)
@@ -94,7 +104,7 @@ def generate_winloss_pie(
     open_bets: int = 0,
 ) -> bytes:
     """Generate a win/loss/open pie chart. Returns PNG bytes."""
-    fig, ax = plt.subplots(figsize=(6, 6))
+    fig, ax = plt.subplots(figsize=(_FIG_SINGLE[0], _FIG_SINGLE[0]))
     fig.patch.set_facecolor(DARK_BG)
     ax.set_facecolor(DARK_BG)
 
@@ -121,20 +131,21 @@ def generate_winloss_pie(
 
     wedges, texts, autotexts = ax.pie(
         sizes, labels=labels, colors=colors, autopct="%1.0f%%",
-        startangle=90, textprops={"color": TEXT_COLOR, "fontsize": 12},
+        startangle=90, textprops={"color": TEXT_COLOR, "fontsize": 14},
         wedgeprops={"edgecolor": DARK_BG, "linewidth": 2},
     )
     for at in autotexts:
         at.set_fontweight("bold")
+        at.set_fontsize(13)
 
     total = wins + losses
     hit_rate = (wins / total * 100) if total > 0 else 0
-    ax.set_title(f"Hit Rate: {hit_rate:.0f}%", fontsize=14,
-                 fontweight="bold", color=TEXT_COLOR, pad=20)
+    ax.set_title(f"Hit Rate: {hit_rate:.0f}%", fontsize=16,
+                 fontweight="bold", color=TEXT_COLOR, pad=15)
 
     buf = io.BytesIO()
-    fig.tight_layout()
-    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight",
+    fig.tight_layout(pad=1.0)
+    fig.savefig(buf, format="png", dpi=_DPI, bbox_inches="tight",
                 facecolor=fig.get_facecolor())
     plt.close(fig)
     buf.seek(0)
@@ -145,14 +156,14 @@ def generate_sport_breakdown(
     sport_stats: Dict[str, Dict[str, float]],
 ) -> bytes:
     """Generate a per-sport ROI bar chart. Returns PNG bytes."""
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig, ax = plt.subplots(figsize=_FIG_SINGLE)
     _apply_dark_theme(fig, ax)
 
     if not sport_stats:
         ax.text(0.5, 0.5, "Keine Daten", ha="center", va="center",
-                fontsize=16, color=TEXT_COLOR, transform=ax.transAxes)
+                fontsize=18, color=TEXT_COLOR, transform=ax.transAxes)
         buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor())
+        fig.savefig(buf, format="png", dpi=_DPI, facecolor=fig.get_facecolor())
         plt.close(fig)
         buf.seek(0)
         return buf.read()
@@ -163,7 +174,7 @@ def generate_sport_breakdown(
     colors = [GREEN if r >= 0 else RED for r in rois]
 
     # Clean sport names for display
-    display_names = [s.replace("_", " ").title()[:20] for s in sports]
+    display_names = [s.replace("_", " ").title()[:16] for s in sports]
 
     bars = ax.barh(display_names, rois, color=colors, edgecolor=DARK_BG, height=0.6)
 
@@ -173,15 +184,15 @@ def generate_sport_breakdown(
         label = f" {roi:+.1f}% ({n})"
         ax.text(w + 0.5 if w >= 0 else w - 0.5, bar.get_y() + bar.get_height() / 2,
                 label, va="center", ha="left" if w >= 0 else "right",
-                color=TEXT_COLOR, fontsize=10, fontweight="bold")
+                color=TEXT_COLOR, fontsize=12, fontweight="bold")
 
     ax.axvline(x=0, color=TEXT_COLOR, linewidth=1, alpha=0.5)
-    ax.set_title("ROI nach Sport", fontsize=14, fontweight="bold", pad=15)
-    ax.set_xlabel("ROI %", fontsize=10)
+    ax.set_title("ROI nach Sport", fontsize=16, fontweight="bold", pad=12)
+    ax.set_xlabel("ROI %", fontsize=12)
 
     buf = io.BytesIO()
-    fig.tight_layout()
-    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight",
+    fig.tight_layout(pad=1.0)
+    fig.savefig(buf, format="png", dpi=_DPI, bbox_inches="tight",
                 facecolor=fig.get_facecolor())
     plt.close(fig)
     buf.seek(0)
@@ -200,15 +211,21 @@ def generate_dashboard(
 ) -> bytes:
     """Generate a combined dashboard image with equity curve + pie + stats.
 
+    Uses a portrait layout (3 rows) optimised for mobile Telegram clients.
     Returns PNG bytes for a single premium image.
     """
-    fig = plt.figure(figsize=(14, 8))
+    fig = plt.figure(figsize=_FIG_DASHBOARD)
     fig.patch.set_facecolor(DARK_BG)
 
-    # Layout: top row = equity curve (wide), bottom row = pie + stats
-    gs = fig.add_gridspec(2, 2, height_ratios=[1.2, 1], hspace=0.35, wspace=0.3)
+    # Portrait layout: equity curve top, pie middle-left + stats middle-right,
+    # sport breakdown bottom (if data exists)
+    has_sports = bool(sport_stats)
+    rows = 3 if has_sports else 2
+    height_ratios = [1.2, 1, 0.9] if has_sports else [1.2, 1]
+    gs = fig.add_gridspec(rows, 2, height_ratios=height_ratios,
+                          hspace=0.40, wspace=0.30)
 
-    # --- Top: Equity Curve ---
+    # --- Top: Equity Curve (full width) ---
     ax_eq = fig.add_subplot(gs[0, :])
     _apply_dark_theme(fig, ax_eq)
 
@@ -229,17 +246,17 @@ def generate_dashboard(
         ax_eq.annotate(
             f"  {final:.0f} EUR",
             xy=(len(y) - 1, final),
-            fontsize=12, fontweight="bold", color=color,
+            fontsize=14, fontweight="bold", color=color,
         )
     else:
         ax_eq.text(0.5, 0.5, "Noch keine Daten", ha="center", va="center",
-                   fontsize=14, color=TEXT_COLOR, transform=ax_eq.transAxes)
+                   fontsize=16, color=TEXT_COLOR, transform=ax_eq.transAxes)
 
-    ax_eq.set_title("Bankroll-Entwicklung", fontsize=13, fontweight="bold", pad=10)
-    ax_eq.set_xlabel("Wetten", fontsize=9)
-    ax_eq.set_ylabel("EUR", fontsize=9)
+    ax_eq.set_title("Bankroll-Entwicklung", fontsize=16, fontweight="bold", pad=10)
+    ax_eq.set_xlabel("Wetten", fontsize=12)
+    ax_eq.set_ylabel("EUR", fontsize=12)
 
-    # --- Bottom Left: Win/Loss Pie ---
+    # --- Middle Left: Win/Loss Pie ---
     ax_pie = fig.add_subplot(gs[1, 0])
     ax_pie.set_facecolor(DARK_BG)
 
@@ -261,15 +278,20 @@ def generate_dashboard(
         pie_colors.append(GOLD)
 
     if pie_data:
-        ax_pie.pie(pie_data, labels=pie_labels, colors=pie_colors,
-                   autopct="%1.0f%%", startangle=90,
-                   textprops={"color": TEXT_COLOR, "fontsize": 10},
-                   wedgeprops={"edgecolor": DARK_BG, "linewidth": 2})
+        wedges, texts, autotexts = ax_pie.pie(
+            pie_data, labels=pie_labels, colors=pie_colors,
+            autopct="%1.0f%%", startangle=90,
+            textprops={"color": TEXT_COLOR, "fontsize": 12},
+            wedgeprops={"edgecolor": DARK_BG, "linewidth": 2},
+        )
+        for at in autotexts:
+            at.set_fontweight("bold")
+            at.set_fontsize(12)
     hit_rate = (wins / total * 100) if total > 0 else 0
-    ax_pie.set_title(f"Hit Rate: {hit_rate:.0f}%", fontsize=12,
+    ax_pie.set_title(f"Hit Rate: {hit_rate:.0f}%", fontsize=14,
                      fontweight="bold", color=TEXT_COLOR, pad=10)
 
-    # --- Bottom Right: Key Stats ---
+    # --- Middle Right: Key Stats ---
     ax_stats = fig.add_subplot(gs[1, 1])
     ax_stats.set_facecolor(CARD_BG)
     ax_stats.axis("off")
@@ -285,13 +307,40 @@ def generate_dashboard(
         f"Offen:  {open_bets}"
     )
     ax_stats.text(0.1, 0.85, stats_text, transform=ax_stats.transAxes,
-                  fontsize=13, color=TEXT_COLOR, fontfamily="monospace",
+                  fontsize=14, color=TEXT_COLOR, fontfamily="monospace",
                   verticalalignment="top", linespacing=1.8)
-    ax_stats.set_title("Statistiken", fontsize=12, fontweight="bold",
+    ax_stats.set_title("Statistiken", fontsize=14, fontweight="bold",
                        color=TEXT_COLOR, pad=10)
 
+    # --- Bottom: Sport Breakdown (if data exists) ---
+    if has_sports:
+        ax_sport = fig.add_subplot(gs[2, :])
+        _apply_dark_theme(fig, ax_sport)
+
+        sports = sorted(sport_stats.keys())
+        rois = [sport_stats[s].get("roi", 0) * 100 for s in sports]
+        bets = [int(sport_stats[s].get("bets", 0)) for s in sports]
+        bar_colors = [GREEN if r >= 0 else RED for r in rois]
+        display_names = [s.replace("_", " ").title()[:16] for s in sports]
+
+        bars = ax_sport.barh(display_names, rois, color=bar_colors,
+                             edgecolor=DARK_BG, height=0.6)
+        for bar, roi_val, n in zip(bars, rois, bets):
+            w = bar.get_width()
+            label = f" {roi_val:+.1f}% ({n})"
+            ax_sport.text(
+                w + 0.5 if w >= 0 else w - 0.5,
+                bar.get_y() + bar.get_height() / 2,
+                label, va="center", ha="left" if w >= 0 else "right",
+                color=TEXT_COLOR, fontsize=12, fontweight="bold",
+            )
+        ax_sport.axvline(x=0, color=TEXT_COLOR, linewidth=1, alpha=0.5)
+        ax_sport.set_title("ROI nach Sport", fontsize=14,
+                           fontweight="bold", pad=10)
+        ax_sport.set_xlabel("ROI %", fontsize=12)
+
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight",
+    fig.savefig(buf, format="png", dpi=_DPI, bbox_inches="tight",
                 facecolor=fig.get_facecolor())
     plt.close(fig)
     buf.seek(0)
