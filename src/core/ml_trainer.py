@@ -100,16 +100,45 @@ EPS = 1e-12
 # Using 0.0 for everything is wrong — e.g. elo_expected=0.0 implies zero
 # chance, when the correct neutral value is 0.5 (no Elo advantage).
 FEATURE_DEFAULTS: Dict[str, float] = {
-    "elo_expected": 0.5,
-    "h2h_home_winrate": 0.5,
-    "home_advantage": 0.5,
-    "time_to_kickoff_hours": 24.0,
-    "team_attack_strength": 1.0,
+    # --- Phase 1: core ---
+    # sharp_implied_prob: 0.0 would mean "impossible" — but _clean_frame has
+    # a separate fallback that derives it from 1/odds, so 0.0 is fine here
+    # (it triggers the derivation logic).
+    "form_winrate_l5": 0.5,       # 50% = no form data
+    # form_games_l5: 0 is correct (no games = no data)
+    # sentiment_delta: 0.0 is correct (no sentiment = neutral)
+    # injury_delta: 0.0 is correct (no injury advantage)
+    # sharp_vig: 0.0 triggers derivation in _clean_frame, intentional
+    # --- Phase 2: market + enrichment ---
+    "elo_expected": 0.5,           # 50% = no Elo advantage
+    # elo_diff: 0.0 is correct (no difference)
+    "h2h_home_winrate": 0.5,       # 50% = no H2H data
+    "home_advantage": 0.5,         # unknown venue
+    "time_to_kickoff_hours": 24.0,  # 0.0 would mean "match already started"
+    # weather_rain: 0.0 is correct (assume dry)
+    # weather_wind_high: 0.0 is correct (assume calm)
+    # home_volatility / away_volatility: 0.0 is correct (no line movement)
+    # is_steam_move: 0.0 is correct (no steam detected)
+    # line_staleness: 0.0 is correct (assume fresh lines)
+    # injury_news_delta: 0.0 is correct (no news)
+    # public_bias: 0.0 is correct (balanced)
+    # market_momentum: 0.0 is correct (no momentum)
+    # line_velocity: 0.0 is correct (no movement)
+    # --- Phase 4: stats-based ---
+    "team_attack_strength": 1.0,   # 1.0 = league average
     "team_defense_strength": 1.0,
     "opp_attack_strength": 1.0,
     "opp_defense_strength": 1.0,
-    "expected_total_proxy": 2.7,  # neutral: 1.0 * 1.0 * 1.35 * 2
-    "form_winrate_l5": 0.5,
+    "expected_total_proxy": 2.7,   # neutral: 1.0 * 1.0 * 1.35 * 2
+    "rest_fatigue_score": 0.3,     # 0.0 = "fully rested" is too optimistic
+    "schedule_congestion": 0.15,   # ~1 game/week is typical
+    "over25_rate": 0.55,           # ~55% of soccer matches have >2.5 goals
+    "btts_rate": 0.50,             # ~50% both teams score
+    "goals_scored_avg": 1.35,      # league average (soccer)
+    "goals_conceded_avg": 1.35,    # league average (soccer)
+    # home_away_split_delta: 0.0 is correct (no difference)
+    # league_position_delta: 0.0 is correct (equal positions)
+    # poisson_true_prob: 0.0 triggers XGBoost native missing handling
 }
 
 # Sport groupings for sport-specific models

@@ -1435,23 +1435,38 @@ async def refresh_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "📖 Hilfe\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
         "🎯 Heutige Top 10 Einzelwetten — Beste Einzelwetten nach Trefferquote\n"
         "🧩 10/20/30 Kombis — Tipico-freundliche Lotto-Kombis\n"
         "📊 Kontostand — PnL-Dashboard mit Chart\n"
         "🔄 Daten aktualisieren — Odds-Refresh\n"
-        "⚙️ Einstellungen — Sportarten, Märkte, Min-Quote umschalten\n\n"
-        "💬 Natürliche Sprache (einfach schreiben):\n"
-        '  • "Gib mir die Top 5 für heute"\n'
-        '  • "Zeig mir 10er Kombis"\n'
-        '  • "Erkläre mir den Lakers Tipp"\n'
-        '  • "Zeig mir die besten 3 Fußball Wetten"\n\n'
+        "⚙️ Einstellungen — Sportarten, Maerkte, Min-Quote umschalten\n\n"
+        "💬 Natuerliche Sprache (einfach schreiben):\n"
+        '  "Gib mir die Top 5 fuer heute"\n'
+        '  "Zeig mir 10er Kombis"\n'
+        '  "Erklaere mir den Lakers Tipp"\n'
+        '  "Zeig mir die besten 3 Fussball Wetten"\n\n'
         "🤖 Agent Alerts:\n"
         "  🔍 Deep Dive — Analyst-Analyse\n"
         "  💰 Ghost Bet — Virtuelle Wette\n"
         "  🛑 Ignorieren — Alert verwerfen\n\n"
-        "📡 Datenquellen: Odds API (Pro), Ollama gemma:4b, NewsAPI, API-Sports, Rotowire RSS\n"
-        "⏰ Automatische Fetches: 07:00 + 13:00"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "📊 So liest du die Signale:\n\n"
+        "Modell: 62% — Wahrscheinlichkeit laut ML-Modell, dass\n"
+        "  die Wette gewinnt. >55% = Confidence Gate bestanden.\n\n"
+        "EV: +4.2% — Expected Value. Positiv = langfristig\n"
+        "  profitabel. Je hoeher, desto besser.\n\n"
+        "Kelly: 0.03 — Kelly-Kriterium bestimmt den optimalen\n"
+        "  Einsatz relativ zur Bankroll. Wird automatisch\n"
+        "  durch Stake-Caps begrenzt (max 1.5%).\n\n"
+        "[CAP] — Einsatz wurde gedeckelt (Draw/Longshot-Cap\n"
+        "  oder allgemeines Bankroll-Limit).\n\n"
+        "SrcQ: 100% — Quellenqualitaet. 100% = Tipico vs\n"
+        "  Pinnacle (beste Paarung). <80% = Fallback-Quelle.\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "📡 Datenquellen: Odds API, NewsAPI, Rotowire RSS\n"
+        "⏰ Automatische Fetches: 07:00 + 13:00\n"
+        "🔁 Auto-Retrain alle 500 neuen Ergebnisse"
     )
     await update.message.reply_text(msg)
 
