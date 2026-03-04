@@ -176,7 +176,15 @@ class RedditFetcher:
     # -- sync convenience wrapper ---------------------------------------------
 
     def fetch_team_sentiment_posts_sync(self, team_name: str, cache_ttl: int = 3600) -> str:
-        """Synchronous wrapper — safe to call from inside a running event loop."""
-        return _safe_sync_run(
-            self.fetch_team_sentiment_posts(team_name, cache_ttl=cache_ttl)
-        )
+        """Synchronous wrapper — safe to call from inside a running event loop.
+
+        Ensures the ``aiohttp`` session is closed within the same event
+        loop that created it, preventing ``ResourceWarning`` leaks.
+        """
+        async def _fetch_and_close() -> str:
+            try:
+                return await self.fetch_team_sentiment_posts(team_name, cache_ttl=cache_ttl)
+            finally:
+                await self.close()
+
+        return _safe_sync_run(_fetch_and_close())

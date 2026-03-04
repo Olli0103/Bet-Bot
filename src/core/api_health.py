@@ -75,15 +75,16 @@ async def run_api_health_check() -> dict:
         _fail("newsapi", str(e))
 
     # Reddit (unauthenticated — no API key needed)
+    reddit = RedditFetcher()
     try:
-        reddit = RedditFetcher()
         text = await reddit.fetch_team_sentiment_posts("test", cache_ttl=60)
-        await reddit.close()
         out["reddit"] = {"ok": True, "chars": len(text)}
         _ok("reddit")
     except Exception as e:
         out["reddit"] = {"ok": False, "error": str(e)}
         _fail("reddit", str(e))
+    finally:
+        await reddit.close()
 
     return out
 
