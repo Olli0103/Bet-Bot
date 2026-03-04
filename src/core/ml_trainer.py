@@ -54,6 +54,7 @@ FEATURES = [
     "time_to_kickoff_hours",
     "public_bias",
     "market_momentum",
+    "line_velocity",
     # Phase 4: stats-based features (from TeamMatchStats / EventStatsSnapshot)
     "team_attack_strength",
     "team_defense_strength",

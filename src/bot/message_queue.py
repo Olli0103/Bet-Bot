@@ -66,13 +66,13 @@ def push_outbox(
     dk = _dedup_key(msg)
     dedup_redis_key = f"{DEDUP_PREFIX}{dk}"
 
-    # Dedup check
+    # Atomic dedup: SET NX returns True only for the first caller,
+    # eliminating the race window of the old exists() + lpush() pattern.
     r = cache.client
-    if r.exists(dedup_redis_key):
+    if not r.set(dedup_redis_key, "1", ex=DEDUP_TTL, nx=True):
         return False
 
     r.lpush(OUTBOX_KEY, json.dumps(msg, default=str))
-    r.setex(dedup_redis_key, DEDUP_TTL, "1")
     return True
 
 
