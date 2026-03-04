@@ -59,6 +59,11 @@ class PlacedBet(Base):
 
     notes = Column(Text, nullable=True)
 
+    # Data source separation: prevents training data from contaminating live PnL
+    is_training_data = Column(Boolean, nullable=False, default=False, server_default="false")
+    data_source = Column(String(32), nullable=False, default="live_trade", server_default="live_trade")
+    # data_source values: 'live_trade', 'paper_signal', 'historical_import', 'manual'
+
     created_at = Column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

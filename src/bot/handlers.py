@@ -51,15 +51,19 @@ def _get_bankroll() -> float:
 
 
 def _sync_get_dashboard_data() -> Dict[str, Any]:
-    """Fetch lightweight dashboard aggregates from DB.
+    """Fetch lightweight LIVE dashboard aggregates from DB.
 
-    Returns raw tuples instead of full ORM objects to avoid loading
-    every historical bet into memory (OOM risk at 5000+ bets).
+    Excludes historical imports and training data — only real trading
+    activity is shown.  Returns raw tuples instead of full ORM objects
+    to avoid loading every historical bet into memory.
     """
     from sqlalchemy import func, case, literal_column
 
+    # Base filter: only non-training live data
+    live_filter = PlacedBet.is_training_data.is_(False)
+
     with SessionLocal() as db:
-        # Aggregate counts and sums in SQL
+        # Aggregate counts and sums in SQL — live bets only
         agg = db.execute(
             select(
                 func.count(PlacedBet.id).label("total"),
@@ -74,13 +78,13 @@ def _sync_get_dashboard_data() -> Dict[str, Any]:
                     (PlacedBet.status.in_(["won", "lost"]), PlacedBet.stake),
                     else_=literal_column("0"),
                 )).label("staked"),
-            )
+            ).where(live_filter)
         ).one()
 
-        # Equity curve: only fetch (id, pnl) for settled bets — tiny payload
+        # Equity curve: only fetch (id, pnl) for settled LIVE bets
         equity_rows = db.execute(
             select(PlacedBet.id, PlacedBet.pnl)
-            .where(PlacedBet.status.in_(["won", "lost"]))
+            .where(PlacedBet.status.in_(["won", "lost"]), live_filter)
             .order_by(PlacedBet.id.asc())
         ).all()
 
@@ -127,6 +131,8 @@ def _sync_place_bet(payload: dict) -> bool:
                     odds=float(payload["odds"]),
                     stake=float(payload["stake"]),
                     status="open",
+                    is_training_data=False,
+                    data_source="manual",
                 )
             )
             db.commit()

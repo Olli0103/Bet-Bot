@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import select, and_, or_
+from sqlalchemy import select, func
 
 from src.data.postgres import SessionLocal
 from src.data.models import PlacedBet
@@ -13,22 +13,12 @@ def learning_health(live_only: bool = True) -> dict:
     ----------
     live_only : bool
         If True (default), exclude historical imports and paper-only signals
-        from PnL/bankroll calculations. Only count bets with stake > 0
-        and without 'source=historical_import' in notes.
+        from PnL/bankroll calculations.  Uses the ``is_training_data`` column.
     """
     with SessionLocal() as db:
         query = select(PlacedBet)
         if live_only:
-            # Exclude historical imports and zero-stake paper signals
-            query = query.where(
-                and_(
-                    PlacedBet.stake > 0,
-                    or_(
-                        PlacedBet.notes.is_(None),
-                        ~PlacedBet.notes.like("%source=historical_import%"),
-                    ),
-                )
-            )
+            query = query.where(PlacedBet.is_training_data.is_(False))
         all_bets = db.scalars(query).all()
 
     total = len(all_bets)
@@ -55,7 +45,7 @@ def paper_learning_health() -> dict:
     with SessionLocal() as db:
         all_bets = db.scalars(
             select(PlacedBet).where(
-                PlacedBet.notes.like("%source=paper_signal%")
+                PlacedBet.data_source == "paper_signal",
             )
         ).all()
 
@@ -76,4 +66,46 @@ def paper_learning_health() -> dict:
         "hit_rate_pct": round((wins / max(1, len(settled))) * 100, 2),
         "playable": playable,
         "paper_only": paper_only,
+    }
+
+
+def training_data_stats() -> dict:
+    """Return stats for historical training data (separate from live PnL).
+
+    Provides sport breakdown, label distribution, and coverage for the
+    training data view.
+    """
+    with SessionLocal() as db:
+        total = db.scalar(
+            select(func.count()).select_from(PlacedBet).where(
+                PlacedBet.is_training_data.is_(True),
+            )
+        ) or 0
+
+        # Breakdown by sport
+        sport_rows = db.execute(
+            select(
+                PlacedBet.sport,
+                func.count(PlacedBet.id).label("cnt"),
+                func.sum(func.cast(PlacedBet.status == "won", PlacedBet.id.type)).label("won"),
+            ).where(
+                PlacedBet.is_training_data.is_(True),
+            ).group_by(PlacedBet.sport)
+        ).all()
+
+    sports = {}
+    for row in sport_rows:
+        sport = row[0] or "unknown"
+        cnt = int(row[1] or 0)
+        won = int(row[2] or 0)
+        sports[sport] = {
+            "count": cnt,
+            "won": won,
+            "lost": cnt - won,
+            "win_pct": round(won / max(1, cnt) * 100, 1),
+        }
+
+    return {
+        "total_training_rows": total,
+        "sports": sports,
     }

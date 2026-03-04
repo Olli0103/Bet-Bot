@@ -37,6 +37,18 @@ log = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _historical_bet(**kwargs) -> PlacedBet:
+    """Create a PlacedBet marked as historical training data."""
+    kwargs.setdefault("is_training_data", True)
+    kwargs.setdefault("data_source", "historical_import")
+    # Preserve any existing notes and append source tag
+    notes = kwargs.get("notes") or ""
+    if "source=historical_import" not in notes:
+        notes = (notes + "; source=historical_import").lstrip("; ")
+    kwargs["notes"] = notes
+    return PlacedBet(**kwargs)
+
+
 def _mk_event_id(parts: list[str]) -> str:
     """Deterministic event ID hash from component strings."""
     s = "|".join([str(x or "") for x in parts])
@@ -268,7 +280,7 @@ def import_football(folder: Path, limit_files: int = 0) -> int:
 
                     key = (base_eid, selection)
                     if key not in existing:
-                        db.add(PlacedBet(
+                        db.add(_historical_bet(
                             event_id=base_eid, sport=sport, market="h2h",
                             selection=selection, odds=float(odds_close),
                             odds_open=float(odds_open), odds_close=float(odds_close),
@@ -298,7 +310,7 @@ def import_football(folder: Path, limit_files: int = 0) -> int:
                         eid = _mk_event_id(["football", div_raw, r.get("Date"), home, away, suffix])
                         k = (eid, sel)
                         if k not in existing:
-                            db.add(PlacedBet(
+                            db.add(_historical_bet(
                                 event_id=eid, sport=sport, market="totals",
                                 selection=sel, odds=odds_val,
                                 stake=1.0, status=st, pnl=_pnl(odds_val, st),
@@ -319,7 +331,7 @@ def import_football(folder: Path, limit_files: int = 0) -> int:
                         eid_15 = _mk_event_id(["football", div_raw, r.get("Date"), home, away, "o15"])
                         k15 = (eid_15, "Over 1.5")
                         if k15 not in existing:
-                            db.add(PlacedBet(
+                            db.add(_historical_bet(
                                 event_id=eid_15, sport=sport, market="totals",
                                 selection="Over 1.5", odds=over_15,
                                 stake=1.0, status=st_15, pnl=_pnl(over_15, st_15),
@@ -334,7 +346,7 @@ def import_football(folder: Path, limit_files: int = 0) -> int:
                     eid_btts = _mk_event_id(["football", div_raw, r.get("Date"), home, away, "btts"])
                     k_btts = (eid_btts, "BTTS Yes")
                     if k_btts not in existing:
-                        db.add(PlacedBet(
+                        db.add(_historical_bet(
                             event_id=eid_btts, sport=sport, market="btts",
                             selection="BTTS Yes", odds=btts_odds,
                             stake=1.0, status=st_btts, pnl=_pnl(btts_odds, st_btts),
@@ -460,7 +472,7 @@ def import_tennis(folder: Path, limit_files: int = 0) -> int:
 
                     key_w = (event_id, winner)
                     if key_w not in existing:
-                        db.add(PlacedBet(
+                        db.add(_historical_bet(
                             event_id=event_id, sport=sport, market="h2h",
                             selection=winner, odds=float(w_close),
                             odds_open=float(w_odds_open), odds_close=float(w_close),
@@ -482,7 +494,7 @@ def import_tennis(folder: Path, limit_files: int = 0) -> int:
 
                     key_l = (event_id, loser)
                     if key_l not in existing:
-                        db.add(PlacedBet(
+                        db.add(_historical_bet(
                             event_id=event_id, sport=sport, market="h2h",
                             selection=loser, odds=float(l_close),
                             odds_open=float(l_odds_open), odds_close=float(l_close),
@@ -573,7 +585,7 @@ def import_nba(folder: Path, max_rows: int = 50000) -> int:
                     st = "won" if pts_h > pts_a else "lost"
                     k = (ml_eid, home)
                     if k not in existing:
-                        db.add(PlacedBet(
+                        db.add(_historical_bet(
                             event_id=ml_eid, sport=sport, market="h2h",
                             selection=home, odds=float(home_ml_dec),
                             stake=1.0, status=st, pnl=_pnl(home_ml_dec, st),
@@ -587,7 +599,7 @@ def import_nba(folder: Path, max_rows: int = 50000) -> int:
                     st_a = "won" if pts_a > pts_h else "lost"
                     k_a = (ml_eid_a, away)
                     if k_a not in existing:
-                        db.add(PlacedBet(
+                        db.add(_historical_bet(
                             event_id=ml_eid_a, sport=sport, market="h2h",
                             selection=away, odds=float(away_ml_dec),
                             stake=1.0, status=st_a, pnl=_pnl(away_ml_dec, st_a),
@@ -606,7 +618,7 @@ def import_nba(folder: Path, max_rows: int = 50000) -> int:
                     sp_sel = f"{home} {spread_raw:+.1f}"
                     k_sp = (sp_eid, sp_sel)
                     if k_sp not in existing:
-                        db.add(PlacedBet(
+                        db.add(_historical_bet(
                             event_id=sp_eid, sport=sport, market="spreads",
                             selection=sp_sel, odds=spread_odds,
                             stake=1.0, status=sp_st, pnl=_pnl(spread_odds, sp_st),
@@ -629,7 +641,7 @@ def import_nba(folder: Path, max_rows: int = 50000) -> int:
                         tot_st = "won" if cmp_fn(actual_total, total_line) else ("lost" if actual_total != total_line else "void")
                         k_t = (tot_eid, tot_sel)
                         if k_t not in existing:
-                            db.add(PlacedBet(
+                            db.add(_historical_bet(
                                 event_id=tot_eid, sport=sport, market="totals",
                                 selection=tot_sel, odds=tot_odds,
                                 stake=1.0, status=tot_st, pnl=_pnl(tot_odds, tot_st),
@@ -725,7 +737,7 @@ def import_nfl(folder: Path, max_rows: int = 50000) -> int:
                     st = "won" if hs > a_s else ("lost" if hs < a_s else "void")
                     k = (ml_eid, home)
                     if k not in existing:
-                        db.add(PlacedBet(
+                        db.add(_historical_bet(
                             event_id=ml_eid, sport=sport, market="h2h",
                             selection=home, odds=float(home_ml),
                             stake=1.0, status=st, pnl=_pnl(home_ml, st),
@@ -739,7 +751,7 @@ def import_nfl(folder: Path, max_rows: int = 50000) -> int:
                     st_a = "won" if a_s > hs else ("lost" if a_s < hs else "void")
                     k_a = (ml_eid_a, away)
                     if k_a not in existing:
-                        db.add(PlacedBet(
+                        db.add(_historical_bet(
                             event_id=ml_eid_a, sport=sport, market="h2h",
                             selection=away, odds=float(away_ml),
                             stake=1.0, status=st_a, pnl=_pnl(away_ml, st_a),
@@ -758,7 +770,7 @@ def import_nfl(folder: Path, max_rows: int = 50000) -> int:
                     sp_sel = f"{home} {spread_line:+.1f}"
                     k_sp = (sp_eid, sp_sel)
                     if k_sp not in existing:
-                        db.add(PlacedBet(
+                        db.add(_historical_bet(
                             event_id=sp_eid, sport=sport, market="spreads",
                             selection=sp_sel, odds=float(spread_h_odds),
                             stake=1.0, status=sp_st, pnl=_pnl(spread_h_odds, sp_st),
@@ -786,7 +798,7 @@ def import_nfl(folder: Path, max_rows: int = 50000) -> int:
                             "lost" if actual_total != total_line_val else "void")
                         k_t = (tot_eid, tot_sel)
                         if k_t not in existing:
-                            db.add(PlacedBet(
+                            db.add(_historical_bet(
                                 event_id=tot_eid, sport=sport, market="totals",
                                 selection=tot_sel, odds=float(odds_v),
                                 stake=1.0, status=tot_st, pnl=_pnl(odds_v, tot_st),
@@ -954,7 +966,7 @@ def _import_nhl_per_team(
             st = "won" if goals_h > goals_a else "lost"
             k = (eid, home)
             if k not in existing:
-                db.add(PlacedBet(
+                db.add(_historical_bet(
                     event_id=eid, sport=sport, market="h2h",
                     selection=home, odds=float(home_ml_dec),
                     stake=1.0, status=st, pnl=_pnl(home_ml_dec, st),
@@ -968,7 +980,7 @@ def _import_nhl_per_team(
             st_a = "won" if goals_a > goals_h else "lost"
             k_a = (eid_a, away)
             if k_a not in existing:
-                db.add(PlacedBet(
+                db.add(_historical_bet(
                     event_id=eid_a, sport=sport, market="h2h",
                     selection=away, odds=float(away_ml_dec),
                     stake=1.0, status=st_a, pnl=_pnl(away_ml_dec, st_a),
@@ -985,7 +997,7 @@ def _import_nhl_per_team(
             tot_st = "won" if actual_total > total_line else ("lost" if actual_total < total_line else "void")
             k_t = (tot_eid, f"Over {total_line}")
             if k_t not in existing:
-                db.add(PlacedBet(
+                db.add(_historical_bet(
                     event_id=tot_eid, sport=sport, market="totals",
                     selection=f"Over {total_line}", odds=1.91,
                     stake=1.0, status=tot_st, pnl=_pnl(1.91, tot_st),
@@ -1090,7 +1102,7 @@ def _import_nhl_is_home(
             st = "won" if goals_h > goals_a else "lost"
             k = (eid, home)
             if k not in existing:
-                db.add(PlacedBet(
+                db.add(_historical_bet(
                     event_id=eid, sport=sport, market="h2h",
                     selection=home, odds=float(home_ml_dec),
                     stake=1.0, status=st, pnl=_pnl(home_ml_dec, st),
@@ -1104,7 +1116,7 @@ def _import_nhl_is_home(
             st_a = "won" if goals_a > goals_h else "lost"
             k_a = (eid_a, away)
             if k_a not in existing:
-                db.add(PlacedBet(
+                db.add(_historical_bet(
                     event_id=eid_a, sport=sport, market="h2h",
                     selection=away, odds=float(away_ml_dec),
                     stake=1.0, status=st_a, pnl=_pnl(away_ml_dec, st_a),
@@ -1133,7 +1145,7 @@ def _import_nhl_is_home(
             )
             k_t = (tot_eid, f"Over {total_line}")
             if k_t not in existing:
-                db.add(PlacedBet(
+                db.add(_historical_bet(
                     event_id=tot_eid, sport=sport, market="totals",
                     selection=f"Over {total_line}", odds=1.91,
                     stake=1.0, status=tot_st, pnl=_pnl(1.91, tot_st),
@@ -1178,7 +1190,7 @@ def _import_nhl_per_game(
             st = "won" if hs > a_s else "lost"
             k = (eid, home)
             if k not in existing:
-                db.add(PlacedBet(
+                db.add(_historical_bet(
                     event_id=eid, sport=sport, market="h2h",
                     selection=home, odds=float(home_ml),
                     stake=1.0, status=st, pnl=_pnl(home_ml, st),
@@ -1192,7 +1204,7 @@ def _import_nhl_per_game(
             st_a = "won" if a_s > hs else "lost"
             k_a = (eid_a, away)
             if k_a not in existing:
-                db.add(PlacedBet(
+                db.add(_historical_bet(
                     event_id=eid_a, sport=sport, market="h2h",
                     selection=away, odds=float(away_ml),
                     stake=1.0, status=st_a, pnl=_pnl(away_ml, st_a),
@@ -1211,7 +1223,7 @@ def _import_nhl_per_game(
             sp_sel = f"{home} {spread_line:+.1f}"
             k_sp = (sp_eid, sp_sel)
             if k_sp not in existing:
-                db.add(PlacedBet(
+                db.add(_historical_bet(
                     event_id=sp_eid, sport=sport, market="spreads",
                     selection=sp_sel, odds=float(spread_odds),
                     stake=1.0, status=sp_st, pnl=_pnl(spread_odds, sp_st),
@@ -1238,7 +1250,7 @@ def _import_nhl_per_game(
                     "lost" if actual_total != total_line else "void")
                 k_t = (tot_eid, tot_sel)
                 if k_t not in existing:
-                    db.add(PlacedBet(
+                    db.add(_historical_bet(
                         event_id=tot_eid, sport=sport, market="totals",
                         selection=tot_sel, odds=float(odds_v),
                         stake=1.0, status=tot_st, pnl=_pnl(odds_v, tot_st),

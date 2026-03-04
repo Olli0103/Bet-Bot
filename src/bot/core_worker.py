@@ -303,11 +303,11 @@ def _run_auto_grading():
 
 
 def _run_learning_status():
-    from src.core.learning_monitor import learning_health, paper_learning_health
+    from src.core.learning_monitor import learning_health, paper_learning_health, training_data_stats
     try:
         h = learning_health(live_only=True)
         lines = [
-            "🧠 Learning Check (Live Bets)",
+            "🧠 Learning Check (Live Bets Only)",
             f"Total: {h['total']} | Settled: {h['settled']} | Open: {h['open']}",
             f"W/L: {h['wins']}/{h['losses']} | Hit: {h['hit_rate_pct']}% | PnL: {h['pnl']:.2f} EUR",
         ]
@@ -319,6 +319,18 @@ def _run_learning_status():
                 f"({ph['playable']} playable, {ph['paper_only']} paper-only) | "
                 f"Graded: {ph['settled']}"
             )
+        except Exception:
+            pass
+        # Training data stats (separate view)
+        try:
+            td = training_data_stats()
+            if td["total_training_rows"] > 0:
+                sports_summary = ", ".join(
+                    f"{s}: {d['count']}" for s, d in sorted(td["sports"].items())[:5]
+                )
+                lines.append(
+                    f"📚 Training Data: {td['total_training_rows']} rows | {sports_summary}"
+                )
         except Exception:
             pass
         push_outbox("text", {"text": "\n".join(lines)}, target="broadcast")

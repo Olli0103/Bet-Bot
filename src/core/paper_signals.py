@@ -165,6 +165,8 @@ def _persist_paper_signal(record: PaperSignalRecord, features: Optional[Dict[str
                 sharp_vig=float(features.get("sharp_vig", 0.0)),
                 sentiment_delta=float(features.get("sentiment_delta", 0.0)),
                 injury_delta=float(features.get("injury_delta", 0.0)),
+                is_training_data=False,
+                data_source="paper_signal",
                 meta_features=meta,
                 notes="; ".join(notes_parts),
             )
@@ -185,18 +187,18 @@ def get_paper_signal_stats() -> Dict[str, Any]:
         with SessionLocal() as db:
             total = db.scalar(
                 select(func.count()).select_from(PlacedBet).where(
-                    PlacedBet.notes.like("%source=paper_signal%")
+                    PlacedBet.data_source == "paper_signal",
                 )
             ) or 0
             playable = db.scalar(
                 select(func.count()).select_from(PlacedBet).where(
-                    PlacedBet.notes.like("%signal_mode=PLAYABLE%"),
-                    PlacedBet.notes.like("%source=paper_signal%"),
+                    PlacedBet.data_source == "paper_signal",
+                    PlacedBet.stake > 0,
                 )
             ) or 0
             graded = db.scalar(
                 select(func.count()).select_from(PlacedBet).where(
-                    PlacedBet.notes.like("%source=paper_signal%"),
+                    PlacedBet.data_source == "paper_signal",
                     PlacedBet.status.in_(["won", "lost"]),
                 )
             ) or 0

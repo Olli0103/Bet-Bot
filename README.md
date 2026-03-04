@@ -546,6 +546,31 @@ Agent Orchestrator (adaptive: 60s pre-kickoff / 5min normal)
 9. **Virtual Trading** -- Ghost-trades all signals for tracking without real money
 10. **Source Health** -- Per-source circuit breakers with failure counting, cooldown timers, and half-open recovery for all 8 data sources
 
+### Data Source Separation
+
+All `placed_bets` rows carry two classification columns:
+
+| Column | Type | Default | Purpose |
+|--------|------|---------|---------|
+| `is_training_data` | `Boolean` | `false` | Excludes row from live PnL / ROI / bankroll |
+| `data_source` | `String(32)` | `live_trade` | Origin tag for filtering and analytics |
+
+**Allowed `data_source` values:** `live_trade`, `paper_signal`, `historical_import`, `manual`
+
+Every PnL, ROI, bankroll, and equity-curve query filters with `WHERE is_training_data = false`, ensuring ~760k historical import rows never pollute live performance numbers.
+
+**Backfill existing rows:**
+
+```bash
+# Preview what would change
+python scripts/backfill_data_source_flags.py --dry-run
+
+# Apply (idempotent, safe to re-run)
+python scripts/backfill_data_source_flags.py --force
+```
+
+The backfill recognises historical rows via: (1) `notes LIKE '%source=historical_import%'`, (2) `notes LIKE '%source=paper_signal%'`, (3) heuristic — `stake=1.0` + settled + no notes.
+
 ---
 
 ## Features
