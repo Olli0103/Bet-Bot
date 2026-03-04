@@ -153,10 +153,12 @@ class QuantPricingModel:
         - Rejects models with Brier score > 0.25 (worse than random)
         - Falls back to general if sport-specific model is unreliable
         - Applies reliability adjustment from calibration bins
+        - Blends with CLV regressor output when available
         """
         group = _sport_group(sport)
 
         # Try sport-specific model first, then general
+        classifier_prob = None
         for model_group in [group, "general"]:
             model_data = _load_joblib_model(model_group)
             if model_data is None:
@@ -189,22 +191,58 @@ class QuantPricingModel:
             try:
                 x = np.array([[float(features.get(f, 0.0)) for f in model_features]])
                 prob = float(model.predict_proba(x)[0, 1])
-                prob = max(0.01, min(0.99, prob))
+                classifier_prob = max(0.01, min(0.99, prob))
 
                 # Apply reliability adjustment from calibration bins
-                rel_adj = self._get_reliability_adjustment(prob, model_data)
+                rel_adj = self._get_reliability_adjustment(classifier_prob, model_data)
                 if rel_adj != 1.0:
-                    # Blend model probability toward implied (sharp) probability
-                    sharp_p = features.get("sharp_implied_prob", prob)
-                    prob = prob * rel_adj + sharp_p * (1.0 - rel_adj)
-                    prob = max(0.01, min(0.99, prob))
+                    sharp_p = features.get("sharp_implied_prob", classifier_prob)
+                    classifier_prob = classifier_prob * rel_adj + sharp_p * (1.0 - rel_adj)
+                    classifier_prob = max(0.01, min(0.99, classifier_prob))
 
-                return prob
+                break  # Got a valid classifier prediction
             except Exception as exc:
                 log.debug("XGBoost predict failed (%s): %s", model_group, exc)
                 continue
 
-        return None
+        if classifier_prob is None:
+            return None
+
+        # Blend with CLV regressor if available
+        clv_prob = self._clv_predict(features)
+        if clv_prob is not None:
+            # 70% classifier (calibrated on outcomes) + 30% CLV regressor
+            # (trained on sharp closing lines — faster convergence).
+            # The blend gives credit to the CLV signal without letting
+            # it dominate the calibrated win-probability.
+            blended = 0.70 * classifier_prob + 0.30 * clv_prob
+            return max(0.01, min(0.99, blended))
+
+        return classifier_prob
+
+    def _clv_predict(self, features: Dict[str, float]) -> Optional[float]:
+        """Predict sharp closing probability using the CLV regressor."""
+        model_data = _load_joblib_model("clv_general")
+        if model_data is None:
+            return None
+
+        model = model_data.get("model")
+        model_features = model_data.get("features", [])
+        if model is None or not model_features:
+            return None
+
+        # Quality gate: CLV model must beat its baseline
+        metrics = model_data.get("metrics", {})
+        if metrics.get("clv_mse", 1.0) >= metrics.get("clv_mse_baseline", 1.0):
+            return None
+
+        try:
+            x = np.array([[float(features.get(f, 0.0)) for f in model_features]])
+            pred = float(model.predict(x)[0])
+            return max(0.01, min(0.99, pred))
+        except Exception as exc:
+            log.debug("CLV regressor predict failed: %s", exc)
+            return None
 
     @staticmethod
     def _get_reliability_adjustment(prob: float, model_data: Dict) -> float:

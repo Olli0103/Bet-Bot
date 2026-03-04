@@ -31,7 +31,10 @@ from src.core.settings import settings
 from src.data.postgres import SessionLocal
 from src.data.models import PlacedBet
 from src.data.redis_cache import cache
-from src.integrations.tipico_deeplink import event_link as tipico_event_link
+from src.integrations.tipico_deeplink import (
+    combo_betslip_link as tipico_combo_link,
+    event_link as tipico_event_link,
+)
 
 log = logging.getLogger(__name__)
 
@@ -53,22 +56,43 @@ def _sync_get_all_bets() -> List[PlacedBet]:
         return db.scalars(select(PlacedBet)).all()
 
 
-def _sync_place_bet(payload: dict) -> None:
-    """Sync DB call — always call via asyncio.to_thread."""
+def _sync_place_bet(payload: dict) -> bool:
+    """Sync DB call — always call via asyncio.to_thread.
+
+    Returns True if the bet was inserted, False if it already existed
+    (prevents midnight-rollover duplicates where the Redis dedup key
+    rotates but the DB unique constraint catches the real duplicate).
+    """
+    eid = str(payload["event_id"])
+    sel = str(payload["selection"])
+    mkt = str(payload["market"])
+
     with SessionLocal() as db:
+        # Pre-check: does this exact bet already exist?
+        existing = db.execute(
+            select(PlacedBet.id).where(
+                PlacedBet.event_id == eid,
+                PlacedBet.selection == sel,
+                PlacedBet.market == mkt,
+            )
+        ).scalar()
+        if existing:
+            return False
+
         try:
             db.add(
                 PlacedBet(
-                    event_id=str(payload["event_id"]),
+                    event_id=eid,
                     sport=str(payload["sport"]),
-                    market=str(payload["market"]),
-                    selection=str(payload["selection"]),
+                    market=mkt,
+                    selection=sel,
                     odds=float(payload["odds"]),
                     stake=float(payload["stake"]),
                     status="open",
                 )
             )
             db.commit()
+            return True
         except Exception:
             db.rollback()
             raise
@@ -677,6 +701,16 @@ def _format_combo_card(combo_data: dict) -> Optional[str]:
     )
 
 
+def _combo_deeplink_keyboard(combo_data: dict) -> InlineKeyboardMarkup:
+    """Build an InlineKeyboard with a Tipico combo betslip deep link."""
+    legs = combo_data.get("legs", [])
+    stake = float(combo_data.get("stake", 1.00))
+    url = tipico_combo_link(legs, stake=stake)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Tipico Kombi-Wettschein", url=url)],
+    ])
+
+
 async def combo_suggestions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show 10/20/30-leg Tipico-friendly Lotto combos."""
     from src.core.live_feed import get_cached_combos
@@ -699,7 +733,8 @@ async def combo_suggestions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if card:
             if sent == 0:
                 await update.message.reply_text(f"🧩 Lotto-Kombis (10/20/30 Legs)")
-            await update.message.reply_text(card)
+            keyboard = _combo_deeplink_keyboard(combo_data)
+            await update.message.reply_text(card, reply_markup=keyboard)
             sent += 1
 
     if sent == 0:
@@ -840,7 +875,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not payload:
             await q.edit_message_text("Markierung abgelaufen. Bitte Signal neu laden.")
             return
-        await asyncio.to_thread(_sync_place_bet, payload)
+        inserted = await asyncio.to_thread(_sync_place_bet, payload)
+        if not inserted:
+            await q.edit_message_text("Wette bereits vorhanden (Duplikat).")
+            return
         key = f"{payload['event_id']}|{payload['selection']}"
         ck = _placed_cache_key()
         cur = set(cache.get_json(ck) or [])

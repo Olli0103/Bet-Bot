@@ -22,9 +22,9 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import brier_score_loss, log_loss
 from sklearn.model_selection import TimeSeriesSplit
 from sqlalchemy import select
-from xgboost import XGBClassifier
+from xgboost import XGBClassifier, XGBRegressor
 
-from src.data.models import PlacedBet
+from src.data.models import EventClosingLine, PlacedBet
 from src.data.postgres import SessionLocal
 
 log = logging.getLogger(__name__)
@@ -439,6 +439,108 @@ def _train_xgboost(
                 final_features = active_features
 
     return calibrated, metrics, final_features
+
+
+# ---------------------------------------------------------------------------
+# CLV Regression: Continuous Learning from Sharp Closing Lines
+# ---------------------------------------------------------------------------
+
+CLV_MIN_ROWS = 200  # Minimum rows with closing-line data to attempt CLV training
+
+CLV_FEATURES = [f for f in FEATURES]  # Same feature set as classifier
+
+
+def _build_clv_dataset(sport_filter: Optional[str] = None) -> Optional[pd.DataFrame]:
+    """Join PlacedBets with EventClosingLines to get closing_implied_prob as target.
+
+    Returns a DataFrame sorted by created_at with ``closing_implied_prob``
+    as the regression target, or None if insufficient data.
+    """
+    with SessionLocal() as db:
+        # Join placed_bets with event_closing_lines on (event_id, selection)
+        from sqlalchemy.orm import aliased
+        ecl = aliased(EventClosingLine)
+        query = (
+            select(PlacedBet, ecl.closing_implied_prob)
+            .join(ecl, (PlacedBet.event_id == ecl.event_id) & (PlacedBet.selection == ecl.selection))
+            .where(ecl.closing_implied_prob.isnot(None))
+            .where(ecl.closing_implied_prob > 0.01)
+            .where(ecl.closing_implied_prob < 0.99)
+        )
+        if sport_filter and sport_filter != "general":
+            matching_sports = [k for k, v in SPORT_GROUPS.items() if v == sport_filter]
+            if matching_sports:
+                query = query.where(PlacedBet.sport.in_(matching_sports))
+
+        query = query.order_by(PlacedBet.created_at.asc())
+
+        rows = db.execute(query).all()
+
+    if len(rows) < CLV_MIN_ROWS:
+        return None
+
+    records = []
+    for bet, closing_prob in rows:
+        row = {col.name: getattr(bet, col.name) for col in PlacedBet.__table__.columns}
+        row["closing_implied_prob"] = closing_prob
+        records.append(row)
+
+    return pd.DataFrame(records)
+
+
+def _train_clv_regressor(
+    X: pd.DataFrame,
+    y_clv: pd.Series,
+    active_features: List[str],
+) -> Tuple[XGBRegressor, Dict, List[str]]:
+    """Train XGBRegressor to predict sharp closing probability.
+
+    Uses the same temporal holdout strategy as the classifier.
+    The model learns to predict what the sharp closing line will be,
+    which converges far faster than binary won/lost outcomes.
+    """
+    X_active = X[active_features].values
+    y_vals = y_clv.values
+
+    holdout_frac = 0.20
+    split_idx = max(1, int(len(X_active) * (1.0 - holdout_frac)))
+    X_train, X_holdout = X_active[:split_idx], X_active[split_idx:]
+    y_train, y_holdout = y_vals[:split_idx], y_vals[split_idx:]
+
+    regressor = XGBRegressor(
+        objective="reg:squarederror",
+        max_depth=5,
+        learning_rate=0.05,
+        n_estimators=300,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_weight=3,
+        reg_alpha=0.1,
+        reg_lambda=1.0,
+        random_state=42,
+        verbosity=0,
+    )
+    regressor.fit(X_train, y_train)
+
+    # Evaluate on holdout
+    metrics: Dict = {}
+    if len(X_holdout) > 0:
+        y_pred = regressor.predict(X_holdout)
+        y_pred = np.clip(y_pred, 0.01, 0.99)
+
+        mse = float(np.mean((y_holdout - y_pred) ** 2))
+        mae = float(np.mean(np.abs(y_holdout - y_pred)))
+        # Brier-equivalent: since closing_prob IS the "true probability",
+        # MSE against it IS the Brier score analog
+        metrics["clv_mse"] = round(mse, 6)
+        metrics["clv_mae"] = round(mae, 6)
+        metrics["clv_test_size"] = len(X_holdout)
+
+        # Baseline: always predict mean closing prob from training set
+        baseline_pred = np.full(len(y_holdout), float(y_train.mean()))
+        metrics["clv_mse_baseline"] = round(float(np.mean((y_holdout - baseline_pred) ** 2)), 6)
+
+    return regressor, metrics, active_features
 
 
 def _evaluate_holdout(
@@ -913,6 +1015,47 @@ def auto_train_all_models(min_samples: int = 2000) -> str:
                 results.append(f"{group}: REJECTED — {reason}")
             log.info("Champion/Challenger (%s): %s", group, reason)
 
+    # --- CLV Regression (Dual-Target Learning) ---
+    # Train a regressor to predict the sharp closing-line probability.
+    # This gives the model immediate feedback at kickoff (did we beat the
+    # close?) instead of waiting for noisy 90-minute match outcomes.
+    try:
+        clv_df = _build_clv_dataset()
+        if clv_df is not None:
+            clv_df = _clean_frame(clv_df, FEATURES)
+            X_clv = clv_df[FEATURES]
+            y_clv = clv_df["closing_implied_prob"].astype(float)
+            active_clv = _get_active_features(X_clv, FEATURES)
+
+            if active_clv:
+                clv_model, clv_metrics, clv_feats = _train_clv_regressor(X_clv, y_clv, active_clv)
+
+                clv_path = MODELS_DIR / "xgb_clv_general.joblib"
+                # Only save if better than baseline (predicting mean)
+                if clv_metrics.get("clv_mse", 1.0) < clv_metrics.get("clv_mse_baseline", 1.0):
+                    joblib.dump(
+                        {"model": clv_model, "features": clv_feats, "metrics": clv_metrics, "n_samples": len(clv_df)},
+                        clv_path,
+                    )
+                    results.append(
+                        f"CLV-regressor: SAVED ({len(clv_df)} rows, "
+                        f"MSE={clv_metrics.get('clv_mse', 'N/A')}, "
+                        f"MAE={clv_metrics.get('clv_mae', 'N/A')})"
+                    )
+                    log.info("CLV regressor saved: %d rows, MSE=%.6f", len(clv_df), clv_metrics.get("clv_mse", 0))
+                else:
+                    results.append(
+                        f"CLV-regressor: REJECTED (MSE {clv_metrics.get('clv_mse', 'N/A')} "
+                        f">= baseline {clv_metrics.get('clv_mse_baseline', 'N/A')})"
+                    )
+            else:
+                results.append("CLV-regressor: no feature variance")
+        else:
+            results.append(f"CLV-regressor: skipped (<{CLV_MIN_ROWS} closing-line rows)")
+    except Exception as exc:
+        log.warning("CLV regression training failed: %s", exc)
+        results.append(f"CLV-regressor: ERROR ({exc})")
+
     # Write coverage report artifacts
     try:
         write_feature_coverage_artifacts(coverage_reports)
@@ -973,25 +1116,43 @@ def _save_legacy_weights(df: pd.DataFrame, y: pd.Series, active_features: List[s
         log.warning("Failed to save legacy weights: %s", exc)
 
 
-def should_retrain(threshold: int = 500) -> Tuple[bool, int]:
+def should_retrain(
+    threshold: int = 500,
+    sport_group: str = "general",
+) -> Tuple[bool, int]:
     """Check whether enough new graded bets have accumulated since the last training.
 
-    Compares the current count of graded bets in the DB against the
-    ``n_samples`` stored in the deployed champion model.  Triggers
-    retraining when ``threshold`` (default 500) new bets are available.
+    When *sport_group* is ``"general"``, compares total graded bets
+    against the deployed general model.  For sport-specific groups
+    (e.g. ``"soccer"``, ``"icehockey"``), counts only bets matching
+    that sport group so that 500 new NHL bets are needed before
+    re-training the icehockey model — not 500 bets across all sports.
 
     Returns (should_retrain, new_bets_count).
     """
-    champion = load_model("general")
+    champion = load_model(sport_group)
     last_n = champion.get("n_samples", 0) if champion else 0
 
+    from sqlalchemy import func
+
     with SessionLocal() as db:
-        from sqlalchemy import func
-        total = db.execute(
-            select(func.count(PlacedBet.id)).where(
-                PlacedBet.status.in_(["won", "lost"])
-            )
-        ).scalar() or 0
+        stmt = select(func.count(PlacedBet.id)).where(
+            PlacedBet.status.in_(["won", "lost"])
+        )
+
+        # Filter by sport group when not "general"
+        if sport_group != "general":
+            # Collect all sport keys that map to this group
+            matching_sports = [
+                k for k, v in SPORT_GROUPS.items() if v == sport_group
+            ]
+            if matching_sports:
+                stmt = stmt.where(PlacedBet.sport.in_(matching_sports))
+            else:
+                # Fallback: prefix match (e.g. "soccer%" for unmapped keys)
+                stmt = stmt.where(PlacedBet.sport.startswith(sport_group))
+
+        total = db.execute(stmt).scalar() or 0
 
     new_bets = total - last_n
     return new_bets >= threshold, new_bets

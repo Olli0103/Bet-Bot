@@ -24,6 +24,17 @@ from src.core.volatility_tracker import get_line_velocity, get_volatility_featur
 
 log = logging.getLogger(__name__)
 
+# Operational exceptions that can legitimately occur at runtime
+# (network, Redis, parsing, import of optional modules).
+# Excludes NameError / SyntaxError / UnboundLocalError so that
+# programming bugs surface immediately instead of being silently
+# swallowed behind a fallback default.
+_OP_ERRORS = (
+    KeyError, ValueError, TypeError, AttributeError,
+    RuntimeError, OSError, ImportError, ZeroDivisionError,
+    LookupError, ArithmeticError,
+)
+
 
 class AnalystAgent:
     """Deeply analyzes an event when triggered by the Scout."""
@@ -63,7 +74,7 @@ class AnalystAgent:
         try:
             sent_home = await asyncio.to_thread(team_sentiment_score, home)
             sent_away = await asyncio.to_thread(team_sentiment_score, away)
-        except Exception:
+        except _OP_ERRORS:
             log.warning("Sentiment fetch failed for %s vs %s", home, away, exc_info=True)
             sent_home = sent_away = 0.0
 
@@ -93,14 +104,14 @@ class AnalystAgent:
             # Compute impact scores for EV penalty
             injury_penalty_home = get_injury_impact_score(injury_details, home)
             injury_penalty_away = get_injury_impact_score(injury_details, away)
-        except Exception as exc:
+        except _OP_ERRORS as exc:
             log.warning("Injury aggregation in analyst failed: %s", exc)
 
         # 3. Form
         try:
             home_wr, home_gp = get_form_l5(home)
             away_wr, away_gp = get_form_l5(away)
-        except Exception:
+        except _OP_ERRORS:
             log.warning("Form fetch failed for %s vs %s", home, away, exc_info=True)
             home_wr, home_gp = 0.5, 0
             away_wr, away_gp = 0.5, 0
@@ -108,21 +119,21 @@ class AnalystAgent:
         # 4. Elo
         try:
             elo_feats = self.elo.get_elo_features(home, away)
-        except Exception:
+        except _OP_ERRORS:
             log.warning("Elo fetch failed for %s vs %s", home, away, exc_info=True)
             elo_feats = {"elo_diff": 0.0, "elo_expected": 0.5}
 
         # 5. H2H
         try:
             h2h_feats = get_h2h_features(home, away)
-        except Exception:
+        except _OP_ERRORS:
             log.warning("H2H fetch failed for %s vs %s", home, away, exc_info=True)
             h2h_feats = {"h2h_home_winrate": 0.5}
 
         # 6. Volatility
         try:
             vol_feats = get_volatility_features(home, away)
-        except Exception:
+        except _OP_ERRORS:
             log.warning("Volatility fetch failed for %s vs %s", home, away, exc_info=True)
             vol_feats = {"home_volatility": 0.0, "away_volatility": 0.0}
 
@@ -139,7 +150,7 @@ class AnalystAgent:
                     poisson_prob = poisson_pred.get("h2h_draw")
                 else:
                     poisson_prob = poisson_pred.get("h2h_away")
-            except Exception:
+            except _OP_ERRORS:
                 log.warning("Poisson prediction failed for %s vs %s", home, away, exc_info=True)
 
         is_home = selection == home
@@ -153,7 +164,7 @@ class AnalystAgent:
             from src.core.stats_ingester import get_event_snapshot
             home_snap = get_event_snapshot(event_id, home) or {}
             away_snap = get_event_snapshot(event_id, away) or {}
-        except Exception:
+        except _OP_ERRORS:
             log.warning("Stats snapshot fetch failed for event %s", event_id, exc_info=True)
 
         sel_snap = home_snap if is_home else away_snap
@@ -297,5 +308,6 @@ class AnalystAgent:
 
             result = await asyncio.to_thread(nlp.generate_raw, prompt)
             return result if result else None
-        except Exception:
+        except _OP_ERRORS:
+            log.warning("LLM reasoning failed", exc_info=True)
             return None
