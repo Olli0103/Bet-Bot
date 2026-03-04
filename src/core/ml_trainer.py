@@ -471,11 +471,9 @@ def _build_clv_dataset(sport_filter: Optional[str] = None) -> Optional[pd.DataFr
     Returns a DataFrame sorted by created_at with ``closing_implied_prob``
     as the regression target, or None if insufficient data.
 
-    Only h2h market bets are included because EventClosingLine lacks a
-    ``market`` column.  For h2h, the selection is a team name which is
-    unique per event.  Totals/spreads selections like "Over 2.5" could
-    appear across multiple markets (totals, home_team_totals, etc.),
-    causing cross-market data bleed.
+    Joins on ``(event_id, selection, market, sport)`` to prevent
+    cross-market data bleed (e.g. "Over 2.5" appearing in both
+    totals and home_team_totals).
     """
     with SessionLocal() as db:
         from sqlalchemy.orm import aliased
@@ -485,9 +483,9 @@ def _build_clv_dataset(sport_filter: Optional[str] = None) -> Optional[pd.DataFr
             .join(ecl, (
                 (PlacedBet.event_id == ecl.event_id)
                 & (PlacedBet.selection == ecl.selection)
-                & (PlacedBet.sport == ecl.sport)  # extra safety
+                & (PlacedBet.market == ecl.market)
+                & (PlacedBet.sport == ecl.sport)
             ))
-            .where(PlacedBet.market == "h2h")  # avoid cross-market bleed
             .where(ecl.closing_implied_prob.isnot(None))
             .where(ecl.closing_implied_prob > 0.01)
             .where(ecl.closing_implied_prob < 0.99)
