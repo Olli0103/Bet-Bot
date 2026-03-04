@@ -44,6 +44,30 @@ _SOURCE_BUDGET: Dict[str, int] = {
 
 _CACHE_TTL_SECONDS = 60 * 60  # 60 min default
 
+# Per-source 429-cooldown tracking (Redis key prefix)
+_COOLDOWN_KEY_PREFIX = "news_cooldown:"
+_COOLDOWN_DURATION = 600  # 10 minutes cooldown after 429
+
+
+def _is_source_cooled_down(source: str) -> bool:
+    """Check if a source is in 429-cooldown (shouldn't be queried yet)."""
+    cd = cache.get_json(f"{_COOLDOWN_KEY_PREFIX}{source}")
+    if not cd:
+        return False
+    import time
+    return time.time() < cd.get("until", 0)
+
+
+def _set_source_cooldown(source: str, seconds: int = _COOLDOWN_DURATION) -> None:
+    """Put a source into cooldown after a 429 response."""
+    import time
+    cache.set_json(
+        f"{_COOLDOWN_KEY_PREFIX}{source}",
+        {"until": time.time() + seconds, "reason": "429_rate_limit"},
+        ttl_seconds=seconds + 10,
+    )
+    log.warning("news_429_cooldown: %s cooled down for %ds", source, seconds)
+
 
 def _title_hash(title: str) -> str:
     """Hash a title for dedup purposes (case-insensitive, stripped)."""
@@ -106,6 +130,10 @@ class GNewsFetcher(AsyncBaseFetcher):
         if cached is not None:
             return cached
 
+        if _is_source_cooled_down("gnews"):
+            log.debug("GNews in 429-cooldown, skipping")
+            return []
+
         if not _check_rate_limit("gnews"):
             log.debug("GNews rate limit reached, skipping")
             return []
@@ -134,6 +162,9 @@ class GNewsFetcher(AsyncBaseFetcher):
             cache.set_json(cache_key, results, _CACHE_TTL_SECONDS)
             return results
         except Exception as exc:
+            exc_str = str(exc)
+            if "429" in exc_str:
+                _set_source_cooldown("gnews")
             log.warning("GNews search failed for '%s': %s", query, exc)
             return []
 
@@ -152,6 +183,10 @@ class NewsDataFetcher(AsyncBaseFetcher):
         cached = cache.get_json(cache_key)
         if cached is not None:
             return cached
+
+        if _is_source_cooled_down("newsdata"):
+            log.debug("NewsData in 429-cooldown, skipping")
+            return []
 
         if not _check_rate_limit("newsdata"):
             log.debug("NewsData rate limit reached, skipping")
@@ -180,6 +215,9 @@ class NewsDataFetcher(AsyncBaseFetcher):
             cache.set_json(cache_key, results, _CACHE_TTL_SECONDS)
             return results
         except Exception as exc:
+            exc_str = str(exc)
+            if "429" in exc_str:
+                _set_source_cooldown("newsdata")
             log.warning("NewsData search failed for '%s': %s", query, exc)
             return []
 
@@ -336,16 +374,19 @@ class MultiNewsFetcher:
         return _safe_sync_run(self.search_async(query, language, team_names=team_names))
 
     def get_source_health(self) -> Dict[str, Dict[str, Any]]:
-        """Return rate limit status for each source (current hour bucket)."""
+        """Return rate limit + cooldown status for each source."""
         health: Dict[str, Dict[str, Any]] = {}
         for source, budget in _SOURCE_BUDGET.items():
             key = _get_ratelimit_key(source)
             count_str = cache.get(key)
             used = int(count_str) if count_str else 0
+            cooled = _is_source_cooled_down(source)
             health[source] = {
                 "used": used,
                 "budget": budget,
-                "available": budget - used,
+                "available": max(0, budget - used),
                 "confidence": SOURCE_CONFIDENCE.get(source, 0),
+                "cooled_down": cooled,
+                "status": "cooldown" if cooled else ("exhausted" if used >= budget else "ok"),
             }
         return health

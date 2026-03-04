@@ -54,7 +54,11 @@ AVAILABLE_COMBO_SIZES: List[int] = [10, 20, 30]
 
 
 class DynamicSettingsManager:
-    """Redis-backed dynamic settings, togglable via Telegram."""
+    """Redis-backed dynamic settings, togglable via Telegram.
+
+    Supports per-owner settings via owner_chat_id. When set, settings
+    are isolated per portfolio owner. Falls back to global defaults.
+    """
 
     DEFAULTS: Dict[str, Any] = {
         "active_sports": [
@@ -68,17 +72,33 @@ class DynamicSettingsManager:
         "target_combo_sizes": [10, 20, 30],
     }
 
+    def __init__(self, owner_chat_id: str = ""):
+        self._owner = owner_chat_id
+
+    def _redis_key(self) -> str:
+        """Return owner-scoped Redis key if owner is set, else global."""
+        if self._owner:
+            return f"{REDIS_KEY}:owner:{self._owner}"
+        return REDIS_KEY
+
     def get_all(self) -> Dict[str, Any]:
         """Return all settings, falling back to defaults if Redis is empty."""
-        data = cache.get_json(REDIS_KEY)
+        data = cache.get_json(self._redis_key())
         if data and isinstance(data, dict):
             merged = dict(self.DEFAULTS)
             merged.update(data)
             return merged
+        # If owner-scoped and not found, fall back to global
+        if self._owner:
+            global_data = cache.get_json(REDIS_KEY)
+            if global_data and isinstance(global_data, dict):
+                merged = dict(self.DEFAULTS)
+                merged.update(global_data)
+                return merged
         return dict(self.DEFAULTS)
 
     def _save(self, data: Dict[str, Any]) -> None:
-        cache.set_json(REDIS_KEY, data, ttl_seconds=365 * 24 * 3600)
+        cache.set_json(self._redis_key(), data, ttl_seconds=365 * 24 * 3600)
 
     def get(self, key: str) -> Any:
         return self.get_all().get(key, self.DEFAULTS.get(key))

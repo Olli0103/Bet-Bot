@@ -6,7 +6,7 @@ from src.data.postgres import SessionLocal
 from src.data.models import PlacedBet
 
 
-def learning_health(live_only: bool = True) -> dict:
+def learning_health(live_only: bool = True, owner_chat_id: str = "") -> dict:
     """Return learning health stats.
 
     Parameters
@@ -14,11 +14,15 @@ def learning_health(live_only: bool = True) -> dict:
     live_only : bool
         If True (default), exclude historical imports and paper-only signals
         from PnL/bankroll calculations.  Uses the ``is_training_data`` column.
+    owner_chat_id : str
+        If set, scope results to this owner's portfolio only.
     """
     with SessionLocal() as db:
         query = select(PlacedBet)
         if live_only:
             query = query.where(PlacedBet.is_training_data.is_(False))
+        if owner_chat_id:
+            query = query.where(PlacedBet.owner_chat_id == owner_chat_id)
         all_bets = db.scalars(query).all()
 
     total = len(all_bets)

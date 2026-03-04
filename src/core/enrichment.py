@@ -49,13 +49,38 @@ def _timeout_guard(seconds: int):
         yield
 
 
-def _log_enrichment_summary():
-    """Log aggregated enrichment errors once per cycle instead of per-team."""
-    global _enrichment_error_counts
-    if _enrichment_error_counts:
-        summary = ", ".join(f"{k}={v}" for k, v in sorted(_enrichment_error_counts.items()))
-        log.warning("enrichment_cycle_summary: errors=%s", summary)
-        _enrichment_error_counts.clear()
+def _log_enrichment_summary(teams_processed: int = 0):
+    """Log aggregated enrichment cycle summary instead of per-team noise."""
+    global _enrichment_error_counts, _enrichment_cycle_start
+    elapsed = round(time.time() - _enrichment_cycle_start, 2) if _enrichment_cycle_start else 0
+    error_count = sum(_enrichment_error_counts.values())
+    error_detail = ", ".join(f"{k}={v}" for k, v in sorted(_enrichment_error_counts.items()))
+
+    # Source health snapshot
+    source_health_parts = []
+    for source_name in ("newsapi", "rotowire_rss", "ollama"):
+        avail = is_available(source_name)
+        source_health_parts.append(f"{source_name}={'ok' if avail else 'DOWN'}")
+
+    # Budget snapshot from multi_news_fetcher
+    budget_parts = []
+    try:
+        from src.integrations.multi_news_fetcher import MultiNewsFetcher
+        health = MultiNewsFetcher().get_source_health()
+        for src_name, info in health.items():
+            budget_parts.append(f"{src_name}={info.get('used', 0)}/{info.get('budget', '?')}")
+    except Exception:
+        pass
+
+    log.info(
+        "enrichment_cycle_summary: teams=%d elapsed=%.1fs errors=%d (%s) "
+        "sources=[%s] budget=[%s]",
+        teams_processed, elapsed, error_count,
+        error_detail or "none",
+        ", ".join(source_health_parts),
+        ", ".join(budget_parts) or "n/a",
+    )
+    _enrichment_error_counts.clear()
 
 
 def _record_enrichment_error(category: str):
@@ -72,7 +97,9 @@ def _norm_label(label: str) -> float:
     return 0.0
 
 
-def team_sentiment_score(team: str, limit_articles: int = 8) -> float:
+def team_sentiment_score(team: str, limit_articles: int = 0) -> float:
+    if limit_articles <= 0:
+        limit_articles = settings.enrichment_news_articles_per_team
     k = f"enrich:sentiment:{team.lower()}"
     cached = cache.get_json(k)
     if cached is not None:
@@ -136,24 +163,36 @@ def team_sentiment_score(team: str, limit_articles: int = 8) -> float:
         return 0.0
 
 
-def batch_team_sentiment(teams: List[str], max_teams: int = 24) -> Dict[str, float]:
+def batch_team_sentiment(teams: List[str], max_teams: int = 0) -> Dict[str, float]:
+    """Compute sentiment for a batch of teams with configurable limit.
+
+    max_teams defaults to settings.enrichment_max_teams when 0.
+    Best-effort: individual team failures don't block the pipeline.
+    """
     global _enrichment_cycle_start, _enrichment_error_counts
     _enrichment_cycle_start = time.time()
     _enrichment_error_counts.clear()
+
+    if max_teams <= 0:
+        max_teams = settings.enrichment_max_teams
 
     out: Dict[str, float] = {}
     uniq = []
     for t in teams:
         if t and t not in uniq:
             uniq.append(t)
+
+    processed = 0
     for t in uniq[:max_teams]:
         try:
             out[t] = team_sentiment_score(t)
+            processed += 1
         except Exception:
             out[t] = 0.0
+            processed += 1
 
     # Log aggregated summary instead of per-team noise
-    _log_enrichment_summary()
+    _log_enrichment_summary(teams_processed=processed)
     return out
 
 

@@ -136,13 +136,15 @@ def _persist_paper_signal(record: PaperSignalRecord, features: Optional[Dict[str
 
     try:
         with SessionLocal() as db:
-            # Check for duplicates
+            # Check for duplicate PAPER signals only (not user bets)
+            # Paper signals should not block user bets, and vice versa
             from sqlalchemy import select
             exists = db.scalar(
                 select(PlacedBet.id).where(
                     PlacedBet.event_id == record.event_id,
                     PlacedBet.selection == record.selection,
                     PlacedBet.market == record.market,
+                    PlacedBet.data_source == "paper_signal",
                 )
             )
             if exists:

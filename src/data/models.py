@@ -27,7 +27,8 @@ class PlacedBet(Base):
 
     __tablename__ = "placed_bets"
     __table_args__ = (
-        UniqueConstraint("event_id", "selection", "market", name="uq_event_selection_market"),
+        UniqueConstraint("event_id", "selection", "market", "owner_chat_id", "data_source",
+                         name="uq_event_sel_market_owner_source"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -63,6 +64,9 @@ class PlacedBet(Base):
     is_training_data = Column(Boolean, nullable=False, default=False, server_default="false")
     data_source = Column(String(32), nullable=False, default="live_trade", server_default="live_trade")
     # data_source values: 'live_trade', 'paper_signal', 'historical_import', 'manual'
+
+    # Multi-user portfolio separation: each chat_id has its own portfolio
+    owner_chat_id = Column(String(64), nullable=True, index=True)
 
     created_at = Column(
         DateTime(timezone=True),

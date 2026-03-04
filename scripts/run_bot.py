@@ -3,6 +3,10 @@ import atexit
 import fcntl
 from pathlib import Path
 
+# Load .env EARLY — before any module imports that read env vars (SSL, etc.)
+from dotenv import load_dotenv
+load_dotenv(override=True)
+
 from src.bot.app import main
 
 

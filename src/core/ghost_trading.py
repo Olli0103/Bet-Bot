@@ -19,24 +19,42 @@ def _safe_meta(feat: dict) -> dict:
             for k, v in feat.items()}
 
 
-def auto_place_virtual_bets(signals: list, features_dict: dict):
+def _user_bet_sources() -> tuple:
+    """Data source values that count as user-placed bets for duplicate checks.
+
+    paper_signal and historical_import are excluded — they should never
+    block a user from placing a real bet on the same event.
+    """
+    return ("live_trade", "manual")
+
+
+def auto_place_virtual_bets(
+    signals: list,
+    features_dict: dict,
+    owner_chat_id: str = "",
+):
     """Auto-place virtual bets for positive EV signals.
 
     Parameters
     ----------
     signals : list of BetSignal
     features_dict : dict keyed by ``"{event_id}:{selection}"``
+    owner_chat_id : str
+        Owner's chat ID for portfolio isolation.
     """
     placed_count = 0
     now = datetime.now(timezone.utc)
     start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
     with SessionLocal() as db:
-        existing = db.execute(
-            select(PlacedBet.event_id, PlacedBet.selection).where(
-                PlacedBet.created_at >= start_of_day
-            )
-        ).all()
+        # Owner-scoped duplicate check: only consider user bets (not paper/import)
+        query = select(PlacedBet.event_id, PlacedBet.selection).where(
+            PlacedBet.created_at >= start_of_day,
+            PlacedBet.data_source.in_(_user_bet_sources()),
+        )
+        if owner_chat_id:
+            query = query.where(PlacedBet.owner_chat_id == owner_chat_id)
+        existing = db.execute(query).all()
         existing_set = {f"{e[0]}|{e[1]}" for e in existing}
 
         for sig in signals:
@@ -62,7 +80,7 @@ def auto_place_virtual_bets(signals: list, features_dict: dict):
                     injury_delta=float(feat.get("injury_delta", 0.0)),
                     is_training_data=False,
                     data_source="live_trade",
-                    # Persist ALL ML features so the trainer can use them
+                    owner_chat_id=owner_chat_id or None,
                     meta_features=_safe_meta(feat),
                 )
                 db.add(new_bet)
@@ -80,16 +98,32 @@ def place_virtual_bet(
     odds: float = 2.0,
     stake: float = 1.0,
     features: Optional[Dict] = None,
+    owner_chat_id: str = "",
 ) -> bool:
     """Place a single virtual (ghost) bet.
 
     Called from the Executioner agent and the Telegram "Ghost Bet" button.
+    Duplicate check is scoped to owner + user bet sources only.
     """
     features = features or {}
-    now = datetime.now(timezone.utc)
 
     try:
         with SessionLocal() as db:
+            # Owner-scoped duplicate check (only user bets, not paper/import)
+            existing = db.scalar(
+                select(PlacedBet.id).where(
+                    PlacedBet.event_id == event_id,
+                    PlacedBet.selection == selection,
+                    PlacedBet.market == market,
+                    PlacedBet.data_source.in_(_user_bet_sources()),
+                    *([PlacedBet.owner_chat_id == owner_chat_id] if owner_chat_id else []),
+                )
+            )
+            if existing:
+                log.info("Duplicate bet skipped (owner-scoped): event=%s sel=%s owner=%s",
+                         event_id, selection, owner_chat_id or "global")
+                return False
+
             new_bet = PlacedBet(
                 event_id=str(event_id),
                 sport=str(sport),
@@ -109,7 +143,7 @@ def place_virtual_bet(
                 injury_delta=float(features.get("injury_delta", 0.0)),
                 is_training_data=False,
                 data_source="live_trade",
-                # Persist ALL ML features so the trainer can use them
+                owner_chat_id=owner_chat_id or None,
                 meta_features=_safe_meta(features),
             )
             db.add(new_bet)

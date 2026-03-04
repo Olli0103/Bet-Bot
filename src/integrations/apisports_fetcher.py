@@ -147,7 +147,8 @@ class APISportsFetcher(AsyncBaseFetcher):
             url = f"{API_BASKETBALL_BASE}/injuries"
             params = {"date": date_str}
 
-            async with httpx.AsyncClient(timeout=20) as client:
+            from src.integrations.base_fetcher import build_httpx_ssl_verify
+            async with httpx.AsyncClient(timeout=20, verify=build_httpx_ssl_verify()) as client:
                 resp = await client.get(url, headers=headers, params=params)
                 if resp.status_code != 200:
                     cache.set_json(cache_key, [], ttl_seconds)

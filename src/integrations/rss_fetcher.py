@@ -292,10 +292,12 @@ class RSSFetcher:
             log.warning("feedparser not installed. pip install feedparser")
             return []
 
-        # Fetch with User-Agent to avoid 403
+        # Fetch with User-Agent to avoid 403, unified SSL handling
+        from src.integrations.base_fetcher import build_ssl_context
+        ssl_ctx = build_ssl_context()
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         try:
-            with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as resp:
+            with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT, context=ssl_ctx) as resp:
                 raw_bytes = resp.read()
         except urllib.error.HTTPError as exc:
             if exc.code == 403:
