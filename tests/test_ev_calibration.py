@@ -351,22 +351,26 @@ class TestEVDiagnosticsFields:
             for field in self.REQUIRED_FIELDS:
                 assert field in entry
 
-    def test_implied_prob_computed_correctly(self):
+    def test_implied_prob_computed_correctly(self, tmp_path):
         """implied_prob_target and implied_prob_sharp must be 1/odds."""
-        entry = log_ev_diagnostic(
-            event_id="test",
-            sport="tennis",
-            market="h2h",
-            selection="Player",
-            raw_prob=0.60,
-            calibrated_prob=0.58,
-            calibration_source="global",
-            target_odds=2.50,
-            sharp_odds=2.40,
-            vig=0.02,
-            tax_rate=0.05,
-            ev_final=0.03,
-        )
+        diag_file = tmp_path / "ev_diagnostics.jsonl"
+
+        with patch("src.core.ev_diagnostics.EV_DIAGNOSTICS_FILE", diag_file), \
+             patch("src.core.ev_diagnostics.ARTIFACTS_DIR", tmp_path):
+            entry = log_ev_diagnostic(
+                event_id="test",
+                sport="tennis",
+                market="h2h",
+                selection="Player",
+                raw_prob=0.60,
+                calibrated_prob=0.58,
+                calibration_source="global",
+                target_odds=2.50,
+                sharp_odds=2.40,
+                vig=0.02,
+                tax_rate=0.05,
+                ev_final=0.03,
+            )
         assert entry["implied_prob_target"] == pytest.approx(1.0 / 2.50, abs=1e-4)
         assert entry["implied_prob_sharp"] == pytest.approx(1.0 / 2.40, abs=1e-4)
 
