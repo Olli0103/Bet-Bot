@@ -1,5 +1,130 @@
 # Changelog
 
+## [2026-03-04] Full CHANGELOG Implementation: Stability, SSL, Multi-User, Rate Limiting
+
+### Status: IMPLEMENTED
+
+### A) Event-Loop/Fetch Stability (P0) ✅
+
+**Root cause:** `_safe_sync_run` reused dead event loops, causing "Event loop is closed"
+errors during fetch cycles. The shared `httpx.AsyncClient` was bound to the loop that
+created it — reusing across loops caused failures.
+
+**Fixes:**
+- `_safe_sync_run()` now always creates a **fresh event loop** in a dedicated thread
+- `AsyncBaseFetcher` creates a **per-request client** (`_make_client()`) instead of
+  sharing one client across all calls
+- Graceful shutdown of pending tasks before loop close
+- `close()` is now a no-op for backward compatibility
+
+### B) SSL Unified Handling (P0) ✅
+
+**Fixes:**
+- New `build_ssl_context()` and `build_httpx_ssl_verify()` in `base_fetcher.py`
+- **httpx** (AsyncBaseFetcher): passes `verify=` parameter to every client
+- **urllib** (RSSFetcher): passes `context=ssl_ctx` to `urlopen()`
+- **aiohttp** (RedditFetcher): creates `TCPConnector(ssl=ssl_ctx)`
+- **API-Sports basketball**: uses `build_httpx_ssl_verify()` for direct httpx calls
+- Runtime flag: `INSECURE_SSL_FALLBACK=true` disables cert verification (emergency only)
+- `run_bot.py` loads `.env` before any module imports
+
+### C) Enrichment Tuning + Logging (P0) ✅
+
+**New settings:**
+- `ENRICHMENT_MAX_TEAMS` (default 24)
+- `ENRICHMENT_NEWS_ARTICLES_PER_TEAM` (default 8)
+- `ENRICHMENT_TIMEOUT` (default 30s)
+
+**Aggregated cycle logs include:**
+- teams processed, elapsed time, error counts by category
+- source health status (newsapi, rotowire_rss, ollama)
+- budget usage per news source (used/total)
+
+### D) Rate-Limit Hardening (P0) ✅
+
+**News sources:**
+- Per-source 429 cooldown (10min default) with Redis tracking
+- GNews, NewsData, NewsAPI all check `_is_source_cooled_down()` before querying
+- 429 responses automatically trigger cooldown via `_set_source_cooldown()`
+- `get_source_health()` now includes cooldown status per source
+
+**API-Sports:**
+- New `record_429()` and `is_429_cooled()` in `source_health.py`
+- Prevents repeated requests to throttled sources
+
+### E) EV/Calibration Integrity (P1) ✅
+
+**Verified — no regressions:**
+- `model_probability_raw`, `model_probability_calibrated`, `calibration_source` preserved
+- UI/ranking consistently uses calibrated values
+- EV diagnostics pipeline unchanged
+
+### F) Learning-Mode vs Trading-Guards (P1) ✅
+
+**Already cleanly separated:**
+- `is_training_data` flag excludes historical imports from live PnL
+- `data_source` column (live_trade, paper_signal, historical_import, manual) enforced
+- Paper signals (stake=0) don't affect circuit breakers or bankroll
+- Performance monitor uses `_LIVE_ONLY` filter everywhere
+
+### G) Multi-User Portfolio Separation + Duplicate Fix (P0) ✅
+
+**New:**
+- `owner_chat_id` column on `PlacedBet` (nullable, indexed)
+- Unique constraint updated: `(event_id, selection, market, owner_chat_id, data_source)`
+- Duplicate checks scoped to owner + user bet sources (`live_trade`, `manual`)
+- `paper_signal` never blocks user bets (separate source namespace)
+- `BankrollManager` supports `owner_chat_id` parameter
+- `learning_health()` supports `owner_chat_id` parameter
+- `DynamicSettingsManager` supports per-owner Redis key scoping
+- Dashboard queries scoped by owner_chat_id
+
+**Migration:**
+- Alembic: `f8a5b39e4d05_add_owner_chat_id_and_update_unique.py`
+- Backfill: `python scripts/backfill_owner_chat_id.py [--dry-run]`
+
+### H) Tests ✅
+
+New test file: `tests/test_changelog_implementation.py`
+- `TestSafeSyncRun` — event loop lifecycle (no loop, nested, timeout, fresh per call)
+- `TestAsyncBaseFetcherLifecycle` — per-request client creation
+- `TestSSLHandling` — secure default, insecure fallback, httpx verify
+- `TestEnrichmentConfig` — configurable limits
+- `TestRateLimitCooldown` — 429 cooldown set/check, source health
+- `TestEVCalibrationIntegrity` — calibration fields preserved
+- `TestDataSourceSeparation` — paper vs live duplicate scoping
+- `TestMultiUserPortfolio` — owner-scoped queries, duplicate checks, settings
+- `TestSSLAcrossClients` — SSL config flows to urllib, aiohttp
+
+### I) Migrations ✅
+
+- `alembic/versions/f8a5b39e4d05_add_owner_chat_id_and_update_unique.py`
+- `scripts/backfill_owner_chat_id.py` (idempotent, safe defaults)
+
+### Changed Files
+
+- `src/integrations/base_fetcher.py` — SSL context, per-request client, fresh event loop
+- `src/integrations/rss_fetcher.py` — SSL context for urllib
+- `src/integrations/reddit_fetcher.py` — SSL context for aiohttp
+- `src/integrations/apisports_fetcher.py` — SSL verify for httpx
+- `src/integrations/multi_news_fetcher.py` — 429 cooldown, health status
+- `src/core/settings.py` — enrichment + SSL settings
+- `src/core/enrichment.py` — configurable limits, aggregated cycle logs
+- `src/core/source_health.py` — record_429, is_429_cooled
+- `src/core/ghost_trading.py` — owner-scoped duplicates, user_bet_sources
+- `src/core/paper_signals.py` — paper-scoped duplicate check
+- `src/core/bankroll.py` — owner-scoped bankroll
+- `src/core/learning_monitor.py` — owner-scoped health
+- `src/core/dynamic_settings.py` — per-owner settings
+- `src/data/models.py` — owner_chat_id column, updated unique constraint
+- `src/bot/handlers.py` — owner-scoped dashboard
+- `scripts/run_bot.py` — early .env loading
+- `tests/test_changelog_implementation.py` — comprehensive tests
+- `alembic/versions/f8a5b39e4d05_*.py` — migration
+- `scripts/backfill_owner_chat_id.py` — backfill script
+
+---
+
 ## [2026-03-04] Improve EV Quality: Calibration Layer + Sharp/Target Price Audit
 
 ### A) Calibration Layer (P0)

@@ -50,17 +50,19 @@ def _get_bankroll() -> float:
         return settings.initial_bankroll
 
 
-def _sync_get_dashboard_data() -> Dict[str, Any]:
+def _sync_get_dashboard_data(owner_chat_id: str = "") -> Dict[str, Any]:
     """Fetch lightweight LIVE dashboard aggregates from DB.
 
     Excludes historical imports and training data — only real trading
-    activity is shown.  Returns raw tuples instead of full ORM objects
-    to avoid loading every historical bet into memory.
+    activity is shown.  When owner_chat_id is set, only that owner's
+    bets are included (multi-user portfolio separation).
     """
     from sqlalchemy import func, case, literal_column
 
     # Base filter: only non-training live data
-    live_filter = PlacedBet.is_training_data.is_(False)
+    filters = [PlacedBet.is_training_data.is_(False)]
+    if owner_chat_id:
+        filters.append(PlacedBet.owner_chat_id == owner_chat_id)
 
     with SessionLocal() as db:
         # Aggregate counts and sums in SQL — live bets only
@@ -78,13 +80,13 @@ def _sync_get_dashboard_data() -> Dict[str, Any]:
                     (PlacedBet.status.in_(["won", "lost"]), PlacedBet.stake),
                     else_=literal_column("0"),
                 )).label("staked"),
-            ).where(live_filter)
+            ).where(*filters)
         ).one()
 
         # Equity curve: only fetch (id, pnl) for settled LIVE bets
         equity_rows = db.execute(
             select(PlacedBet.id, PlacedBet.pnl)
-            .where(PlacedBet.status.in_(["won", "lost"]), live_filter)
+            .where(PlacedBet.status.in_(["won", "lost"]), *filters)
             .order_by(PlacedBet.id.asc())
         ).all()
 
@@ -769,7 +771,8 @@ async def combo_suggestions(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show balance with a visual PnL dashboard chart."""
-    data = await asyncio.to_thread(_sync_get_dashboard_data)
+    owner_id = str(update.effective_chat.id) if update.effective_chat else ""
+    data = await asyncio.to_thread(_sync_get_dashboard_data, owner_id)
     pnl = data["pnl"]
     open_n = data["open_n"]
     won_n = data["won_n"]

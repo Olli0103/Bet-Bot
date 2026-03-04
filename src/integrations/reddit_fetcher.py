@@ -56,11 +56,18 @@ class RedditFetcher:
     # -- session lifecycle ----------------------------------------------------
 
     def _ensure_session(self) -> aiohttp.ClientSession:
-        """Lazily create (or recreate) an ``aiohttp.ClientSession``."""
+        """Lazily create (or recreate) an ``aiohttp.ClientSession``.
+
+        Uses unified SSL configuration from base_fetcher.
+        """
         if self._session is None or self._session.closed:
+            from src.integrations.base_fetcher import build_ssl_context
+            ssl_ctx = build_ssl_context()
+            connector = aiohttp.TCPConnector(ssl=ssl_ctx)
             self._session = aiohttp.ClientSession(
                 headers={"User-Agent": _USER_AGENT},
                 timeout=self._timeout,
+                connector=connector,
             )
         return self._session
 

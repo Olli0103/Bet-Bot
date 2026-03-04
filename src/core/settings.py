@@ -40,6 +40,11 @@ class Settings(BaseModel):
     # Enrichment
     enrichment_enabled: bool = os.getenv("ENRICHMENT_ENABLED", "true").lower() == "true"
     enrichment_timeout_per_team: int = int(os.getenv("ENRICHMENT_TIMEOUT", "30"))
+    enrichment_max_teams: int = int(os.getenv("ENRICHMENT_MAX_TEAMS", "24"))
+    enrichment_news_articles_per_team: int = int(os.getenv("ENRICHMENT_NEWS_ARTICLES_PER_TEAM", "8"))
+
+    # SSL
+    insecure_ssl_fallback: bool = os.getenv("INSECURE_SSL_FALLBACK", "false").lower() in ("true", "1", "yes")
 
     # Bankroll
     initial_bankroll: float = float(os.getenv("INITIAL_BANKROLL", "1000.0"))

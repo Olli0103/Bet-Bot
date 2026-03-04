@@ -46,6 +46,31 @@ def record_success(source: str) -> None:
     cache.set_json(key, data, ttl_seconds=DEFAULT_TTL)
 
 
+def record_429(source: str, cooldown_seconds: int = 0) -> None:
+    """Record a 429 (rate-limit) response with automatic cooldown.
+
+    Sets a short cooldown on the source so subsequent calls skip it,
+    preventing unnecessary quota burn.
+    """
+    if cooldown_seconds <= 0:
+        cooldown_seconds = SOURCE_CONFIG.get(source, {}).get("cooldown_seconds", 300)
+    cache.set_json(
+        f"source_429:{source}",
+        {"until": time.time() + cooldown_seconds, "ts": time.time()},
+        ttl_seconds=cooldown_seconds + 10,
+    )
+    log.warning("429 cooldown set for %s (%ds)", source, cooldown_seconds)
+    record_failure(source, f"429 rate limit (cooldown {cooldown_seconds}s)")
+
+
+def is_429_cooled(source: str) -> bool:
+    """Check if source is in 429-cooldown and shouldn't be queried."""
+    cd = cache.get_json(f"source_429:{source}")
+    if not cd:
+        return False
+    return time.time() < cd.get("until", 0)
+
+
 def record_failure(source: str, error: str = "") -> None:
     """Record a failed API call. May trip the circuit breaker."""
     key = _health_key(source)
