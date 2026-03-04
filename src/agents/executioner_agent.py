@@ -3,6 +3,11 @@
 The Executioner is the last agent in the pipeline. It applies circuit
 breakers, performance-based Kelly adjustments, and sends formatted
 alerts to Telegram. It can also auto-place virtual bets.
+
+Alert Pipeline Integration:
+    Every alert passes through the AlertManager before reaching Telegram.
+    The AlertManager applies quality guards, scoring, dedup/debounce,
+    and routing (immediate / digest / suppress).
 """
 from __future__ import annotations
 
@@ -11,6 +16,16 @@ import json
 import logging
 from typing import Any, Dict, Optional
 
+from src.core.alert_manager import (
+    AlertMetrics,
+    AlertPriority,
+    build_actionability_block,
+    format_alert_card,
+    format_digest_card,
+    process_alert,
+    should_send_digest,
+    pop_digest,
+)
 from src.core.bankroll import BankrollManager
 from src.core.betting_math import kelly_fraction, kelly_stake
 from src.core.ml_trainer import get_reliability_adjustment
@@ -236,69 +251,91 @@ class ExecutionerAgent:
         analysis: Dict[str, Any],
         stake: float,
     ) -> None:
-        """Format and send a Telegram alert with interactive inline buttons."""
+        """Process alert through AlertManager pipeline and send if appropriate.
+
+        The AlertManager applies:
+        1. Quality guards (data quality, odds glitch, steam confirmation)
+        2. Priority scoring + classification (CRITICAL/HIGH/MEDIUM/LOW)
+        3. Dedup/debounce (suppress near-identical alerts)
+        4. Routing (immediate push / digest / suppress)
+        5. Card formatting with actionability block
+        """
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-        sport = str(analysis.get("sport", "")).replace("_", " ").upper()
-        home = analysis.get("home", "")
-        away = analysis.get("away", "")
-        selection = analysis.get("selection", "")
-        trigger = analysis.get("trigger", "")
-        model_p = float(analysis.get("model_probability", 0))
-        ev = float(analysis.get("expected_value", 0))
-        commence = str(analysis.get("commence_time", ""))
+        result = process_alert(analysis, stake)
 
-        market = analysis.get("market", "h2h")
-        trigger_emoji = (
-            "📊" if trigger == "totals_steam" else
-            "⚡" if trigger == "steam_move" else
-            "🏥" if trigger == "breaking_injury" else "🎯"
-        )
+        if result.should_suppress:
+            log.info(
+                "Alert suppressed: %s (reason=%s, score=%.1f)",
+                analysis.get("selection", "?"),
+                result.suppress_reason,
+                result.score,
+            )
+            return
 
-        # Format event time (ISO -> readable German format)
-        event_time_str = ""
-        if commence:
+        if result.should_send_immediate:
+            # Cache alert data for callback retrieval
+            alert_id = self._cache_alert(analysis, stake)
+
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "\U0001f50d Deep Dive",
+                        callback_data=f"agent_analyze:{alert_id}",
+                    ),
+                    InlineKeyboardButton(
+                        "\U0001f4b0 Ghost Bet",
+                        callback_data=f"agent_ghost:{alert_id}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "\U0001f6d1 Ignorieren",
+                        callback_data=f"agent_ignore:{alert_id}",
+                    ),
+                ],
+            ])
+
+            await bot.send_message(
+                chat_id=chat_id,
+                text=result.card_text,
+                reply_markup=keyboard,
+            )
+            log.info(
+                "Alert sent [%s]: %s %s (score=%.1f, play=%s)",
+                result.priority.value,
+                analysis.get("home", ""),
+                analysis.get("selection", ""),
+                result.score,
+                result.actionability.playability,
+            )
+
+        elif result.should_digest:
+            log.info(
+                "Alert queued for digest [%s]: %s %s (score=%.1f)",
+                result.priority.value,
+                analysis.get("home", ""),
+                analysis.get("selection", ""),
+                result.score,
+            )
+
+        # Check if digest should be sent now
+        await self._maybe_send_digest(bot, chat_id)
+
+    async def _maybe_send_digest(self, bot, chat_id: str) -> None:
+        """Send digest if enough time has passed and buffer is non-empty."""
+        if not should_send_digest():
+            return
+        digest_alerts = pop_digest()
+        if not digest_alerts:
+            return
+        card = format_digest_card(digest_alerts)
+        if card:
             try:
-                from datetime import datetime as dt
-                from zoneinfo import ZoneInfo
-                ct = dt.fromisoformat(commence.replace("Z", "+00:00"))
-                local = ct.astimezone(ZoneInfo("Europe/Berlin"))
-                event_time_str = local.strftime("%d.%m. %H:%M")
-            except Exception:
-                event_time_str = commence[:16] if len(commence) >= 16 else commence
-
-        # Progress bar for model probability
-        filled = int(round(model_p * 10))
-        bar = "█" * filled + "░" * (10 - filled)
-
-        time_line = f"Anstoss: {event_time_str}\n" if event_time_str else ""
-
-        market_tag = f" | {market}" if market != "h2h" else ""
-        msg = (
-            f"{trigger_emoji} AGENT ALERT | {sport}{market_tag}\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"Match: {home} vs {away}\n"
-            f"{time_line}"
-            f"Tipp: {selection}\n"
-            f"Trigger: {trigger}\n"
-            f"Modell: [{bar}] {model_p:.0%}\n"
-            f"EV: {ev:+.4f} | Einsatz: {stake:.2f} EUR"
-        )
-
-        # Cache alert data for callback retrieval
-        alert_id = self._cache_alert(analysis, stake)
-
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("🔍 Deep Dive", callback_data=f"agent_analyze:{alert_id}"),
-                InlineKeyboardButton("💰 Ghost Bet", callback_data=f"agent_ghost:{alert_id}"),
-            ],
-            [
-                InlineKeyboardButton("🛑 Ignorieren", callback_data=f"agent_ignore:{alert_id}"),
-            ],
-        ])
-
-        await bot.send_message(chat_id=chat_id, text=msg, reply_markup=keyboard)
+                await bot.send_message(chat_id=chat_id, text=card)
+                log.info("Digest sent: %d alerts", len(digest_alerts))
+            except Exception as exc:
+                log.warning("Failed to send digest: %s", exc)
 
     def check_circuit_breakers(self) -> bool:
         """Return False if we should stop betting (convenience wrapper)."""

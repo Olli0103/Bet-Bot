@@ -419,18 +419,20 @@ ENRICHMENT_TIMEOUT=30
 
 The bot supports two deployment modes:
 
-#### Mode 1: Monolithic (simple, backward-compatible)
+#### Mode 1: Monolithic (default, stable)
 
-Single process runs both Telegram I/O and the Core pipeline:
+Single process runs both Telegram I/O and the Core pipeline. This is the
+**recommended production mode** after the split-worker revert (see CHANGELOG):
 
 ```bash
 python -m src.bot.app
 ```
 
-#### Mode 2: Split Architecture (recommended for production)
+#### Mode 2: Split Architecture (experimental)
 
-Two independent workers connected via Redis queues. Telegram failures
-cannot crash or block the Core pipeline:
+Two independent workers connected via Redis queues. **Not recommended for
+production** without process supervision (systemd, supervisord). The split
+architecture was tested in production and showed latency/stability issues.
 
 ```bash
 # Terminal 1: Core Worker (signals, agents, ML, grading)
@@ -439,6 +441,9 @@ python -m src.bot.core_worker
 # Terminal 2: Telegram Worker (UI, polling, message delivery)
 python -m src.bot.telegram_worker
 ```
+
+> **Note:** If reverting from split mode, kill both workers and start the
+> monolith: `kill $(cat src/bot/.core_worker.pid) 2>/dev/null && python -m src.bot.app`
 
 Benefits:
 - Core keeps running if Telegram is down/blocked
@@ -612,6 +617,33 @@ Each signal exposes three probability fields:
 - `artifacts/calibration_report.json` — per-sport/market ECE, MCE, Brier, log-loss
 - `CALIBRATION_REPORT.md` — human-readable calibration dashboard
 - `artifacts/ev_diagnostics.jsonl` — per-signal EV breakdown (raw_prob, calibrated_prob, target_odds, sharp_odds, vig, tax, EV_final)
+
+### Agent Alert System
+
+Alerts from the Scout-Analyst-Executioner pipeline pass through the **AlertManager**
+(`src/core/alert_manager.py`) before reaching Telegram:
+
+**Priority Scoring:** Each alert receives a composite score (0-100) based on edge vs
+implied probability, EV, calibration quality, and market momentum. Scores map to
+priority classes: CRITICAL (immediate), HIGH (immediate), MEDIUM (digest), LOW (log only).
+
+**Quality Guards:** Alerts are suppressed when:
+- Model probability < 35% or no calibration source
+- Odds appear glitched (>30% implied probability jump)
+- Steam move lacks confirming signals (EV, probability, or momentum)
+
+**Dedup + Debounce:** Same event+market+selection alerts are debounced for 10 minutes.
+Near-identical alerts (movement delta < 2%) are suppressed within the window.
+
+**Actionability Block:** Every alert includes:
+- **Playability verdict:** PLAYABLE / WATCHLIST / BLOCKED
+- **Top-3 reasons** (e.g. "Starker Edge: +8.5pp vs Markt")
+- **Risk flags** (e.g. high-odds, weak-calibration, public-bias)
+- **EV breakdown:** model prob, implied prob, edge, tax-adjusted EV
+
+**Alert artifacts:**
+- `artifacts/alert_quality_report.json` — alert pipeline metrics
+- `ALERT_QUALITY_REPORT.md` — human-readable alert quality dashboard
 
 ### Signal Deduplication & Card Format
 

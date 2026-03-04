@@ -1,5 +1,157 @@
 # Changelog
 
+## [2026-03-04] Stability & UX Update: Split-Worker Revert, Alert Quality Overhaul
+
+### Status: IMPLEMENTED
+
+### Runtime Architecture: Split-Worker Revert to Monolith
+
+**Background:** The split-worker architecture (`core_worker` + `telegram_worker`) was
+deployed to production but proved **laggy and unstable** in real-world usage.
+
+**Symptoms observed:**
+- Redis outbox queue backed up during high-traffic windows (>20 pending messages)
+- Telegram worker circuit breaker triggered spuriously under normal load
+- Race conditions between JIT signal fetch and agent cycle (both writing to same Redis keys)
+- PID file cleanup unreliable on hard restarts (stale `.core_worker.pid`)
+- Latency between signal detection and Telegram delivery: 5-15s (vs <1s monolith)
+
+**Decision:** Revert to monolith (`python -m src.bot.app`) as the **stable default**.
+The split-worker code remains in the codebase for future experimentation but is
+**not recommended for production** without process guarding (e.g. systemd watchdog).
+
+**Current Recommended Runtime Modes:**
+
+| Mode | Command | Status | Notes |
+|------|---------|--------|-------|
+| **Monolith (default)** | `python -m src.bot.app` | Stable | Single process, all components |
+| Split Worker | `python -m src.bot.core_worker` + `python -m src.bot.telegram_worker` | Experimental | Requires process supervision, Redis health monitoring |
+
+**Revert instructions:**
+```bash
+# Stop split workers if running
+kill $(cat src/bot/.core_worker.pid) 2>/dev/null
+kill $(cat src/bot/.telegram_worker.pid) 2>/dev/null
+
+# Start monolith
+python -m src.bot.app
+```
+
+### Agent Alert Quality Overhaul (B/C/D)
+
+**Problem:** Alerts were too frequent, often redundant, and lacked actionable context.
+Users received spam-like floods during high-volatility windows with no clear guidance
+on what to do with each alert.
+
+**New module:** `src/core/alert_manager.py`
+
+#### B) Alert Scoring + Priority Classes
+
+Every alert now receives a composite score (0-100) based on:
+- Calibrated probability edge vs implied probability (40% weight)
+- Expected value (30% weight)
+- Source quality / calibration status (15% weight)
+- Market momentum stability (15% weight)
+
+**Priority routing:**
+
+| Priority | Score | Routing | Behavior |
+|----------|-------|---------|----------|
+| CRITICAL | >= 65 + EV > 5% + p > 65% | Immediate push | Telegram alert with full card |
+| HIGH | >= 45 + EV > 2% | Immediate push | Telegram alert with full card |
+| MEDIUM | >= 25 | Digest buffer | Bundled every 15 minutes |
+| LOW | < 25 | Log only | No user notification |
+
+#### B) Dedup + Debounce 2.0
+
+- Composite dedup key: `event_id + market + selection`
+- Time-based debounce: 10-minute window per unique key
+- Delta threshold: suppress if movement change < 2% since last alert
+- Prevents same-event spam during rapid odds fluctuations
+
+#### B) Actionability Block (mandatory on every alert)
+
+Every pushed alert now contains:
+
+```
+PLAYABLE / WATCHLIST / BLOCKED
+  * Top-3 reasons (e.g. "Starker Edge: +8.5pp vs Markt")
+  * Risk flags (e.g. high-odds, weak-calibration, public-bias)
+  * Confidence source: calibrated / raw
+  * EV breakdown: model prob, implied prob, tax-adjusted EV
+```
+
+#### B) Alert Card Format (mobile-friendly)
+
+Card-based layout with:
+- Priority badge (colored circle) + sport + match as hero line
+- Compact probability bar with market comparison
+- EV + edge in one line
+- Playability verdict with reasons
+- Risk flags if present
+- No text walls, no redundant data
+
+#### B) Alert Routing
+
+- **Immediate:** CRITICAL + HIGH only
+- **Digest:** MEDIUM alerts bundled every 15 minutes
+- **Daily summary:** Available via `/status` command
+- **Suppressed:** LOW priority + quality-failed + dedup hits
+
+#### C) Alert Quality Guards
+
+| Guard | Rule | Effect |
+|-------|------|--------|
+| Data quality | `model_probability >= 0.35` + calibration source required | Suppress |
+| Odds glitch | Implied prob move > 30% = likely erroneous | Suppress |
+| Steam confirmation | Steam move alone needs EV > 2% OR p > 55% OR momentum | Suppress |
+| Calibration hard req | `calibration_source != "raw_passthrough"` | Suppress |
+
+#### D) Alert Metrics + Monitoring
+
+Redis-backed counters:
+- `alerts_total` — all alerts entering the pipeline
+- `alerts_sent_immediate` — pushed to Telegram immediately
+- `alerts_digested` — queued for digest
+- `alerts_suppressed_dedup` — suppressed by dedup/debounce
+- `alerts_suppressed_quality` — suppressed by quality guards
+- `avg_time_between_alerts` — rolling average
+- Priority breakdown: sent count per CRITICAL/HIGH/MEDIUM/LOW
+
+**Artifacts:**
+- `artifacts/alert_quality_report.json` — machine-readable metrics export
+- `ALERT_QUALITY_REPORT.md` — human-readable summary
+
+### Previously Documented Fixes (summary)
+
+- **Owner-scoped duplicate fix:** Unique constraint now includes `owner_chat_id` + `data_source`
+- **Scout alert flood control:** Orchestrator dedup keeps strongest per event, AlertManager adds time-based debounce
+- **SSL/rate-limit:** Unified SSL context, per-source 429 cooldown, `INSECURE_SSL_FALLBACK` emergency flag
+- **Executioner owner scope:** `BankrollManager` and `learning_health()` support `owner_chat_id`
+
+### Tests
+
+New test file: `tests/test_alert_system.py`
+- `test_alert_priority_scoring` — score computation and priority classification
+- `test_alert_dedup_debounce` — dedup suppression + delta threshold
+- `test_alert_requires_calibrated_confidence` — quality guard blocks raw passthrough
+- `test_medium_alerts_go_to_digest_not_immediate` — routing correctness
+- `test_alert_card_contains_actionability_block` — card format validation
+- `test_split_mode_documented_as_experimental_and_monolith_default` — ops doc check
+
+### Changed Files
+
+| File | Change |
+|------|--------|
+| `src/core/alert_manager.py` | NEW: Full alert pipeline (scoring, dedup, routing, quality guards, formatting, metrics) |
+| `src/agents/executioner_agent.py` | Integrated AlertManager pipeline into `_send_alert()`, digest support |
+| `CHANGELOG.md` | Split-worker revert documentation, alert overhaul documentation |
+| `README.md` | Updated runtime modes, alert system documentation |
+| `tests/test_alert_system.py` | NEW: 6 mandatory tests + supporting tests |
+| `ALERT_QUALITY_REPORT.md` | NEW: Generated alert quality report |
+
+---
+
 ## [2026-03-04] Full CHANGELOG Implementation: Stability, SSL, Multi-User, Rate Limiting
 
 ### Status: IMPLEMENTED
