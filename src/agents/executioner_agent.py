@@ -73,6 +73,21 @@ class ExecutionerAgent:
             log.warning("Circuit breaker: daily loss limit")
             return result
 
+        if breakers.get("drawdown"):
+            result["action"] = "halt"
+            result["reasoning"].append("7-day drawdown > 10% of bankroll: stakes halved")
+            log.warning("Circuit breaker: drawdown protection")
+            return result
+
+        # 1b. Check data source health — don't bet with stale/default features
+        from src.core.risk_guards import check_data_source_health
+        source_ok, source_reason = check_data_source_health()
+        if not source_ok:
+            result["action"] = "halt"
+            result["reasoning"].append(f"Data source offline: {source_reason}")
+            log.warning("Data source gate: %s", source_reason)
+            return result
+
         # 2. Check EV threshold
         ev = float(analysis.get("expected_value", 0))
         model_p = float(analysis.get("model_probability", 0))

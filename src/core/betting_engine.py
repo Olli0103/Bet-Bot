@@ -10,7 +10,7 @@ from src.core.betting_math import (
     kelly_fraction,
     kelly_stake,
 )
-from src.core.risk_guards import apply_stake_cap, explain_signal, passes_confidence_gate
+from src.core.risk_guards import apply_stake_cap, check_data_source_health, explain_signal, passes_confidence_gate
 from src.models.betting import BetSignal, ComboBet, ComboLeg
 
 log = logging.getLogger(__name__)
@@ -39,9 +39,27 @@ class BettingEngine:
         kf_raw = kelly_fraction(model_probability, bookmaker_odds, frac=kelly_frac, tax_rate=tax_rate)
         stake_raw = round(kelly_stake(self.bankroll, kf_raw), 2)
 
+        # --- Data source health gate ---
+        source_ok, source_reason = check_data_source_health()
+        rejected_reason = ""
+        if not source_ok:
+            rejected_reason = f"data_source_offline: {source_reason}"
+            log.warning("Data source gate blocked signal: %s %s — %s",
+                        sport, selection, rejected_reason)
+            return BetSignal(
+                sport=sport, event_id=event_id, market=market,
+                selection=selection, bookmaker_odds=bookmaker_odds,
+                model_probability=model_probability, expected_value=ev,
+                kelly_fraction=0.0, recommended_stake=0.0,
+                source_mode=source_mode, reference_book=reference_book,
+                source_quality=source_quality, confidence=model_probability,
+                kelly_raw=kf_raw, stake_before_cap=stake_raw,
+                stake_cap_applied=False, trigger=trigger,
+                rejected_reason=rejected_reason, explanation="",
+            )
+
         # --- Confidence gate (uses model_probability as THE confidence) ---
         passed, min_conf = passes_confidence_gate(model_probability, sport, market)
-        rejected_reason = ""
         if not passed:
             rejected_reason = (
                 f"reject_confidence_below_min: "
@@ -107,10 +125,10 @@ class BettingEngine:
         """Compute a correlation penalty based on intra-event leg overlap.
 
         Legs from *different* events are assumed independent (penalty = 1.0).
-        Legs sharing the same ``event_id`` (e.g. "Team A to win" + "Over 2.5
-        goals" in the same match) are correlated, so a per-pair penalty of
-        0.90 is applied multiplicatively.  This replaces the old flat 10%
-        penalty that was applied regardless of leg independence.
+        Legs sharing the same ``event_id`` (same-game parlay) are heavily
+        correlated — multiplying independent probabilities drastically
+        overestimates the combined EV.  A per-pair penalty of 0.80 is
+        applied multiplicatively to compensate.
         """
         from collections import Counter
         event_counts = Counter(leg.event_id for leg in combo_legs)
@@ -120,8 +138,16 @@ class BettingEngine:
         )
         if correlated_pairs == 0:
             return 1.0
-        # Apply 0.90 per correlated pair (multiplicative)
-        return 0.90 ** correlated_pairs
+        # Warn on same-game parlays — they should normally be blocked upstream
+        for eid, cnt in event_counts.items():
+            if cnt > 1:
+                log.warning(
+                    "Same-game parlay detected: %d legs share event_id=%s "
+                    "(correlation penalty applied)", cnt, eid,
+                )
+        # 0.80 per correlated pair (stronger than previous 0.90 to reflect
+        # high intra-match correlation, e.g. "Home Win" + "Over 2.5")
+        return 0.80 ** correlated_pairs
 
     def build_combo(
         self,

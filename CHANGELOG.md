@@ -1,5 +1,55 @@
 # Changelog
 
+## [2026-03-04] Production Hardening: Feature Pruning, Drawdown Protection, Source Gates
+
+### ML: Permutation-importance feature pruning
+
+Two-pass training in `ml_trainer.py`: after the initial XGBoost fit, compute
+permutation importance on the holdout set.  Features with zero or negative
+impact on Brier score are pruned, and the model is retrained on the reduced
+feature set.  The pruned model is only promoted if it matches or beats the
+original.  More aggressive pruning for small datasets (< 3000 samples)
+to reduce overfitting.
+
+### ML: NaN spike detection
+
+`_clean_frame()` now logs warnings when any feature exceeds 10% NaN rate
+(50%+ triggers a higher-severity warning).  Catches upstream schema changes
+or data source outages before they silently degrade the model.
+
+### Financial: Same-game parlay guard hardened
+
+`_compute_correlation_penalty()` in `betting_engine.py` increased from 0.90
+to 0.80 per correlated pair.  Logs explicit warnings when same-game parlays
+are detected.  The combo optimizer already blocks same-event legs via
+`no_same_event=True`; this is a defense-in-depth fallback.
+
+### Financial: Drawdown circuit breaker
+
+New `_check_drawdown()` in `performance_monitor.py`: trips when 7-day PnL
+loss exceeds 10% of bankroll.  Catches multi-day losing runs that individual
+breakers (daily cap, streak) might miss.  Halves Kelly multiplier and raises
+min EV threshold when active.
+
+### Architecture: Data source health gate
+
+New `check_data_source_health()` in `risk_guards.py`: if the Odds API circuit
+breaker is open, all new bets are automatically blocked.  Integrated into both
+`BettingEngine.make_signal()` and `ExecutionerAgent.execute()`.  The bot won't
+bet blind when its primary data source is down.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `src/core/ml_trainer.py` | `_compute_feature_importance()`, `_prune_noisy_features()`, NaN spike detection, `_train_xgboost()` returns 3-tuple |
+| `src/core/betting_engine.py` | Same-game parlay penalty 0.90→0.80, data source health gate in `make_signal()` |
+| `src/core/risk_guards.py` | `check_data_source_health()` with critical source list |
+| `src/core/performance_monitor.py` | `_check_drawdown()`, drawdown in `check_circuit_breakers()` and `get_adjustment_factors()` |
+| `src/agents/executioner_agent.py` | Drawdown + data source gates in `execute()` |
+
+---
+
 ## [2026-03-04] Signal Explanations + API Health Monitoring
 
 ### Signal explanations: historical accuracy from reliability bins

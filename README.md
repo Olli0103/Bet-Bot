@@ -650,9 +650,13 @@ Kombi-Grossen:
 | `goals_scored_avg` | Average goals scored per match |
 | `goals_conceded_avg` | Average goals conceded per match |
 
-- Weekly automatic retraining with post-training validation (Brier score, calibration check, feature importance audit)
+- Weekly automatic retraining with Champion/Challenger gating (challenger must beat champion's log loss)
+- Data-driven retraining: auto-triggers when 500+ new graded bets accumulate
+- **Permutation-importance feature pruning**: two-pass training drops noisy features, retrains, only promotes if Brier score doesn't regress
+- **NaN spike detection**: warns when feature NaN rates exceed 10% (catches upstream schema changes)
 - **Reliability diagrams**: per-bucket actual-vs-predicted calibration with automatic Kelly adjustment multipliers
 - Temporal ordering enforced in training queries to prevent data leakage in TimeSeriesSplit
+- **Semantically correct defaults**: `FEATURE_DEFAULTS` dict provides neutral values (e.g. `elo_expected=0.5`, not `0.0`) for missing features
 
 ### Sport Group Mapping
 
@@ -750,13 +754,56 @@ The bot uses a multi-agent architecture with **adaptive polling**:
 - **Async-Safe Sync Wrappers** -- All API fetchers use `_safe_sync_run()` which detects a running event loop and offloads to a `ThreadPoolExecutor`.
 - **Non-Blocking DB Calls** -- All database operations in Telegram handlers are wrapped in `asyncio.to_thread()`.
 
+### Risk Guards
+
+Central module (`risk_guards.py`) enforced in both `BettingEngine.make_signal()` and `ExecutionerAgent.execute()`:
+
+**Confidence Gate** -- Hard-blocks signals below a per-sport/market minimum `model_probability`:
+
+| Sport / Market | Min model_probability |
+|---|---|
+| Soccer H2H | 0.55 |
+| Soccer Totals / Spread | 0.56 |
+| Tennis | 0.57 |
+| Basketball / Ice Hockey / NFL | 0.55 |
+| Default | 0.55 |
+
+Steam moves and other triggers cannot override the gate.
+
+**Stake Caps** -- Prevents Kelly from over-sizing:
+
+| Cap | Applies When | Default |
+|---|---|---|
+| General | Always | 1.5% of bankroll |
+| Draw / Longshot | odds >= 3.5 OR selection contains "Draw" | 0.75% of bankroll |
+
+**Data Source Health Gate** -- If the Odds API circuit breaker is open, all new signals are blocked automatically. The bot won't generate bets while flying blind.
+
+**Signal Explanations** -- Every accepted signal includes a German-language explanation with edge size, model confidence tier, key drivers (steam, momentum, public bias), historical accuracy from reliability bins, and calibration warnings.
+
+### ML Feature Pruning
+
+During training, a two-pass strategy reduces overfitting on small datasets:
+
+1. Train XGBoost on all active features
+2. Compute permutation importance on the holdout set
+3. Prune features with zero or negative impact on Brier score (stricter threshold for datasets < 3000 samples)
+4. Retrain on the pruned feature set
+5. Only promote the pruned model if Brier score doesn't regress
+
+Feature importance and pruning decisions are stored in the model's `metrics` dict.
+
+**NaN Spike Detection** -- `_clean_frame()` logs warnings when any feature exceeds 10% NaN rate (50%+ = higher severity), catching upstream schema changes or data source failures before they silently corrupt training.
+
 ### Circuit Breakers
 
 | Breaker | Trigger | Action |
 |---------|---------|--------|
 | Losing streak | 7+ consecutive losses | Kelly x0.5, min EV raised to 0.02 |
 | Daily loss limit | > 5% of bankroll lost today | Kelly x0.5, min EV raised to 0.02 |
+| Drawdown | 7-day PnL loss > 10% of bankroll | Kelly x0.5, min EV raised to 0.02 |
 | Model degradation | Hit rate < 40% over 14 days | Kelly x0.7, min EV raised to 0.015 |
+| Data source offline | Odds API circuit breaker open | All betting halted |
 
 ### Backtesting
 
@@ -796,6 +843,19 @@ All settings are loaded from environment variables (`.env` file) via `src/core/s
 | `FOOTBALL_DATA_API_KEY` | -- | No | football-data.org API key (free tier) |
 | `STATS_INGESTION_ENABLED` | `true` | No | Enable/disable stats ingestion pipeline |
 | `STATS_INGESTION_INTERVAL_HOURS` | `6` | No | How often stats ingestion runs |
+| **Risk Guards** | | | |
+| `MIN_CONF_SOCCER_H2H` | `0.55` | No | Min model_probability for soccer H2H bets |
+| `MIN_CONF_SOCCER_TOTALS` | `0.56` | No | Min model_probability for soccer totals |
+| `MIN_CONF_SOCCER_SPREAD` | `0.56` | No | Min model_probability for soccer spreads |
+| `MIN_CONF_TENNIS` | `0.57` | No | Min model_probability for tennis |
+| `MIN_CONF_BASKETBALL` | `0.55` | No | Min model_probability for basketball |
+| `MIN_CONF_ICEHOCKEY` | `0.55` | No | Min model_probability for ice hockey |
+| `MIN_CONF_AMERICANFOOTBALL` | `0.55` | No | Min model_probability for NFL |
+| `MIN_CONF_DEFAULT` | `0.55` | No | Fallback min model_probability |
+| `MAX_STAKE_PCT` | `0.015` | No | Max stake as fraction of bankroll (1.5%) |
+| `MAX_STAKE_LONGSHOT_PCT` | `0.0075` | No | Max stake for draws/longshots (0.75%) |
+| `LONGSHOT_ODDS_THRESHOLD` | `3.5` | No | Odds >= this trigger longshot cap |
+| `MIN_COMBO_LEG_CONFIDENCE` | `0.40` | No | Min model_probability per combo leg |
 
 ---
 
@@ -863,17 +923,32 @@ All settings are loaded from environment variables (`.env` file) via `src/core/s
 
 ## Scheduled Jobs
 
+### Daily (Berlin time)
+
 | Time | Job | Description |
 |------|-----|-------------|
-| 06:30 | Morning briefing | Notification that signals are ready |
-| 07:00 | Data fetch + push | Fetch odds, build signals, push to Telegram |
-| 13:00 | Data fetch | Afternoon odds refresh |
+| 06:00 | Morning briefing | Fetch daily schedule (1 API call/sport), build initial signals |
+| 07:00 | Daily push | Push top singles + combos to Telegram |
 | 20:00 | Learning status | Win/loss stats and PnL summary |
 | 20:05 | API health check | Status of all external API connections |
 | 22:00 | Daily performance | Full performance report with circuit breaker status |
-| 03:15 (Sat) | Weekly retrain | Retrain all XGBoost models on latest data |
-| 60s / 5 min | Agent cycle | Scout/Analyst/Executioner (adaptive: fast pre-kickoff) |
+
+### Weekly
+
+| Time | Job | Description |
+|------|-----|-------------|
+| 03:15 (Sat) | Weekly retrain | Retrain all XGBoost models with Champion/Challenger gating |
+
+### Recurring
+
+| Interval | Job | Description |
+|----------|-----|-------------|
+| Every 60s | JIT signal fetch | Targeted fetch for events kicking off within 75 min (only relevant sports) |
+| Every 30s | CLV snapshot | Log Pinnacle closing lines for events at kickoff (T-1 to T+3 min) |
+| Every 5 min | Agent cycle | Scout/Analyst/Executioner (reads from cache, no API calls) |
+| Every 5 min | Source health check | Push summary to Telegram if any data source is degraded/open |
 | Every 30 min | Auto-grading | Settle open bets against API results |
+| After grading | Data-driven retrain | Trigger retraining when 500+ new graded bets accumulate |
 
 ---
 
@@ -896,10 +971,13 @@ Bet-Bot/
 │   │   ├── handlers.py                 # UI handlers, settings dashboard, NLP routing
 │   │   └── __main__.py                 # python -m src.bot entry point
 │   ├── core/
+│   │   ├── api_health.py              # Daily API connectivity check
+│   │   ├── autograding.py             # Settle open bets against results
 │   │   ├── backtester.py               # Walk-forward backtesting engine
 │   │   ├── bankroll.py                 # Dynamic bankroll management from DB
 │   │   ├── betting_engine.py           # Signal generation & combo building
 │   │   ├── betting_math.py             # EV, Kelly criterion, tax-adjusted math
+│   │   ├── clv_logger.py              # Closing line value logging at kickoff
 │   │   ├── combo_optimizer.py          # Constraint-based combo construction
 │   │   ├── correlation.py              # Pairwise correlation penalties
 │   │   ├── dynamic_settings.py         # Redis-backed dynamic settings (Telegram toggles)
@@ -908,12 +986,14 @@ Bet-Bot/
 │   │   ├── feature_engineering.py      # 34 feature builder (core + stats-based)
 │   │   ├── form_tracker.py             # Redis-backed last-5-games form
 │   │   ├── ghost_trading.py            # Virtual bet placement
-│   │   ├── h2h_tracker.py              # Head-to-head history tracker
+│   │   ├── h2h_tracker.py              # Head-to-head history (TeamMatchStats primary)
+│   │   ├── learning_monitor.py        # Win/loss tracking and PnL health
 │   │   ├── live_feed.py                # Main signal pipeline (DC/DNB, momentum)
 │   │   ├── ml_trainer.py               # XGBoost training with calibration
 │   │   ├── performance_monitor.py      # ROI tracking & circuit breakers
 │   │   ├── poisson_model.py            # Poisson goal model (0.5/1.5/2.5/3.5)
 │   │   ├── pricing_model.py            # True probability estimation (XGBoost)
+│   │   ├── risk_guards.py             # Confidence gates, stake caps, data source gate
 │   │   ├── settings.py                 # Configuration from environment
 │   │   ├── source_health.py            # Per-source circuit breakers & health reports
 │   │   ├── sport_mapping.py            # Central sport/league registry (25+ leagues)
@@ -1073,6 +1153,42 @@ Make sure your CSV has a `game_id` column for formats 1 and 2.
 ### NBA lowercase columns (`home`, `away`, `score_home`, `score_away`)
 
 Supported. The NBA importer recognizes both camelCase (`HomeTeam`) and lowercase (`home`, `score_home`) column names.
+
+### Bets not appearing (confidence gate rejection)
+
+If signals are generated but have `recommended_stake=0`, they were blocked by the confidence gate. Check the logs for:
+```
+Confidence gate blocked: soccer_epl <event_id> <selection> — reject_confidence_below_min: model_prob=0.48 < gate=0.55
+```
+
+Lower the gate via env vars (e.g. `MIN_CONF_SOCCER_H2H=0.50`) or wait for the model to improve with more training data.
+
+### Data source circuit breaker tripped
+
+When a data source fails repeatedly, the circuit breaker trips and you'll see a Telegram alert:
+```
+🔴 Circuit Breaker: The Odds API
+5 aufeinanderfolgende Fehler — Quelle pausiert (300s Cooldown).
+```
+
+If the Odds API is down, **all betting is automatically paused** (data source health gate). Check source status:
+```bash
+python -c "from src.core.source_health import get_health_report; print(get_health_report())"
+```
+
+The breaker auto-recovers after the cooldown period. Manual reset:
+```bash
+python -c "from src.core.source_health import record_success; record_success('odds_api')"
+```
+
+### Drawdown circuit breaker halting bets
+
+If the 7-day PnL loss exceeds 10% of bankroll, the drawdown breaker trips and halves all Kelly multipliers. Check status:
+```bash
+python -c "from src.core.performance_monitor import PerformanceMonitor; m = PerformanceMonitor(); print(m.check_circuit_breakers())"
+```
+
+The breaker auto-resets when the 7-day PnL recovers. The bot continues generating signals but with reduced stakes.
 
 ### Redis connection refused
 

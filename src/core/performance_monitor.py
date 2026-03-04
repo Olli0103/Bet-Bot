@@ -66,6 +66,7 @@ class PerformanceMonitor:
             "losing_streak": self._check_losing_streak(threshold=7),
             "daily_loss_limit": self._check_daily_loss(max_pct=0.05),
             "model_degradation": self._check_model_degradation(),
+            "drawdown": self._check_drawdown(max_pct=0.10, lookback_days=7),
         }
 
     def get_adjustment_factors(self) -> Dict[str, float]:
@@ -75,6 +76,9 @@ class PerformanceMonitor:
 
         # If any breaker is tripped, reduce aggressiveness
         if breakers.get("losing_streak") or breakers.get("daily_loss_limit"):
+            return {"kelly_multiplier": 0.5, "min_ev": 0.02, "active": True}
+
+        if breakers.get("drawdown"):
             return {"kelly_multiplier": 0.5, "min_ev": 0.02, "active": True}
 
         if breakers.get("model_degradation"):
@@ -127,6 +131,19 @@ class PerformanceMonitor:
             return False
         # If hit rate is below 40% over 14 days, model might be degraded
         return perf["hit_rate"] < 0.40
+
+    def _check_drawdown(self, max_pct: float = 0.10, lookback_days: int = 7) -> bool:
+        """Return True if rolling PnL drawdown exceeds max_pct of bankroll.
+
+        Protects against multi-day losing runs that individual circuit
+        breakers (streak, daily cap) might miss — e.g. 4 consecutive days
+        of -2% each would not trigger the daily -5% cap but totals -8%.
+        """
+        perf = self.get_recent_performance(days=lookback_days)
+        if perf["bets"] < 5:
+            return False
+        bankroll = settings.initial_bankroll
+        return perf["total_pnl"] < -(bankroll * max_pct)
 
     def generate_report(self) -> str:
         """Generate a performance summary for Telegram."""
