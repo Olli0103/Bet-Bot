@@ -303,16 +303,25 @@ def _run_auto_grading():
 
 
 def _run_learning_status():
-    from src.core.learning_monitor import learning_health
+    from src.core.learning_monitor import learning_health, paper_learning_health
     try:
-        h = learning_health()
-        push_outbox("text", {
-            "text": (
-                f"🧠 Learning Check\n"
-                f"Total: {h['total']} | Settled: {h['settled']} | Open: {h['open']}\n"
-                f"W/L: {h['wins']}/{h['losses']} | Hit: {h['hit_rate_pct']}% | PnL: {h['pnl']:.2f} EUR"
+        h = learning_health(live_only=True)
+        lines = [
+            "🧠 Learning Check (Live Bets)",
+            f"Total: {h['total']} | Settled: {h['settled']} | Open: {h['open']}",
+            f"W/L: {h['wins']}/{h['losses']} | Hit: {h['hit_rate_pct']}% | PnL: {h['pnl']:.2f} EUR",
+        ]
+        # Paper signal stats
+        try:
+            ph = paper_learning_health()
+            lines.append(
+                f"📄 Paper: {ph['total_paper']} total "
+                f"({ph['playable']} playable, {ph['paper_only']} paper-only) | "
+                f"Graded: {ph['settled']}"
             )
-        }, target="broadcast")
+        except Exception:
+            pass
+        push_outbox("text", {"text": "\n".join(lines)}, target="broadcast")
     except Exception as exc:
         log.error("Learning status failed: %s", exc)
 

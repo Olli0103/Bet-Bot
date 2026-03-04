@@ -82,5 +82,14 @@ class Settings(BaseModel):
     min_ev_degradation: float = float(os.getenv("MIN_EV_DEGRADATION", "0.015"))
     min_ev_good_run: float = float(os.getenv("MIN_EV_GOOD_RUN", "0.005"))
 
+    # Signal modes: Trading vs Learning
+    learning_capture_all_signals: bool = os.getenv("LEARNING_CAPTURE_ALL_SIGNALS", "true").lower() == "true"
+    allow_watchlist_signals: bool = os.getenv("ALLOW_WATCHLIST_SIGNALS", "true").lower() == "true"
+
+    # Fetch scheduler
+    fetch_min_delay_ms: int = int(os.getenv("FETCH_MIN_DELAY_MS", "800"))
+    fetch_max_delay_ms: int = int(os.getenv("FETCH_MAX_DELAY_MS", "1500"))
+    fetch_max_retries: int = int(os.getenv("FETCH_MAX_RETRIES", "3"))
+
 
 settings = Settings()

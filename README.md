@@ -801,10 +801,10 @@ Feature importance and pruning decisions are stored in the model's `metrics` dic
 
 | Breaker | Trigger | Action |
 |---------|---------|--------|
-| Losing streak | 7+ consecutive losses | Kelly x0.5, min EV raised to 0.02 |
-| Daily loss limit | > 5% of bankroll lost today | Kelly x0.5, min EV raised to 0.02 |
-| Drawdown | 7-day PnL loss > 10% of bankroll | Kelly x0.5, min EV raised to 0.02 |
-| Model degradation | Hit rate < 40% over 14 days | Kelly x0.7, min EV raised to 0.015 |
+| Losing streak | 7+ consecutive losses | Kelly x0.5, min EV raised (`MIN_EV_LOSING_STREAK`, default 0.02) |
+| Daily loss limit | > 5% of bankroll lost today | Kelly x0.5, min EV raised (`MIN_EV_LOSING_STREAK`) |
+| Drawdown | 7-day PnL loss > 10% of bankroll | Kelly x0.5, min EV raised (`MIN_EV_DRAWDOWN`, default 0.02) |
+| Model degradation | Hit rate < 40% over 14 days | Kelly x0.7, min EV raised (`MIN_EV_DEGRADATION`, default 0.015) |
 | Data source offline | Odds API circuit breaker open | All betting halted |
 
 ### Backtesting
@@ -864,6 +864,13 @@ All settings are loaded from environment variables (`.env` file) via `src/core/s
 | `MAX_STAKE_LONGSHOT_PCT` | `0.0075` | No | Max stake for draws/longshots (0.75%) |
 | `LONGSHOT_ODDS_THRESHOLD` | `3.5` | No | Odds >= this trigger longshot cap |
 | `MIN_COMBO_LEG_CONFIDENCE` | `0.40` | No | Min model_probability per combo leg |
+| **Signal Modes / Learning** | | | |
+| `LEARNING_CAPTURE_ALL_SIGNALS` | `true` | No | Capture all signal candidates as paper records for learning |
+| `ALLOW_WATCHLIST_SIGNALS` | `true` | No | Include watchlist/paper-only signals in output |
+| **Fetch Scheduler** | | | |
+| `FETCH_MIN_DELAY_MS` | `800` | No | Min delay between sequential odds API requests (ms) |
+| `FETCH_MAX_DELAY_MS` | `1500` | No | Max delay between sequential odds API requests (ms) |
+| `FETCH_MAX_RETRIES` | `3` | No | Max retries per sport key on 429/5xx errors |
 
 ---
 
