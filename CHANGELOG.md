@@ -1,34 +1,40 @@
 # Changelog
 
+## [2026-03-04] ML Feature Pipeline Fix — All Audit Issues Resolved
+
+### Critical fix: 29/35 features were training on zeros
+
+Only 6 of 35 XGBoost features were persisted to the `PlacedBet` table.
+All 29 Phase 2-4 features were computed at signal time but never stored,
+causing the model to train on ~83% zero-variance data.
+
+### All fixes applied
+
+| Priority | Fix | File |
+|----------|-----|------|
+| P0 | Persist all features via `meta_features` JSONB | `ghost_trading.py` |
+| P0 | Unpack `meta_features` in `_clean_frame()` | `ml_trainer.py` |
+| P1 | `FEATURE_DEFAULTS` dict with correct neutral values | `ml_trainer.py` |
+| P1 | Form tracking from TeamMatchStats (breaks circular dep) | `form_tracker.py` |
+| P1 | H2H stats from TeamMatchStats (breaks circular dep) | `h2h_tracker.py` |
+| P2 | Auto-compute + persist Phase 4 stats snapshots | `live_feed.py` |
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `src/core/ghost_trading.py` | Write full feature dict to `meta_features` JSONB in both `auto_place_virtual_bets()` and `place_virtual_bet()` |
+| `src/core/ml_trainer.py` | Unpack `meta_features` JSONB in `_clean_frame()`; add `FEATURE_DEFAULTS` dict for semantically correct neutral values |
+| `src/core/form_tracker.py` | Primary source changed to TeamMatchStats; Redis sliding window is now fallback only |
+| `src/core/h2h_tracker.py` | Primary source changed to TeamMatchStats; returns 0.5 (neutral) when no data |
+| `src/core/live_feed.py` | Auto-compute + persist `EventStatsSnapshot` via `compute_team_snapshot()` when no snapshot exists |
+| `ML_FEATURE_AUDIT.md` | Updated with fix status |
+
+---
+
 ## [2026-03-04] ML Feature Health Check — Audit Report
 
-### Critical Finding: 29/35 features train on zeros
-
-Only 6 of 35 XGBoost features are persisted to the `PlacedBet` table via
-`ghost_trading.py`. The remaining 29 features (Phase 2-4) are correctly computed
-at signal time but never written to the database. When `ml_trainer.py` reads via
-`pd.read_sql()`, `_clean_frame()` creates missing columns as `0.0`, causing the
-model to train on ~83% zero-variance data.
-
-### Deliverable
-
-- **`ML_FEATURE_AUDIT.md`** — Full audit report with:
-  - Data coverage tables per feature (DB column, write path, null rate, variance)
-  - Preprocessing chain walkthrough with exact file:line references
-  - Leakage/timing verification (CLV removed, temporal split correct)
-  - Root-cause classification (A=empty, B=constant, C=circular, D=redundant)
-  - Prioritized KEEP/FIX/DROP action plan (P0-P3)
-  - Architecture diagram showing signal-time vs training-time data flow
-
-### Key recommendations
-
-| Priority | Action |
-|----------|--------|
-| P0 | Persist all features via `meta_features` JSONB in `ghost_trading.py` |
-| P0 | Unpack `meta_features` JSONB in `ml_trainer.py::_clean_frame()` |
-| P1 | Use `FEATURE_DEFAULTS` dict instead of blanket `0.0` for missing features |
-| P1 | Decouple `form_winrate_l5` and `h2h_home_winrate` from PlacedBet (circular) |
-| P2 | Wire Phase 4 stats pipeline into feature dict in `live_feed.py` |
+See `ML_FEATURE_AUDIT.md` for full audit details.
 
 ---
 

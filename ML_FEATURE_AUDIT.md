@@ -1,6 +1,6 @@
 # ML Feature Health Check — Audit Report
 
-**Datum:** 2026-03-04
+**Datum:** 2026-03-04 (Audit) | 2026-03-04 (Fixes applied)
 **Scope:** Alle 35 XGBoost-Features + 1 Soccer-Extra (`poisson_true_prob`)
 **Methode:** Statische Code-Analyse des gesamten Feature-Datenpipeline-Pfads
 
@@ -8,16 +8,26 @@
 
 ## Executive Summary
 
-**Kritischer Befund:** Nur **6 von 35 Features** werden in der PlacedBet-Tabelle persistiert.
-Die restlichen 29 Features werden zur Signalzeit korrekt berechnet, aber **nie in die Datenbank
-geschrieben**. Beim Training liest `ml_trainer.py` via `pd.read_sql()` — dort fehlen 29 Spalten.
-`_clean_frame()` (Zeile 144-146) erzeugt diese als `0.0`. Das Modell trainiert auf **~83% Nullen**.
+**Kritischer Befund (BEHOBEN):** Nur **6 von 35 Features** wurden in der PlacedBet-Tabelle persistiert.
+Die restlichen 29 Features wurden zur Signalzeit korrekt berechnet, aber **nie in die Datenbank
+geschrieben**.
+
+### Fixes Applied
+
+| Fix | Datei | Status |
+|-----|-------|--------|
+| P0: Alle Features via `meta_features` JSONB persistieren | `ghost_trading.py` | **DONE** |
+| P0: `meta_features` JSONB beim Laden auspacken | `ml_trainer.py` | **DONE** |
+| P1: `FEATURE_DEFAULTS` statt pauschal 0.0 | `ml_trainer.py` | **DONE** |
+| P1: Form-Tracking aus TeamMatchStats statt PlacedBet | `form_tracker.py` | **DONE** |
+| P1: H2H aus TeamMatchStats statt PlacedBet | `h2h_tracker.py` | **DONE** |
+| P2: Phase 4 Stats Pipeline anbinden (compute+save) | `live_feed.py` | **DONE** |
 
 | Kategorie | Anzahl | Status |
 |-----------|--------|--------|
 | Korrekt persistiert & nutzbar | 4 | `sharp_implied_prob`, `sharp_vig`, `sentiment_delta`, `injury_delta` |
-| Persistiert aber problematisch | 2 | `form_winrate_l5` (zirkulär), `form_games_l5` (zirkulär) |
-| Nie persistiert → trainiert auf 0.0 | 29 | Alle Phase 2-4 Features |
+| Persistiert aber problematisch | 2 | `form_winrate_l5` (zirkulär → **FIXED**), `form_games_l5` (zirkulär → **FIXED**) |
+| Nie persistiert → trainiert auf 0.0 | 29 | Alle Phase 2-4 Features → **FIXED via meta_features JSONB** |
 
 ---
 

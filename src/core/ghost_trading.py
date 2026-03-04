@@ -10,6 +10,14 @@ from src.data.models import PlacedBet
 log = logging.getLogger(__name__)
 
 
+def _safe_meta(feat: dict) -> dict:
+    """Return a JSON-safe copy of the feature dict for JSONB storage."""
+    if not feat:
+        return {}
+    return {k: float(v) if isinstance(v, (int, float)) else v
+            for k, v in feat.items()}
+
+
 def auto_place_virtual_bets(signals: list, features_dict: dict):
     """Auto-place virtual bets for positive EV signals.
 
@@ -47,6 +55,8 @@ def auto_place_virtual_bets(signals: list, features_dict: dict):
                     sharp_vig=float(feat.get("sharp_vig", 0.0)),
                     sentiment_delta=float(feat.get("sentiment_delta", 0.0)),
                     injury_delta=float(feat.get("injury_delta", 0.0)),
+                    # Persist ALL ML features so the trainer can use them
+                    meta_features=_safe_meta(feat),
                 )
                 db.add(new_bet)
                 placed_count += 1
@@ -90,6 +100,8 @@ def place_virtual_bet(
                 sharp_vig=float(features.get("sharp_vig", 0.0)),
                 sentiment_delta=float(features.get("sentiment_delta", 0.0)),
                 injury_delta=float(features.get("injury_delta", 0.0)),
+                # Persist ALL ML features so the trainer can use them
+                meta_features=_safe_meta(features),
             )
             db.add(new_bet)
             db.commit()

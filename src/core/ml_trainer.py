@@ -96,6 +96,22 @@ LEGACY_FEATURES = [
 
 EPS = 1e-12
 
+# Semantically correct defaults for features that are missing from the DB.
+# Using 0.0 for everything is wrong — e.g. elo_expected=0.0 implies zero
+# chance, when the correct neutral value is 0.5 (no Elo advantage).
+FEATURE_DEFAULTS: Dict[str, float] = {
+    "elo_expected": 0.5,
+    "h2h_home_winrate": 0.5,
+    "home_advantage": 0.5,
+    "time_to_kickoff_hours": 24.0,
+    "team_attack_strength": 1.0,
+    "team_defense_strength": 1.0,
+    "opp_attack_strength": 1.0,
+    "opp_defense_strength": 1.0,
+    "expected_total_proxy": 2.7,  # neutral: 1.0 * 1.0 * 1.35 * 2
+    "form_winrate_l5": 0.5,
+}
+
 # Sport groupings for sport-specific models
 SPORT_GROUPS: Dict[str, str] = {}
 for prefix in ("soccer_", "football_"):
@@ -141,9 +157,24 @@ def _model_path(sport_group: str) -> Path:
 
 def _clean_frame(df: pd.DataFrame, feature_list: List[str]) -> pd.DataFrame:
     out = df.copy()
+
+    # Unpack meta_features JSONB blob — this is where Phase 2-4 features
+    # are stored since they don't have dedicated DB columns.
+    if "meta_features" in out.columns:
+        meta_rows = out["meta_features"].dropna()
+        if len(meta_rows) > 0:
+            meta_df = pd.json_normalize(meta_rows)
+            meta_df.index = meta_rows.index
+            for col in meta_df.columns:
+                if col in feature_list and col not in out.columns:
+                    out[col] = np.nan
+                    out.loc[meta_df.index, col] = pd.to_numeric(
+                        meta_df[col], errors="coerce"
+                    )
+
     for c in feature_list:
         if c not in out.columns:
-            out[c] = 0.0
+            out[c] = FEATURE_DEFAULTS.get(c, 0.0)
     # Convert to numeric but preserve NaN — XGBoost handles missing values
     # natively and will learn the optimal split direction.  Replacing NaN
     # with 0.0 is dangerous because 0 carries semantic meaning for many

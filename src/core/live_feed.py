@@ -428,12 +428,27 @@ def fetch_and_build_signals(
                 poisson_pred = None
 
         # --- Stats-based features from EventStatsSnapshot (Phase 4) ---
+        # Try cached snapshot first; if missing, compute from TeamMatchStats.
         home_snapshot: Dict[str, Any] = {}
         away_snapshot: Dict[str, Any] = {}
         try:
-            from src.core.stats_ingester import get_event_snapshot
+            from src.core.stats_ingester import (
+                get_event_snapshot,
+                compute_team_snapshot,
+                save_event_snapshot,
+            )
             home_snapshot = get_event_snapshot(event_id, home) or {}
             away_snapshot = get_event_snapshot(event_id, away) or {}
+
+            # If no snapshot exists, compute from TeamMatchStats and persist
+            if not home_snapshot:
+                home_snapshot = compute_team_snapshot(home, sport, ct, is_home=True)
+                if home_snapshot.get("matches_played", 0) > 0:
+                    save_event_snapshot(event_id, home, sport, is_home=True, snapshot=home_snapshot)
+            if not away_snapshot:
+                away_snapshot = compute_team_snapshot(away, sport, ct, is_home=False)
+                if away_snapshot.get("matches_played", 0) > 0:
+                    save_event_snapshot(event_id, away, sport, is_home=False, snapshot=away_snapshot)
         except Exception:
             pass
 
