@@ -95,12 +95,13 @@ class EventClosingLine(Base):
 
     __tablename__ = "event_closing_lines"
     __table_args__ = (
-        UniqueConstraint("event_id", "selection", name="uq_closing_event_sel"),
+        UniqueConstraint("event_id", "selection", "market", name="uq_closing_event_sel_mkt"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     event_id = Column(String(128), nullable=False, index=True)
     sport = Column(String(64), nullable=False)
+    market = Column(String(32), nullable=False, default="h2h")
     selection = Column(String(256), nullable=False)
     home_team = Column(String(256), nullable=True)
     away_team = Column(String(256), nullable=True)

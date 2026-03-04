@@ -28,6 +28,38 @@ from urllib.parse import quote, urlencode
 _BASE = "https://sports.tipico.de/de/sports"
 _SEARCH = "https://sports.tipico.de/de/search"
 
+# Odds API returns English names; Tipico's German app uses German names.
+# This mapping covers the most common mismatches where Tipico's search
+# would fail on the English variant.
+_TIPICO_NAMES = {
+    "bayern munich": "Bayern München",
+    "borussia monchengladbach": "Borussia Mönchengladbach",
+    "1. fc koln": "1. FC Köln",
+    "fc koln": "1. FC Köln",
+    "1. fc cologne": "1. FC Köln",
+    "cologne": "1. FC Köln",
+    "1. fc nurnberg": "1. FC Nürnberg",
+    "fc nurnberg": "1. FC Nürnberg",
+    "nuremberg": "1. FC Nürnberg",
+    "fortuna dusseldorf": "Fortuna Düsseldorf",
+    "dusseldorf": "Fortuna Düsseldorf",
+    "ac milan": "AC Mailand",
+    "inter milan": "Inter Mailand",
+    "napoli": "SSC Neapel",
+    "ssc napoli": "SSC Neapel",
+    "juventus": "Juventus Turin",
+    "as roma": "AS Rom",
+    "roma": "AS Rom",
+    "genoa": "CFC Genua",
+    "atletico madrid": "Atlético Madrid",
+    "real betis": "Real Betis Sevilla",
+}
+
+
+def _to_tipico_name(name: str) -> str:
+    """Translate an Odds API team name to Tipico's German search form."""
+    return _TIPICO_NAMES.get(name.lower().strip(), name)
+
 
 def event_link(
     event_id: str,
@@ -40,9 +72,12 @@ def event_link(
     IDs, we build a **search URL** using team names so the user lands
     on a relevant results page.  Falls back to the raw event URL only
     when no team names are provided.
+
+    Team names are translated to German variants where needed (e.g.
+    "Bayern Munich" → "Bayern München") to improve Tipico search hits.
     """
-    # Prefer search-based link when team names are available
-    query = " ".join(filter(None, [home_team, away_team])).strip()
+    parts = [_to_tipico_name(t) for t in [home_team, away_team] if t]
+    query = " ".join(parts).strip()
     if query:
         return f"{_SEARCH}?query={quote(query)}"
     # Fallback: raw event URL (may 404 if ID doesn't match)
@@ -92,8 +127,8 @@ def combo_betslip_link(
         sid = str(leg.get("selection_id", ""))
         if eid and mid and sid:
             options.append(f"{eid}-{mid}-{sid}")
-        elif eid:
-            options.append(eid)
+        # Skip legs without full triple — raw event IDs cause Tipico's
+        # frontend router to silently drop the parameter or error.
     if not options:
         return _BASE
 
