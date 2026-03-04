@@ -180,3 +180,28 @@ def _get_historical_accuracy(
         if low <= model_prob < high:
             return float(info.get("actual", info.get("predicted")))
     return None
+
+
+# ---------------------------------------------------------------------------
+# Data source health gate
+# ---------------------------------------------------------------------------
+
+# Sources that MUST be online for betting to proceed.  Without odds data
+# the model is flying blind and all features degrade to defaults.
+CRITICAL_SOURCES = ["odds_api"]
+
+
+def check_data_source_health() -> Tuple[bool, str]:
+    """Return (healthy, reason).
+
+    If critical data sources (odds_api) are down (circuit breaker open),
+    betting should be paused automatically rather than falling back to
+    stale / default features.
+    """
+    from src.core.source_health import is_available, SOURCE_CONFIG
+
+    for src in CRITICAL_SOURCES:
+        if not is_available(src):
+            label = SOURCE_CONFIG.get(src, {}).get("label", src)
+            return False, f"{label} ist offline — Wetten pausiert"
+    return True, ""

@@ -211,6 +211,23 @@ def _clean_frame(df: pd.DataFrame, feature_list: List[str]) -> pd.DataFrame:
     # means "no injury advantage").
     out[feature_list] = out[feature_list].apply(pd.to_numeric, errors="coerce")
 
+    # NaN spike detection: warn if any feature has an unexpectedly high NaN
+    # rate, which may indicate a schema change or data source failure.
+    if len(out) > 50:
+        for c in feature_list:
+            if c in out.columns:
+                nan_rate = float(out[c].isna().mean())
+                if nan_rate > 0.50:
+                    log.warning(
+                        "Feature '%s' has %.0f%% NaN — possible data source outage",
+                        c, nan_rate * 100,
+                    )
+                elif nan_rate > 0.10:
+                    log.info(
+                        "Feature '%s' has %.0f%% NaN — check upstream pipeline",
+                        c, nan_rate * 100,
+                    )
+
     # Derive sharp_implied_prob from odds when it has near-zero variance
     # (common for raw imported datasets that lack engineered columns).
     # Strip the vig so implied probabilities are not systematically inflated.
@@ -286,7 +303,8 @@ def _train_xgboost(
     X: pd.DataFrame,
     y: pd.Series,
     active_features: List[str],
-) -> Tuple[CalibratedClassifierCV, Dict]:
+    prune_features: bool = True,
+) -> Tuple[CalibratedClassifierCV, Dict, List[str]]:
     """Train XGBoost with isotonic calibration and a strict holdout test set.
 
     The final 20% of the data (chronologically) is held out *before*
@@ -294,6 +312,12 @@ def _train_xgboost(
     regression has never touched the test samples.  This prevents the
     previous data leak where the calibrator's validation folds overlapped
     with the evaluation set.
+
+    When ``prune_features`` is True and the dataset is small (< 3000),
+    a two-pass training strategy is used: train once, compute permutation
+    importance, prune noisy features, retrain on the pruned set.
+
+    Returns (model, metrics, final_active_features).
     """
     X_active = X[active_features].values
     y_vals = y.values
@@ -334,7 +358,73 @@ def _train_xgboost(
     # Evaluate on the strict holdout that the calibrator never saw
     metrics = _evaluate_holdout(calibrated, X_holdout, y_holdout, y_train)
 
-    return calibrated, metrics
+    # --- Feature pruning pass ---
+    final_features = active_features
+    if prune_features and len(X_active) > 50:
+        importance_map = _compute_feature_importance(
+            calibrated, X_holdout, y_holdout, active_features,
+        )
+        metrics["feature_importance"] = importance_map
+
+        kept, pruned = _prune_noisy_features(
+            importance_map, active_features, len(X_active),
+        )
+        if pruned and len(kept) >= 5:
+            log.info(
+                "Feature pruning: dropping %d noisy features: %s",
+                len(pruned), ", ".join(pruned),
+            )
+            # Retrain on pruned feature set
+            final_features = kept
+            kept_idx = [active_features.index(f) for f in kept]
+            X_train_pruned = X_train[:, kept_idx]
+            X_holdout_pruned = X_holdout[:, kept_idx]
+
+            base_model_2 = XGBClassifier(
+                objective="binary:logistic",
+                max_depth=5,
+                learning_rate=0.05,
+                n_estimators=300,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                min_child_weight=3,
+                reg_alpha=0.1,
+                reg_lambda=1.0,
+                use_label_encoder=False,
+                eval_metric="logloss",
+                random_state=42,
+                verbosity=0,
+            )
+            calibrated_2 = CalibratedClassifierCV(
+                estimator=base_model_2,
+                method="isotonic",
+                cv=TimeSeriesSplit(n_splits=n_splits),
+            )
+            calibrated_2.fit(X_train_pruned, y_train)
+            metrics_2 = _evaluate_holdout(
+                calibrated_2, X_holdout_pruned, y_holdout, y_train,
+            )
+
+            # Only use pruned model if it's at least as good
+            brier_1 = metrics.get("brier_score", 1.0)
+            brier_2 = metrics_2.get("brier_score", 1.0)
+            if brier_2 <= brier_1 + 0.005:
+                log.info(
+                    "Pruned model accepted: brier %.4f -> %.4f (%d -> %d features)",
+                    brier_1, brier_2, len(active_features), len(kept),
+                )
+                calibrated = calibrated_2
+                metrics = metrics_2
+                metrics["pruned_features"] = pruned
+                metrics["feature_importance"] = importance_map
+            else:
+                log.info(
+                    "Pruned model rejected: brier %.4f -> %.4f (keeping all features)",
+                    brier_1, brier_2,
+                )
+                final_features = active_features
+
+    return calibrated, metrics, final_features
 
 
 def _evaluate_holdout(
@@ -393,6 +483,82 @@ def _evaluate_holdout(
     return metrics
 
 
+def _compute_feature_importance(
+    model: CalibratedClassifierCV,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    active_features: List[str],
+) -> Dict[str, Dict[str, float]]:
+    """Compute permutation importance on the holdout set.
+
+    Permutation importance measures how much the Brier score degrades
+    when each feature is randomly shuffled.  Features with zero or
+    negative importance are noise that hurts generalisation.
+    """
+    from sklearn.inspection import permutation_importance
+
+    if len(X_test) < 20:
+        return {}
+
+    result = permutation_importance(
+        model, X_test, y_test,
+        n_repeats=10,
+        random_state=42,
+        scoring="neg_brier_score",
+    )
+    importance_map: Dict[str, Dict[str, float]] = {}
+    for i, feat in enumerate(active_features):
+        importance_map[feat] = {
+            "mean": round(float(result.importances_mean[i]), 6),
+            "std": round(float(result.importances_std[i]), 6),
+        }
+    return importance_map
+
+
+def _prune_noisy_features(
+    importance_map: Dict[str, Dict[str, float]],
+    active_features: List[str],
+    n_samples: int,
+    min_importance: float = 0.0,
+) -> Tuple[List[str], List[str]]:
+    """Drop features with zero or negative permutation importance.
+
+    More aggressive pruning for small datasets (< 3000 samples) to
+    reduce overfitting risk.  Always keeps at least 5 features.
+
+    Returns (kept_features, pruned_features).
+    """
+    if not importance_map:
+        return active_features, []
+
+    # Tighter threshold for small datasets
+    threshold = min_importance
+    if n_samples < 3000:
+        threshold = max(threshold, 0.0005)
+
+    kept = []
+    pruned = []
+    for feat in active_features:
+        imp = importance_map.get(feat, {})
+        mean_imp = imp.get("mean", 0.0)
+        if mean_imp <= threshold:
+            pruned.append(feat)
+        else:
+            kept.append(feat)
+
+    # Always keep at least 5 features (sort by importance, keep top 5)
+    if len(kept) < 5 and active_features:
+        ranked = sorted(
+            active_features,
+            key=lambda f: importance_map.get(f, {}).get("mean", 0.0),
+            reverse=True,
+        )
+        kept = ranked[:max(5, len(kept))]
+        pruned = [f for f in active_features if f not in kept]
+
+    return kept, pruned
+
+
 def _validate_model(model, metrics: Dict, active_features: List[str]) -> List[str]:
     """Post-training validation checks."""
     warnings = []
@@ -446,8 +612,8 @@ def auto_train_model(min_samples: int = 500) -> str:
     if not active_features:
         return "Abbruch: Keine Feature-Varianz verfügbar."
 
-    model, metrics = _train_xgboost(X, y, active_features)
-    warnings = _validate_model(model, metrics, active_features)
+    model, metrics, final_features = _train_xgboost(X, y, active_features)
+    warnings = _validate_model(model, metrics, final_features)
 
     for w in warnings:
         log.warning("ML validation (general): %s", w)
@@ -455,19 +621,19 @@ def auto_train_model(min_samples: int = 500) -> str:
     # Save XGBoost model
     model_data = {
         "model": model,
-        "features": active_features,
+        "features": final_features,
         "metrics": metrics,
         "n_samples": len(df),
     }
     joblib.dump(model_data, _model_path("general"))
-    log.info("Saved general model: %d samples, %d features", len(df), len(active_features))
+    log.info("Saved general model: %d samples, %d features", len(df), len(final_features))
 
     # Also save backward-compatible JSON weights (logistic approximation)
-    _save_legacy_weights(df, y, active_features, metrics)
+    _save_legacy_weights(df, y, final_features, metrics)
 
     suffix = f" | Warnungen: {'; '.join(warnings)}" if warnings else ""
     brier_str = f"Brier={metrics.get('brier_score', 'N/A')}"
-    return f"Erfolg: {len(df)} Wetten trainiert. Aktiv: {', '.join(active_features)} | {brier_str}{suffix}"
+    return f"Erfolg: {len(df)} Wetten trainiert. Aktiv: {', '.join(final_features)} | {brier_str}{suffix}"
 
 
 def _champion_challenger(
@@ -538,16 +704,16 @@ def auto_train_all_models(min_samples: int = 2000) -> str:
     active_all = _get_active_features(X_all, FEATURES)
 
     if active_all:
-        model, metrics = _train_xgboost(X_all, y_all, active_all)
-        warnings = _validate_model(model, metrics, active_all)
+        model, metrics, final_features = _train_xgboost(X_all, y_all, active_all)
+        warnings = _validate_model(model, metrics, final_features)
         for w in warnings:
             log.warning("ML validation (general): %s", w)
 
         promoted, reason = _champion_challenger(metrics, "general")
         if promoted:
-            joblib.dump({"model": model, "features": active_all, "metrics": metrics, "n_samples": len(df)}, _model_path("general"))
-            results.append(f"general: PROMOTED ({len(df)} samples, brier={metrics.get('brier_score', 'N/A')})")
-            _save_legacy_weights(df, y_all, active_all, metrics)
+            joblib.dump({"model": model, "features": final_features, "metrics": metrics, "n_samples": len(df)}, _model_path("general"))
+            results.append(f"general: PROMOTED ({len(df)} samples, {len(final_features)} features, brier={metrics.get('brier_score', 'N/A')})")
+            _save_legacy_weights(df, y_all, final_features, metrics)
         else:
             results.append(f"general: REJECTED — {reason}")
         log.info("Champion/Challenger (general): %s", reason)
@@ -579,18 +745,18 @@ def auto_train_all_models(min_samples: int = 2000) -> str:
                 results.append(f"{group}: no feature variance")
                 continue
 
-            model_sport, metrics_sport = _train_xgboost(X_sport, y_sport, active_sport)
-            warnings_sport = _validate_model(model_sport, metrics_sport, active_sport)
+            model_sport, metrics_sport, final_sport = _train_xgboost(X_sport, y_sport, active_sport)
+            warnings_sport = _validate_model(model_sport, metrics_sport, final_sport)
             for w in warnings_sport:
                 log.warning("ML validation (%s): %s", group, w)
 
             promoted, reason = _champion_challenger(metrics_sport, group)
             if promoted:
                 joblib.dump(
-                    {"model": model_sport, "features": active_sport, "metrics": metrics_sport, "n_samples": len(subset)},
+                    {"model": model_sport, "features": final_sport, "metrics": metrics_sport, "n_samples": len(subset)},
                     _model_path(group),
                 )
-                results.append(f"{group}: PROMOTED ({len(subset)} samples, brier={metrics_sport.get('brier_score', 'N/A')})")
+                results.append(f"{group}: PROMOTED ({len(subset)} samples, {len(final_sport)} features, brier={metrics_sport.get('brier_score', 'N/A')})")
             else:
                 results.append(f"{group}: REJECTED — {reason}")
             log.info("Champion/Challenger (%s): %s", group, reason)
