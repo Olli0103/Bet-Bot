@@ -406,8 +406,54 @@ def auto_train_model(min_samples: int = 500) -> str:
     return f"Erfolg: {len(df)} Wetten trainiert. Aktiv: {', '.join(active_features)} | {brier_str}{suffix}"
 
 
+def _champion_challenger(
+    challenger_metrics: Dict,
+    sport_group: str,
+) -> Tuple[bool, str]:
+    """Compare a challenger model against the currently deployed champion.
+
+    The challenger is promoted ONLY if it achieves a strictly better
+    log loss on the holdout set.  This prevents model degradation from
+    anomalous training data or overfitting.
+
+    Returns (promoted: bool, reason: str).
+    """
+    champion_data = load_model(sport_group)
+    if champion_data is None:
+        return True, "no_existing_champion"
+
+    champ_metrics = champion_data.get("metrics", {})
+    champ_ll = champ_metrics.get("log_loss", 999.0)
+    champ_brier = champ_metrics.get("brier_score", 999.0)
+    chall_ll = challenger_metrics.get("log_loss", 999.0)
+    chall_brier = challenger_metrics.get("brier_score", 999.0)
+
+    # Primary gate: log loss must be strictly better
+    if chall_ll < champ_ll:
+        return True, (
+            f"promoted: challenger log_loss={chall_ll:.6f} < champion={champ_ll:.6f} "
+            f"(brier: {chall_brier:.6f} vs {champ_brier:.6f})"
+        )
+
+    # Secondary: if log loss is within 0.001, check Brier
+    if abs(chall_ll - champ_ll) < 0.001 and chall_brier < champ_brier:
+        return True, (
+            f"promoted (brier tiebreak): {chall_brier:.6f} < {champ_brier:.6f}"
+        )
+
+    return False, (
+        f"rejected: challenger log_loss={chall_ll:.6f} >= champion={champ_ll:.6f} "
+        f"(brier: {chall_brier:.6f} vs {champ_brier:.6f})"
+    )
+
+
 def auto_train_all_models(min_samples: int = 2000) -> str:
-    """Train general + sport-specific XGBoost models."""
+    """Train general + sport-specific models with Champion vs Challenger.
+
+    A newly trained model (Challenger) is only promoted to production if
+    it achieves a strictly better log loss than the currently deployed
+    model (Champion) on the holdout set.  This prevents model degradation.
+    """
     MODELS_DIR.mkdir(exist_ok=True)
 
     with SessionLocal() as db:
@@ -422,7 +468,7 @@ def auto_train_all_models(min_samples: int = 2000) -> str:
     df = _clean_frame(df, FEATURES)
     results = []
 
-    # Train general model on all data
+    # --- Train general model ---
     X_all = df[FEATURES]
     y_all = (df["status"] == "won").astype(int)
     active_all = _get_active_features(X_all, FEATURES)
@@ -432,15 +478,20 @@ def auto_train_all_models(min_samples: int = 2000) -> str:
         warnings = _validate_model(model, metrics, active_all)
         for w in warnings:
             log.warning("ML validation (general): %s", w)
-        joblib.dump({"model": model, "features": active_all, "metrics": metrics, "n_samples": len(df)}, _model_path("general"))
-        results.append(f"general: {len(df)} samples, brier={metrics.get('brier_score', 'N/A')}")
-        _save_legacy_weights(df, y_all, active_all, metrics)
 
-    # Train sport-specific models
+        promoted, reason = _champion_challenger(metrics, "general")
+        if promoted:
+            joblib.dump({"model": model, "features": active_all, "metrics": metrics, "n_samples": len(df)}, _model_path("general"))
+            results.append(f"general: PROMOTED ({len(df)} samples, brier={metrics.get('brier_score', 'N/A')})")
+            _save_legacy_weights(df, y_all, active_all, metrics)
+        else:
+            results.append(f"general: REJECTED — {reason}")
+        log.info("Champion/Challenger (general): %s", reason)
+
+    # --- Train sport-specific models ---
     if "sport" in df.columns:
         df["sport_group"] = df["sport"].apply(_get_sport_group)
 
-        # Sport-specific extra features
         sport_extra_map = {
             "soccer": SOCCER_EXTRA_FEATURES,
             "basketball": BASKETBALL_EXTRA_FEATURES,
@@ -452,11 +503,9 @@ def auto_train_all_models(min_samples: int = 2000) -> str:
                 results.append(f"{group}: skipped ({len(subset)} < {min_samples})")
                 continue
 
-            # Combine base features with sport-specific extras
             extra = sport_extra_map.get(group, [])
             sport_features = FEATURES + [f for f in extra if f not in FEATURES]
 
-            # Ensure columns exist
             subset = _clean_frame(subset, sport_features)
             X_sport = subset[sport_features]
             y_sport = (subset["status"] == "won").astype(int)
@@ -471,11 +520,16 @@ def auto_train_all_models(min_samples: int = 2000) -> str:
             for w in warnings_sport:
                 log.warning("ML validation (%s): %s", group, w)
 
-            joblib.dump(
-                {"model": model_sport, "features": active_sport, "metrics": metrics_sport, "n_samples": len(subset)},
-                _model_path(group),
-            )
-            results.append(f"{group}: {len(subset)} samples, brier={metrics_sport.get('brier_score', 'N/A')}")
+            promoted, reason = _champion_challenger(metrics_sport, group)
+            if promoted:
+                joblib.dump(
+                    {"model": model_sport, "features": active_sport, "metrics": metrics_sport, "n_samples": len(subset)},
+                    _model_path(group),
+                )
+                results.append(f"{group}: PROMOTED ({len(subset)} samples, brier={metrics_sport.get('brier_score', 'N/A')})")
+            else:
+                results.append(f"{group}: REJECTED — {reason}")
+            log.info("Champion/Challenger (%s): %s", group, reason)
 
     return " | ".join(results)
 

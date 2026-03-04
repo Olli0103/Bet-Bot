@@ -220,37 +220,12 @@ class AnalystAgent:
             features=ml_features,
         )
 
-        # Dynamic Poisson/XGBoost blending based on xG extremity
-        if poisson_prob is not None and poisson_prob > 0:
-            is_draw = selection == "Draw"
-            home_xg = poisson_pred.get("home_xg", 1.35) if poisson_pred else 1.35
-            away_xg = poisson_pred.get("away_xg", 1.35) if poisson_pred else 1.35
-            xg_diff = abs(home_xg - away_xg)
-            xg_bonus = min(0.15, xg_diff * 0.10)
-
-            if is_draw:
-                poisson_w = min(0.75, 0.60 + xg_bonus)
-            else:
-                poisson_w = min(0.50, 0.30 + xg_bonus)
-            model_p = (1.0 - poisson_w) * model_p + poisson_w * poisson_prob
-
-        # NOTE: market_momentum is already an input feature to XGBoost
-        # (via FeatureEngineer.build_core_features). The model learns its
-        # probabilistic weight natively, so no manual post-hoc adjustment
-        # is applied here — doing so would destroy the calibrated probability.
-
-        # 11. Injury penalty: if key players are confirmed Out for the selected
-        # team, apply a negative confidence adjustment to model_p.
-        # Both penalty values are <= 0 (negative impact scores).
-        sel_injury_penalty = injury_penalty_home if is_home else injury_penalty_away
-        opp_injury_penalty = injury_penalty_away if is_home else injury_penalty_home
-        # Net effect: injuries on selected team hurt (negative), opponent injuries help (positive).
-        # sel_injury_penalty is <= 0 → makes net negative (hurts selected team)
-        # opp_injury_penalty is <= 0 → subtracting it makes net positive (helps selected team)
-        net_injury_effect = sel_injury_penalty - opp_injury_penalty
-        # Apply as a direct probability adjustment (clamped)
-        if abs(net_injury_effect) > 0.01:
-            model_p = max(0.01, min(0.99, model_p + net_injury_effect * 0.50))
+        # NOTE: poisson_true_prob, market_momentum, elo_expected, and
+        # injury_delta are all standard XGBoost input features (via
+        # FeatureEngineer.build_core_features).  The tree ensemble learns
+        # their optimal weights organically per sport — no manual post-hoc
+        # blending is applied here, as doing so would destroy the calibrated
+        # probability output.
 
         # 12. EV calculation
         tax_rate = settings.tipico_tax_rate if not settings.tax_free_mode else 0.0

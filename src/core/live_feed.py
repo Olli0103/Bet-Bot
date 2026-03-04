@@ -571,23 +571,10 @@ def fetch_and_build_signals(
                 features=ml_features,
             )
 
-            # Dynamic Poisson/XGBoost blending based on xG extremity
-            if poisson_prob is not None and poisson_prob > 0:
-                is_draw = selection == "Draw"
-                home_xg = poisson_pred.get("home_xg", 1.35) if poisson_pred else 1.35
-                away_xg = poisson_pred.get("away_xg", 1.35) if poisson_pred else 1.35
-                xg_diff = abs(home_xg - away_xg)
-                xg_bonus = min(0.15, xg_diff * 0.10)
-
-                if is_draw:
-                    poisson_w = min(0.75, 0.60 + xg_bonus)
-                else:
-                    poisson_w = min(0.50, 0.30 + xg_bonus)
-                model_p = (1.0 - poisson_w) * model_p + poisson_w * poisson_prob
-
-            # Momentum adjustment
-            if abs(market_momentum) > 0.005:
-                model_p = max(0.01, min(0.99, model_p + market_momentum * 0.15))
+            # NOTE: poisson_true_prob, market_momentum, elo_expected, and
+            # injury_delta are all standard XGBoost input features.  The tree
+            # ensemble learns their optimal weights organically — no manual
+            # post-hoc blending is applied here.
 
             features[f"{event_id}:{selection}"] = ml_features
 
@@ -715,12 +702,7 @@ def fetch_and_build_signals(
                     point_val = float(parts[1]) if len(parts) > 1 else 0.0
                     sharp_prob_sp = 1.0 / s_odds if s_odds > 1.0 else 0.5
 
-                    # Adjust spreads with momentum for NBA/NFL
-                    sp_momentum = sport_momentum.get(event_id, {}).get(sel_name, sharp_prob_sp)
-                    sp_momentum_delta = sharp_prob_sp - sp_momentum
                     model_p_sp = sharp_prob_sp
-                    if abs(sp_momentum_delta) > 0.005 and sport in ("basketball_nba", "americanfootball_nfl"):
-                        model_p_sp = max(0.01, min(0.99, sharp_prob_sp + sp_momentum_delta * 0.15))
 
                     sig = engine.make_signal(
                         sport=sport,
@@ -765,27 +747,10 @@ def fetch_and_build_signals(
                     point_val = float(parts[1]) if len(parts) > 1 else 2.5
                     sharp_prob_tot = 1.0 / s_odds if s_odds > 1.0 else 0.5
 
-                    # Dynamic Poisson blend for soccer totals — heavy weight (0.70 base)
-                    # Uses expanded Poisson keys: over_0_5, over_1_5, over_2_5, over_3_5
-                    if poisson_pred and sport.startswith("soccer") and sel_name in ("Over", "Under"):
-                        # Map point value to Poisson key
-                        poisson_key_map = {
-                            0.5: ("over_0_5", "under_0_5"),
-                            1.5: ("over_1_5", "under_1_5"),
-                            2.5: ("over_2_5", "under_2_5"),
-                            3.5: ("over_3_5", "under_3_5"),
-                        }
-                        keys = poisson_key_map.get(point_val, ("over_2_5", "under_2_5"))
-                        poisson_key = keys[0] if sel_name == "Over" else keys[1]
-                        poisson_ou = poisson_pred.get(poisson_key, sharp_prob_tot)
-                        total_xg = poisson_pred.get("home_xg", 1.35) + poisson_pred.get("away_xg", 1.35)
-                        xg_dev = abs(total_xg - 2.7)
-                        xg_bonus = min(0.15, xg_dev * 0.10)
-                        # Heavy Poisson weight for totals: base 0.70 (up from 0.60)
-                        poisson_w = min(0.85, 0.70 + xg_bonus)
-                        model_p_tot = (1.0 - poisson_w) * sharp_prob_tot + poisson_w * poisson_ou
-                    else:
-                        model_p_tot = sharp_prob_tot
+                    # For totals, use sharp implied probability as the base.
+                    # Poisson-derived features (over25_rate, expected_total_proxy)
+                    # are available as XGBoost inputs when training a totals model.
+                    model_p_tot = sharp_prob_tot
 
                     sig = engine.make_signal(
                         sport=sport,
