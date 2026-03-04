@@ -22,7 +22,7 @@ HOME_ADVANTAGE: float = 1.2             # multiplicative home boost
 DEFAULT_ATTACK: float = 1.0             # league-average attack strength
 DEFAULT_DEFENSE: float = 1.0            # league-average defense strength
 SCORE_RANGE: int = 7                    # compute P(goals=0..6) per side
-STRENGTH_TTL: int = 30 * 24 * 3600     # 30 days in seconds
+STRENGTH_TTL: int = 180 * 24 * 3600    # 180 days — survives the ~80-day summer break
 LEARNING_RATE: float = 0.05            # how fast strengths move per result
 
 

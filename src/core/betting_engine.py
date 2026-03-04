@@ -88,6 +88,27 @@ class BettingEngine:
             rejected_reason=rejected_reason,
         )
 
+    @staticmethod
+    def _compute_correlation_penalty(combo_legs: List[ComboLeg]) -> float:
+        """Compute a correlation penalty based on intra-event leg overlap.
+
+        Legs from *different* events are assumed independent (penalty = 1.0).
+        Legs sharing the same ``event_id`` (e.g. "Team A to win" + "Over 2.5
+        goals" in the same match) are correlated, so a per-pair penalty of
+        0.90 is applied multiplicatively.  This replaces the old flat 10%
+        penalty that was applied regardless of leg independence.
+        """
+        from collections import Counter
+        event_counts = Counter(leg.event_id for leg in combo_legs)
+        # Number of intra-event pairs that share a match
+        correlated_pairs = sum(
+            n * (n - 1) // 2 for n in event_counts.values() if n > 1
+        )
+        if correlated_pairs == 0:
+            return 1.0
+        # Apply 0.90 per correlated pair (multiplicative)
+        return 0.90 ** correlated_pairs
+
     def build_combo(
         self,
         legs: List[Dict],
@@ -112,7 +133,9 @@ class BettingEngine:
 
         odds = combo_odds(l.odds for l in combo_legs)
         p_independent = combo_probability(l.probability for l in combo_legs)
-        p_adjusted = p_independent * correlation_penalty
+        # Use event-aware correlation instead of flat penalty
+        effective_penalty = self._compute_correlation_penalty(combo_legs)
+        p_adjusted = p_independent * effective_penalty
 
         ev = expected_value(p_adjusted, odds, tax_rate=tax_rate)
         kf = kelly_fraction(p_adjusted, odds, frac=kelly_frac, tax_rate=tax_rate)
@@ -122,7 +145,7 @@ class BettingEngine:
             legs=combo_legs,
             combined_odds=odds,
             combined_probability=p_adjusted,
-            correlation_penalty=correlation_penalty,
+            correlation_penalty=effective_penalty,
             expected_value=ev,
             kelly_fraction=kf,
             recommended_stake=stake,
