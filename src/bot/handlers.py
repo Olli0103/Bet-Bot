@@ -689,6 +689,15 @@ def _format_combo_card(combo_data: dict) -> Optional[str]:
     elif combined_prob < 0.05:
         risk_note = "\n⚠️ Geringe Trefferwahrscheinlichkeit — hohes Risiko"
 
+    # For 20+ leg combos, collapse individual legs behind a Telegram
+    # spoiler to keep the chat readable on mobile.  Users tap to reveal.
+    if len(complete_legs) >= 20:
+        legs_block = f"\n<tg-spoiler>{legs_txt}</tg-spoiler>{incomplete_note}"
+        legs_header = f"\nTipps (tippen zum Aufklappen):"
+    else:
+        legs_block = f"\n{legs_txt}{incomplete_note}"
+        legs_header = "\nTipps:"
+
     return (
         f"🧩 KOMBI {size}er | Lotto{tax_badge}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -697,7 +706,7 @@ def _format_combo_card(combo_data: dict) -> Optional[str]:
         f"Wahrscheinlichkeit: {_progress_bar(combined_prob)}\n"
         f"💰 Einsatz: {stake:.2f} EUR → 💎 {potential_payout:.2f} EUR\n"
         f"EV: {ev:+.4f}{risk_note}\n"
-        f"\nTipps:\n{legs_txt}{incomplete_note}"
+        f"{legs_header}{legs_block}"
     )
 
 
@@ -734,7 +743,10 @@ async def combo_suggestions(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if sent == 0:
                 await update.message.reply_text(f"🧩 Lotto-Kombis (10/20/30 Legs)")
             keyboard = _combo_deeplink_keyboard(combo_data)
-            await update.message.reply_text(card, reply_markup=keyboard)
+            # Use HTML parse_mode for <tg-spoiler> in 20+ leg combos
+            combo_size = combo_data.get("size", 0)
+            parse_mode = "HTML" if combo_size >= 20 else None
+            await update.message.reply_text(card, reply_markup=keyboard, parse_mode=parse_mode)
             sent += 1
 
     if sent == 0:
@@ -956,6 +968,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Format poisson display
             poisson_display = f"{poisson_prob:.0%}" if poisson_prob is not None else "n/a"
 
+            # CLV regressor prediction (expected sharp closing probability)
+            clv_pred = alert_data.get("predicted_clv_prob")
+            if clv_pred is not None:
+                sharp_p = float(alert_data.get("features", {}).get("sharp_implied_prob", 0))
+                if sharp_p > 0:
+                    edge_vs_close = (model_p - float(clv_pred)) * 100
+                    clv_line = f"CLV-Prognose: {float(clv_pred):.0%} (Edge: {edge_vs_close:+.1f}pp)\n"
+                else:
+                    clv_line = f"CLV-Prognose: {float(clv_pred):.0%}\n"
+            else:
+                clv_line = ""
+
             time_line = f"Anstoss: {event_time_str}\n" if event_time_str else ""
 
             msg = (
@@ -966,6 +990,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Quote: {float(alert_data.get('target_odds', 0)):.2f}\n"
                 f"Modell: {_progress_bar(model_p)} {badge}\n"
                 f"EV: {ev:+.4f}\n"
+                f"{clv_line}"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"Elo: {elo.get('elo_diff', 0):+.0f}\n"
                 f"Form: H={form.get('home_wr', 0):.0%} A={form.get('away_wr', 0):.0%}\n"

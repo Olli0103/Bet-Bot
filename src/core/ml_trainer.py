@@ -304,6 +304,15 @@ def _clean_frame(df: pd.DataFrame, feature_list: List[str]) -> pd.DataFrame:
         out["goals_scored_avg"] = out["goals_scored_avg"].clip(0.0, 5.0)
     if "goals_conceded_avg" in out.columns:
         out["goals_conceded_avg"] = out["goals_conceded_avg"].clip(0.0, 5.0)
+
+    # Conditional defaults: no games played → fully rested (start of season)
+    if "rest_fatigue_score" in out.columns and "form_games_l5" in out.columns:
+        no_games = out["form_games_l5"] == 0
+        out.loc[no_games, "rest_fatigue_score"] = 0.0
+    if "schedule_congestion" in out.columns and "form_games_l5" in out.columns:
+        no_games = out["form_games_l5"] == 0
+        out.loc[no_games, "schedule_congestion"] = 0.0
+
     return out
 
 
@@ -556,7 +565,7 @@ def _evaluate_holdout(
     the model against a meaningful baseline instead of the arbitrary 0.25
     threshold.
     """
-    metrics: Dict = {}
+    metrics: Dict = {"trained_at": datetime.now(timezone.utc).isoformat()}
     if len(X_test) == 0:
         return metrics
 
@@ -752,6 +761,9 @@ def auto_train_model(min_samples: int = 500) -> str:
     return f"Erfolg: {len(df)} Wetten trainiert. Aktiv: {', '.join(final_features)} | {brier_str}{suffix}"
 
 
+_STALE_MODEL_DAYS = 60  # Force-promote challenger if champion is older than this
+
+
 def _champion_challenger(
     challenger_metrics: Dict,
     sport_group: str,
@@ -761,6 +773,11 @@ def _champion_challenger(
     The challenger is promoted ONLY if it achieves a strictly better
     log loss on the holdout set.  This prevents model degradation from
     anomalous training data or overfitting.
+
+    Age override: if the champion is older than ``_STALE_MODEL_DAYS``
+    and the challenger is within 5% log-loss, promote anyway to avoid
+    the model going completely stale during off-seasons or landscape
+    shifts (rule changes, COVID-like breaks, etc.).
 
     Returns (promoted: bool, reason: str).
     """
@@ -786,6 +803,32 @@ def _champion_challenger(
         return True, (
             f"promoted (brier tiebreak): {chall_brier:.6f} < {champ_brier:.6f}"
         )
+
+    # Age override: prevent stale models from blocking promotion forever
+    trained_at = champ_metrics.get("trained_at", "")
+    if trained_at:
+        try:
+            champ_age = (datetime.now(timezone.utc) - datetime.fromisoformat(trained_at)).days
+        except (ValueError, TypeError):
+            champ_age = 0
+    else:
+        # Fallback: check file modification time
+        model_path = _model_path(sport_group)
+        if model_path.exists():
+            import os
+            mtime = datetime.fromtimestamp(os.path.getmtime(model_path), tz=timezone.utc)
+            champ_age = (datetime.now(timezone.utc) - mtime).days
+        else:
+            champ_age = 0
+
+    if champ_age >= _STALE_MODEL_DAYS:
+        # Allow promotion if challenger is within 5% relative log loss
+        relative_diff = (chall_ll - champ_ll) / max(champ_ll, 0.001)
+        if relative_diff < 0.05:
+            return True, (
+                f"promoted (stale override, champion {champ_age}d old): "
+                f"challenger log_loss={chall_ll:.6f} within 5% of champion={champ_ll:.6f}"
+            )
 
     return False, (
         f"rejected: challenger log_loss={chall_ll:.6f} >= champion={champ_ll:.6f} "

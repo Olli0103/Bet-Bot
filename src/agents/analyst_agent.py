@@ -239,6 +239,14 @@ class AnalystAgent:
         # blending is applied here, as doing so would destroy the calibrated
         # probability output.
 
+        # 11b. CLV regressor prediction (for UI display — shows whether
+        # the model expects the line to move in our favour before kickoff)
+        predicted_clv_prob = None
+        try:
+            predicted_clv_prob = self.qpm._clv_predict(ml_features)
+        except _OP_ERRORS:
+            pass  # CLV model not yet trained — totally fine
+
         # 12. EV calculation
         tax_rate = settings.tipico_tax_rate if not settings.tax_free_mode else 0.0
         ev = expected_value(model_p, target_odds, tax_rate=tax_rate)
@@ -267,6 +275,7 @@ class AnalystAgent:
             "sharp_market": sharp_market,
             "market_momentum": market_momentum,
             "bookmaker_odds": target_odds,
+            "predicted_clv_prob": predicted_clv_prob,
             "recommendation": "BET" if ev > ev_threshold else "SKIP",
         })
 
