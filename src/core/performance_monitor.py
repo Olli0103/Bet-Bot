@@ -63,10 +63,10 @@ class PerformanceMonitor:
     def check_circuit_breakers(self) -> Dict[str, bool]:
         """Check all circuit breaker conditions. True = breaker tripped."""
         return {
-            "losing_streak": self._check_losing_streak(threshold=7),
-            "daily_loss_limit": self._check_daily_loss(max_pct=0.05),
+            "losing_streak": self._check_losing_streak(threshold=settings.losing_streak_threshold),
+            "daily_loss_limit": self._check_daily_loss(max_pct=settings.daily_loss_limit_pct),
             "model_degradation": self._check_model_degradation(),
-            "drawdown": self._check_drawdown(max_pct=0.10, lookback_days=7),
+            "drawdown": self._check_drawdown(max_pct=settings.drawdown_max_pct, lookback_days=settings.drawdown_lookback_days),
         }
 
     def get_adjustment_factors(self) -> Dict[str, float]:

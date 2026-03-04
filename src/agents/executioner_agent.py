@@ -137,7 +137,7 @@ class ExecutionerAgent:
         kelly_mult *= min(1.3, max(0.5, calib_adj))  # clamp to [0.5, 1.3]
 
         # Use reduced Kelly for reactive bets (steam moves incl. totals)
-        frac = 0.15 if trigger in ("steam_move", "totals_steam") else 0.2
+        frac = settings.kelly_fraction_reactive if trigger in ("steam_move", "totals_steam") else settings.kelly_fraction_default
         frac *= kelly_mult
 
         # We need bookmaker_odds to compute kelly; extract from features or analysis

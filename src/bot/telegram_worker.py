@@ -125,31 +125,40 @@ async def _consume_outbox(bot):
 
 
 async def _send_signal_push(bot, payload: Dict, target: str, chat_ids: Optional[List[str]]):
-    """Format and send signal push."""
-    from src.bot.handlers import _format_signal_card, _progress_bar, _calibration_badge
+    """Format and send signal push with summary header and card-like cards."""
+    from src.utils.signal_formatter import (
+        format_signal_card,
+        format_summary_header,
+        deduplicate_signals,
+        sort_signals,
+    )
+    from src.core.settings import settings
+
     signals = payload.get("signals", [])
     ts = payload.get("ts", "")
+    raw_count = payload.get("raw_signal_count", len(signals))
+    status_counts = payload.get("status_counts", {})
 
     if ts:
-        await _broadcast(bot, f"📅 Tages-Push | Datenstand: {ts[:16]}", target, chat_ids)
+        await _broadcast(bot, f"\U0001F4C5 Tages-Push | Datenstand: {ts[:16]}", target, chat_ids)
 
     if not signals:
         await _broadcast(bot, "Keine spielbaren Einzelwetten heute.", target, chat_ids)
         return
 
-    await _broadcast(bot, f"🎯 {len(signals[:10])} Top Einzelwetten", target, chat_ids)
-    for b in signals[:10]:
-        sport = str(b.get("sport", "")).replace("_", " ").upper()
-        model_p = float(b.get("model_probability", 0))
-        badge = _calibration_badge(model_p)
-        msg = (
-            f"🎯 {sport} {badge}\n"
-            f"Tipp: {b.get('selection', '?')}\n"
-            f"Quote: {float(b.get('bookmaker_odds', 0)):.2f} | "
-            f"Modell: {_progress_bar(model_p)}\n"
-            f"EV: {float(b.get('expected_value', 0)):+.4f} | "
-            f"Einsatz: {float(b.get('recommended_stake', 0)):.2f} EUR"
-        )
+    # Build summary header
+    conf_gates = f"Soccer={settings.min_confidence_soccer_h2h} Tennis={settings.min_confidence_tennis}"
+    summary = format_summary_header(
+        raw_count=raw_count,
+        deduped_count=len(signals),
+        statuses=status_counts,
+        ev_cut=settings.min_ev_default,
+        conf_gates=conf_gates,
+    )
+    await _broadcast(bot, summary, target, chat_ids)
+
+    for i, b in enumerate(signals[:10]):
+        msg = format_signal_card(b, i, min(len(signals), 10))
         await _broadcast(bot, msg, target, chat_ids)
 
 

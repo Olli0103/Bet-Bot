@@ -34,6 +34,12 @@ from src.core.volatility_tracker import (
 from src.data.redis_cache import cache
 from src.integrations.odds_fetcher import OddsFetcher
 from src.models.betting import BetSignal, ComboBet
+from src.utils.signal_formatter import (
+    canonical_market_group,
+    deduplicate_signals,
+    display_status,
+    sort_signals,
+)
 
 log = logging.getLogger(__name__)
 
@@ -877,13 +883,19 @@ def fetch_and_build_signals(
         key=lambda s: (s.model_probability, s.expected_value, -s.bookmaker_odds),
         reverse=True,
     )
+
+    # Deduplicate: one pick per (event_id, canonical_market_group)
+    ranked_dicts = [r.model_dump() for r in ranked]
+    deduped_dicts = deduplicate_signals(ranked_dicts)
+    deduped_dicts = sort_signals(deduped_dicts)
+
     log.info(
         "Ranking: %d signals total (%d all incl. paper), %d after EV>0+confidence gate, "
-        "%d rejected by gate",
-        len(signals), len(all_signals), len(ranked),
+        "%d after dedup, %d rejected by gate",
+        len(signals), len(all_signals), len(ranked), len(deduped_dicts),
         sum(1 for s in all_signals if s.rejected_reason),
     )
-    top10 = ranked[:10]
+    top10 = deduped_dicts[:10]
 
     # Build combos for configured sizes (default: 10, 20, 30)
     # Hard confidence floor for every combo leg (default 40%)
@@ -910,23 +922,32 @@ def fetch_and_build_signals(
         log.warning("source_gap_report save failed: %s", exc)
 
     # Cache global top-10 snapshot (used by daily push + backward compat)
+    # top10 is already a list of dicts (post-dedup)
     payload = {
         "ts": now_iso,
         "count": len(top10),
-        "items": [r.model_dump() for r in top10],
+        "items": top10,
+        "raw_signal_count": len(ranked),
+        "dedup_count": len(deduped_dicts),
+        "status_counts": {
+            "PLAYABLE": sum(1 for s in deduped_dicts if s.get("display_status") == "PLAYABLE"),
+            "WATCHLIST": sum(1 for s in deduped_dicts if s.get("display_status") == "WATCHLIST"),
+            "BLOCKED": sum(1 for s in deduped_dicts if s.get("display_status") == "BLOCKED"),
+        },
     }
     stats["signals"] = len(top10)
     stats["signals_ranked"] = len(ranked)
+    stats["signals_deduped"] = len(deduped_dicts)
     stats["signals_total"] = len(all_signals)
     stats["signals_paper_only"] = len(all_signals) - len(signals)
 
     cache.set_json(SNAPSHOT_KEY, payload, ttl_seconds=12 * 3600)
 
-    # Cache ALL ranked signals so per-sport Top10 can draw from a full pool
+    # Cache ALL ranked signals (deduped) so per-sport Top10 can draw from a full pool
     all_ranked_payload = {
         "ts": now_iso,
-        "count": len(ranked),
-        "items": [r.model_dump() for r in ranked],
+        "count": len(deduped_dicts),
+        "items": deduped_dicts,
     }
     cache.set_json(ALL_RANKED_KEY, all_ranked_payload, ttl_seconds=12 * 3600)
 
@@ -935,7 +956,10 @@ def fetch_and_build_signals(
     cache.set_json(META_KEY, stats, ttl_seconds=12 * 3600)
 
     try:
-        auto_place_virtual_bets(top10, features)
+        # Convert deduped dicts back to BetSignal for ghost trading
+        top10_signals = [BetSignal(**{k: v for k, v in d.items()
+                         if k in BetSignal.model_fields}) for d in top10]
+        auto_place_virtual_bets(top10_signals, features)
     except Exception as exc:
         log.warning("Ghost trading failed: %s", exc)
 
@@ -943,7 +967,12 @@ def fetch_and_build_signals(
               signals=len(top10), events=stats["events_seen"],
               combos=len(combos), done_sports=list(done_sports))
 
-    return top10
+    # Return BetSignal objects for backward compatibility
+    try:
+        return [BetSignal(**{k: v for k, v in d.items()
+                if k in BetSignal.model_fields}) for d in top10]
+    except Exception:
+        return top10
 
 
 def run_enrichment_pass(progress_callback=None) -> Dict[str, Any]:

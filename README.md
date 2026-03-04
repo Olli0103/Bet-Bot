@@ -569,6 +569,14 @@ Configurable via Telegram settings dashboard or `LIVE_SPORTS` env var.
 - **draw_no_bet** (DNB) -- derived from 1X2 via draw-removed redistribution (soccer)
 - Cross-market value detection via Poisson model (soccer: over/under 0.5/1.5/2.5/3.5, BTTS)
 
+### Signal Deduplication & Card Format
+
+- **One pick per leg**: Enforces one signal per `(event_id, canonical_market_group)`. Market groups: `h2h`, `double_chance`, `draw_no_bet`, `spreads`, `totals`.
+- **Selection rule**: `model_probability DESC → expected_value DESC → bookmaker_odds ASC`
+- **Status badges**: 🟢 PLAYABLE (positive EV, stake > 0) | 🟡 WATCHLIST (EV ≤ 0) | 🔴 BLOCKED (rejected by gate)
+- **Summary header**: Shows raw vs deduped count, status breakdown, active EV-cut and confidence gates
+- **Card format**: Compact, card-like layout with sport emoji, status badge, and all transparency fields preserved
+
 ### Telegram UI/UX
 
 The bot provides a premium, interactive Telegram experience:
@@ -801,9 +809,9 @@ Feature importance and pruning decisions are stored in the model's `metrics` dic
 
 | Breaker | Trigger | Action |
 |---------|---------|--------|
-| Losing streak | 7+ consecutive losses | Kelly x0.5, min EV raised (`MIN_EV_LOSING_STREAK`, default 0.02) |
-| Daily loss limit | > 5% of bankroll lost today | Kelly x0.5, min EV raised (`MIN_EV_LOSING_STREAK`) |
-| Drawdown | 7-day PnL loss > 10% of bankroll | Kelly x0.5, min EV raised (`MIN_EV_DRAWDOWN`, default 0.02) |
+| Losing streak | `LOSING_STREAK_THRESHOLD` consecutive losses (default 7) | Kelly x0.5, min EV raised (`MIN_EV_LOSING_STREAK`, default 0.02) |
+| Daily loss limit | > `DAILY_LOSS_LIMIT_PCT` of bankroll lost today (default 5%) | Kelly x0.5, min EV raised (`MIN_EV_LOSING_STREAK`) |
+| Drawdown | `DRAWDOWN_LOOKBACK_DAYS`-day PnL loss > `DRAWDOWN_MAX_PCT` of bankroll (default 10%) | Kelly x0.5, min EV raised (`MIN_EV_DRAWDOWN`, default 0.02) |
 | Model degradation | Hit rate < 40% over 14 days | Kelly x0.7, min EV raised (`MIN_EV_DEGRADATION`, default 0.015) |
 | Data source offline | Odds API circuit breaker open | All betting halted |
 
@@ -864,6 +872,17 @@ All settings are loaded from environment variables (`.env` file) via `src/core/s
 | `MAX_STAKE_LONGSHOT_PCT` | `0.0075` | No | Max stake for draws/longshots (0.75%) |
 | `LONGSHOT_ODDS_THRESHOLD` | `3.5` | No | Odds >= this trigger longshot cap |
 | `MIN_COMBO_LEG_CONFIDENCE` | `0.40` | No | Min model_probability per combo leg |
+| **Kelly Fraction** | | | |
+| `KELLY_FRACTION_DEFAULT` | `0.20` | No | Standard Kelly fraction for bet sizing |
+| `KELLY_FRACTION_REACTIVE` | `0.15` | No | Reduced Kelly fraction for reactive bets (steam moves) |
+| **Circuit Breakers** | | | |
+| `LOSING_STREAK_THRESHOLD` | `7` | No | Consecutive losses to trigger losing streak breaker |
+| `DAILY_LOSS_LIMIT_PCT` | `0.05` | No | Daily loss as fraction of bankroll to trigger breaker (5%) |
+| `DRAWDOWN_MAX_PCT` | `0.10` | No | Rolling drawdown as fraction of bankroll to trigger breaker (10%) |
+| `DRAWDOWN_LOOKBACK_DAYS` | `7` | No | Days lookback for drawdown calculation |
+| **Combo Correlation** | | | |
+| `COMBO_CORRELATION_PENALTY` | `0.80` | No | Probability penalty per correlated pair in combos |
+| `COMBO_CORRELATION_FLOOR` | `0.20` | No | Minimum correlation penalty floor (prevents near-zero) |
 | **Signal Modes / Learning** | | | |
 | `LEARNING_CAPTURE_ALL_SIGNALS` | `true` | No | Capture all signal candidates as paper records for learning |
 | `ALLOW_WATCHLIST_SIGNALS` | `true` | No | Include watchlist/paper-only signals in output |
