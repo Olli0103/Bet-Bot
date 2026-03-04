@@ -213,11 +213,17 @@ def _clean_frame(df: pd.DataFrame, feature_list: List[str]) -> pd.DataFrame:
 
     for c in feature_list:
         if c not in out.columns:
-            out[c] = FEATURE_DEFAULTS.get(c, 0.0)
+            # Use np.nan for features NOT in FEATURE_DEFAULTS so XGBoost
+            # can learn a dedicated "missing" split direction, instead of
+            # the semantically wrong 0.0 (e.g. poisson_true_prob=0 means
+            # "0% chance", not "data unavailable").
+            out[c] = FEATURE_DEFAULTS.get(c, np.nan)
         else:
-            # Fill remaining NaN with semantically correct defaults
-            default = FEATURE_DEFAULTS.get(c, 0.0)
-            out[c] = out[c].fillna(default)
+            # Fill remaining NaN with semantically correct defaults.
+            # Features absent from FEATURE_DEFAULTS stay NaN (XGBoost native).
+            default = FEATURE_DEFAULTS.get(c, np.nan)
+            if pd.notna(default):
+                out[c] = out[c].fillna(default)
     # Convert to numeric but preserve NaN — XGBoost handles missing values
     # natively and will learn the optimal split direction.  Replacing NaN
     # with 0.0 is dangerous because 0 carries semantic meaning for many
@@ -464,14 +470,24 @@ def _build_clv_dataset(sport_filter: Optional[str] = None) -> Optional[pd.DataFr
 
     Returns a DataFrame sorted by created_at with ``closing_implied_prob``
     as the regression target, or None if insufficient data.
+
+    Only h2h market bets are included because EventClosingLine lacks a
+    ``market`` column.  For h2h, the selection is a team name which is
+    unique per event.  Totals/spreads selections like "Over 2.5" could
+    appear across multiple markets (totals, home_team_totals, etc.),
+    causing cross-market data bleed.
     """
     with SessionLocal() as db:
-        # Join placed_bets with event_closing_lines on (event_id, selection)
         from sqlalchemy.orm import aliased
         ecl = aliased(EventClosingLine)
         query = (
             select(PlacedBet, ecl.closing_implied_prob)
-            .join(ecl, (PlacedBet.event_id == ecl.event_id) & (PlacedBet.selection == ecl.selection))
+            .join(ecl, (
+                (PlacedBet.event_id == ecl.event_id)
+                & (PlacedBet.selection == ecl.selection)
+                & (PlacedBet.sport == ecl.sport)  # extra safety
+            ))
+            .where(PlacedBet.market == "h2h")  # avoid cross-market bleed
             .where(ecl.closing_implied_prob.isnot(None))
             .where(ecl.closing_implied_prob > 0.01)
             .where(ecl.closing_implied_prob < 0.99)
@@ -804,21 +820,15 @@ def _champion_challenger(
             f"promoted (brier tiebreak): {chall_brier:.6f} < {champ_brier:.6f}"
         )
 
-    # Age override: prevent stale models from blocking promotion forever
+    # Age override: prevent stale models from blocking promotion forever.
+    # Only use the trained_at timestamp from metrics — file mtime is
+    # unreliable because saving the champion back to disk resets it.
     trained_at = champ_metrics.get("trained_at", "")
+    champ_age = 0
     if trained_at:
         try:
             champ_age = (datetime.now(timezone.utc) - datetime.fromisoformat(trained_at)).days
         except (ValueError, TypeError):
-            champ_age = 0
-    else:
-        # Fallback: check file modification time
-        model_path = _model_path(sport_group)
-        if model_path.exists():
-            import os
-            mtime = datetime.fromtimestamp(os.path.getmtime(model_path), tz=timezone.utc)
-            champ_age = (datetime.now(timezone.utc) - mtime).days
-        else:
             champ_age = 0
 
     if champ_age >= _STALE_MODEL_DAYS:
