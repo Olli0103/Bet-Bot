@@ -1,5 +1,30 @@
 # Changelog
 
+## [2026-03-04] Signal Explanations + API Health Monitoring
+
+### Signal explanations: historical accuracy from reliability bins
+
+`explain_signal()` in `risk_guards.py` now surfaces the model's historical
+accuracy for the relevant confidence bin, e.g. "Historisch 60% Trefferquote
+in diesem Bereich". Adds calibration transparency to every signal card.
+
+### Proactive API health alerts
+
+- `source_health.py`: `record_failure()` now pushes a Telegram alert when a
+  circuit breaker trips (transition to "open" only — no spam on subsequent failures)
+- `core_worker.py`: New `_run_source_health_check()` runs every 5 minutes,
+  pushes a summary to the primary chat whenever any source is degraded or open
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `src/core/risk_guards.py` | `explain_signal()` includes historical accuracy; new `_get_historical_accuracy()` helper |
+| `src/core/source_health.py` | `_push_breaker_alert()` sends Telegram alert on breaker trip |
+| `src/bot/core_worker.py` | `_run_source_health_check()` periodic source health push |
+
+---
+
 ## [2026-03-04] ML Feature Pipeline Fix — All Audit Issues Resolved
 
 ### Critical fix: 29/35 features were training on zeros

@@ -142,11 +142,41 @@ def explain_signal(
     if drivers:
         parts.append(". ".join(drivers))
 
-    # Calibration quality from reliability bins
+    # Calibration quality from reliability bins — include historical accuracy
     kelly_adj = get_reliability_adjustment(model_probability, sport_group)
+    actual_rate = _get_historical_accuracy(model_probability, sport_group)
+    if actual_rate is not None:
+        acc_pct = actual_rate * 100
+        parts.append(
+            f"Historisch {acc_pct:.0f}% Trefferquote in diesem Bereich"
+        )
     if kelly_adj < 0.85:
-        parts.append("Modell neigt zu Ueberschaetzung in diesem Bereich — Einsatz reduziert")
+        parts.append("Modell neigt zu Ueberschaetzung — Einsatz reduziert")
     elif kelly_adj > 1.15:
         parts.append("Modell historisch treffsicher in diesem Bereich")
 
     return ". ".join(parts) + "."
+
+
+def _get_historical_accuracy(
+    model_prob: float, sport_group: str = "general"
+) -> Optional[float]:
+    """Return the historical actual win rate for the reliability bin
+    containing ``model_prob``, or None if no calibration data exists."""
+    from src.core.ml_trainer import load_model
+
+    model_data = load_model(sport_group)
+    if model_data is None:
+        model_data = load_model("general")
+    if model_data is None:
+        return None
+
+    bins = model_data.get("metrics", {}).get("reliability_bins", {})
+    for bin_key, info in bins.items():
+        try:
+            low, high = (float(x) for x in bin_key.split("_"))
+        except (ValueError, TypeError):
+            continue
+        if low <= model_prob < high:
+            return float(info.get("actual", info.get("predicted")))
+    return None

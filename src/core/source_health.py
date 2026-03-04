@@ -50,6 +50,7 @@ def record_failure(source: str, error: str = "") -> None:
     """Record a failed API call. May trip the circuit breaker."""
     key = _health_key(source)
     data = cache.get_json(key) or {}
+    old_status = data.get("status", "healthy")
     failures = data.get("failures", 0) + 1
     data["failures"] = failures
     data["last_failure"] = time.time()
@@ -64,10 +65,33 @@ def record_failure(source: str, error: str = "") -> None:
             "Circuit breaker TRIPPED for %s after %d failures: %s",
             source, failures, error,
         )
+        # Alert on transition to "open" only (not every failure while open)
+        if old_status != "open":
+            _push_breaker_alert(source, failures, str(error)[:100], config)
     else:
         data["status"] = "degraded" if failures >= config["max_failures"] // 2 else "healthy"
 
     cache.set_json(key, data, ttl_seconds=DEFAULT_TTL)
+
+
+def _push_breaker_alert(
+    source: str, failures: int, error: str, config: dict
+) -> None:
+    """Push a Telegram alert when a circuit breaker trips."""
+    try:
+        from src.bot.message_queue import push_outbox
+
+        label = config.get("label", source)
+        cooldown = config.get("cooldown_seconds", 300)
+        push_outbox("text", {
+            "text": (
+                f"🔴 Circuit Breaker: {label}\n"
+                f"{failures} aufeinanderfolgende Fehler — Quelle pausiert ({cooldown}s Cooldown).\n"
+                f"Letzter Fehler: {error}"
+            ),
+        }, target="primary")
+    except Exception as exc:
+        log.debug("Could not push breaker alert: %s", exc)
 
 
 def is_available(source: str) -> bool:
