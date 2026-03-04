@@ -75,6 +75,12 @@ FEATURES = [
     "league_position_delta",
     "goals_scored_avg",
     "goals_conceded_avg",
+    # Missing-indicator flags (auto-generated in _clean_frame)
+    "is_missing_elo",
+    "is_missing_weather",
+    "is_missing_volatility",
+    "is_missing_stats",
+    "is_missing_form_trend",
 ]
 
 # Soccer-specific features (added to FEATURES when training soccer model)
@@ -98,8 +104,9 @@ LEGACY_FEATURES = [
 EPS = 1e-12
 
 # Semantically correct defaults for features that are missing from the DB.
-# Using 0.0 for everything is wrong — e.g. elo_expected=0.0 implies zero
-# chance, when the correct neutral value is 0.5 (no Elo advantage).
+# EVERY feature must have an explicit default to prevent 100% NaN columns
+# from killing training (zero variance → feature dropped → "no feature
+# variance" error for sport-specific models with limited data).
 FEATURE_DEFAULTS: Dict[str, float] = {
     # --- Phase 1: core (all 6 critical features explicit) ---
     "sharp_implied_prob": 0.0,    # triggers 1/odds derivation in _clean_frame
@@ -108,36 +115,60 @@ FEATURE_DEFAULTS: Dict[str, float] = {
     "injury_delta": 0.0,          # neutral = no injury advantage
     "form_winrate_l5": 0.5,       # 50% = no form data
     "form_games_l5": 0.0,         # 0 = no games recorded
-    # --- Phase 2: market + enrichment ---
+    # --- Phase 2: market + enrichment (ALL explicit) ---
+    "elo_diff": 0.0,               # no Elo difference
     "elo_expected": 0.5,           # 50% = no Elo advantage
-    # elo_diff: 0.0 is correct (no difference)
     "h2h_home_winrate": 0.5,       # 50% = no H2H data
     "home_advantage": 0.5,         # unknown venue
+    "weather_rain": 0.0,           # assume dry
+    "weather_wind_high": 0.0,      # assume calm
+    "home_volatility": 0.0,        # no line movement observed
+    "away_volatility": 0.0,        # no line movement observed
+    "is_steam_move": 0.0,          # no steam detected
+    "line_staleness": 0.0,         # assume fresh lines
+    "injury_news_delta": 0.0,      # no breaking injury news
     "time_to_kickoff_hours": 24.0,  # 0.0 would mean "match already started"
-    # weather_rain: 0.0 is correct (assume dry)
-    # weather_wind_high: 0.0 is correct (assume calm)
-    # home_volatility / away_volatility: 0.0 is correct (no line movement)
-    # is_steam_move: 0.0 is correct (no steam detected)
-    # line_staleness: 0.0 is correct (assume fresh lines)
-    # injury_news_delta: 0.0 is correct (no news)
-    # public_bias: 0.0 is correct (balanced)
-    # market_momentum: 0.0 is correct (no momentum)
-    # line_velocity: 0.0 is correct (no movement)
-    # --- Phase 4: stats-based ---
+    "public_bias": 0.0,            # balanced public action
+    "market_momentum": 0.0,        # no momentum
+    "line_velocity": 0.0,          # no line movement
+    # --- Phase 4: stats-based (ALL explicit) ---
     "team_attack_strength": 1.0,   # 1.0 = league average
     "team_defense_strength": 1.0,
     "opp_attack_strength": 1.0,
     "opp_defense_strength": 1.0,
     "expected_total_proxy": 2.7,   # neutral: 1.0 * 1.0 * 1.35 * 2
+    "form_trend_slope": 0.0,       # flat form
     "rest_fatigue_score": 0.3,     # 0.0 = "fully rested" is too optimistic
     "schedule_congestion": 0.15,   # ~1 game/week is typical
     "over25_rate": 0.55,           # ~55% of soccer matches have >2.5 goals
     "btts_rate": 0.50,             # ~50% both teams score
+    "home_away_split_delta": 0.0,  # no venue delta
+    "league_position_delta": 0.0,  # equal positions
     "goals_scored_avg": 1.35,      # league average (soccer)
     "goals_conceded_avg": 1.35,    # league average (soccer)
-    # home_away_split_delta: 0.0 is correct (no difference)
-    # league_position_delta: 0.0 is correct (equal positions)
-    # poisson_true_prob: 0.0 triggers XGBoost native missing handling
+    # --- Soccer extra ---
+    "poisson_true_prob": 0.0,      # 0.0 = no Poisson data available
+    # --- Missing indicators ---
+    "is_missing_elo": 1.0,         # 1.0 = Elo data unavailable
+    "is_missing_weather": 1.0,     # 1.0 = weather data unavailable
+    "is_missing_volatility": 1.0,  # 1.0 = volatility data unavailable
+    "is_missing_stats": 1.0,       # 1.0 = stats snapshot unavailable
+    "is_missing_form_trend": 1.0,  # 1.0 = form trend unavailable
+}
+
+# Missing-indicator features: binary flags that let XGBoost distinguish
+# "value was 0.0 because measured" from "value was 0.0 because unavailable".
+# Generated automatically in _clean_frame for feature groups that are
+# commonly missing in historical data.
+MISSING_INDICATOR_GROUPS: Dict[str, List[str]] = {
+    "is_missing_elo": ["elo_diff", "elo_expected"],
+    "is_missing_weather": ["weather_rain", "weather_wind_high"],
+    "is_missing_volatility": ["home_volatility", "away_volatility"],
+    "is_missing_stats": [
+        "team_attack_strength", "team_defense_strength",
+        "opp_attack_strength", "opp_defense_strength",
+    ],
+    "is_missing_form_trend": ["form_trend_slope"],
 }
 
 # Sport groupings for sport-specific models
@@ -211,25 +242,31 @@ def _clean_frame(df: pd.DataFrame, feature_list: List[str]) -> pd.DataFrame:
                     if mask.any():
                         out.loc[mask, col] = meta_vals[mask]
 
+    # --- Missing indicators (BEFORE applying defaults) ---
+    # Binary flags that let XGBoost distinguish "default because missing"
+    # from "genuinely measured as the default value".
+    for indicator_name, source_features in MISSING_INDICATOR_GROUPS.items():
+        if indicator_name in feature_list:
+            # Check if ALL features in the group are NaN for each row
+            cols_present = [c for c in source_features if c in out.columns]
+            if cols_present:
+                out[indicator_name] = out[cols_present].isna().all(axis=1).astype(float)
+            else:
+                out[indicator_name] = 1.0  # all missing
+
     for c in feature_list:
         if c not in out.columns:
-            # Use np.nan for features NOT in FEATURE_DEFAULTS so XGBoost
-            # can learn a dedicated "missing" split direction, instead of
-            # the semantically wrong 0.0 (e.g. poisson_true_prob=0 means
-            # "0% chance", not "data unavailable").
-            out[c] = FEATURE_DEFAULTS.get(c, np.nan)
+            out[c] = FEATURE_DEFAULTS.get(c, 0.0)
         else:
-            # Fill remaining NaN with semantically correct defaults.
-            # Features absent from FEATURE_DEFAULTS stay NaN (XGBoost native).
-            default = FEATURE_DEFAULTS.get(c, np.nan)
-            if pd.notna(default):
-                out[c] = out[c].fillna(default)
-    # Convert to numeric but preserve NaN — XGBoost handles missing values
-    # natively and will learn the optimal split direction.  Replacing NaN
-    # with 0.0 is dangerous because 0 carries semantic meaning for many
-    # features (e.g. clv=0 means "exactly accurate odds", injury_delta=0
-    # means "no injury advantage").
+            default = FEATURE_DEFAULTS.get(c, 0.0)
+            out[c] = out[c].fillna(default)
+    # Convert to numeric (coerce non-numeric strings to NaN, then re-fill)
     out[feature_list] = out[feature_list].apply(pd.to_numeric, errors="coerce")
+    # Re-fill any NaN introduced by coercion
+    for c in feature_list:
+        remaining_nan = out[c].isna().sum()
+        if remaining_nan > 0:
+            out[c] = out[c].fillna(FEATURE_DEFAULTS.get(c, 0.0))
 
     # NaN spike detection: warn if any feature has an unexpectedly high NaN
     # rate, which may indicate a schema change or data source failure.
@@ -323,9 +360,23 @@ def _clean_frame(df: pd.DataFrame, feature_list: List[str]) -> pd.DataFrame:
 
 
 def _get_active_features(X: pd.DataFrame, feature_list: List[str]) -> List[str]:
-    """Return features with non-zero variance."""
+    """Return features with non-zero variance, logging dropped features."""
     variances = X[feature_list].var(axis=0)
-    return [f for f in feature_list if float(variances.get(f, 0.0)) > EPS]
+    active = []
+    dropped = []
+    for f in feature_list:
+        v = variances.get(f, 0.0)
+        # NaN variance (all NaN column) or near-zero variance → skip
+        if pd.isna(v) or float(v) <= EPS:
+            dropped.append(f)
+        else:
+            active.append(f)
+    if dropped:
+        log.info(
+            "Dropped %d zero-variance features: %s",
+            len(dropped), ", ".join(dropped),
+        )
+    return active
 
 
 def _train_xgboost(
@@ -471,25 +522,58 @@ def _build_clv_dataset(sport_filter: Optional[str] = None) -> Optional[pd.DataFr
     Returns a DataFrame sorted by created_at with ``closing_implied_prob``
     as the regression target, or None if insufficient data.
 
-    Joins on ``(event_id, selection, market, sport)`` to prevent
-    cross-market data bleed (e.g. "Over 2.5" appearing in both
-    totals and home_team_totals).
+    Joins on ``(event_id, selection, market, sport)`` when the ``market``
+    column exists in the DB.  Falls back to ``(event_id, selection, sport)``
+    with an h2h filter for legacy schemas without the ``market`` column.
     """
+    from sqlalchemy import inspect as sa_inspect
+    from sqlalchemy.orm import aliased
+
     with SessionLocal() as db:
-        from sqlalchemy.orm import aliased
         ecl = aliased(EventClosingLine)
-        query = (
-            select(PlacedBet, ecl.closing_implied_prob)
-            .join(ecl, (
+
+        # Probe whether the DB table actually has a 'market' column.
+        # The ORM model may be ahead of the DB if the migration hasn't run.
+        try:
+            db_cols = {
+                c["name"]
+                for c in sa_inspect(db.bind).get_columns("event_closing_lines")
+            }
+            has_market_col = "market" in db_cols
+        except Exception:
+            has_market_col = False
+
+        if has_market_col:
+            join_cond = (
                 (PlacedBet.event_id == ecl.event_id)
                 & (PlacedBet.selection == ecl.selection)
                 & (PlacedBet.market == ecl.market)
                 & (PlacedBet.sport == ecl.sport)
-            ))
+            )
+        else:
+            log.warning(
+                "event_closing_lines.market column missing — using legacy join "
+                "(event_id+selection+sport, h2h only). Run: "
+                "alembic upgrade head"
+            )
+            join_cond = (
+                (PlacedBet.event_id == ecl.event_id)
+                & (PlacedBet.selection == ecl.selection)
+                & (PlacedBet.sport == ecl.sport)
+            )
+
+        query = (
+            select(PlacedBet, ecl.closing_implied_prob)
+            .join(ecl, join_cond)
             .where(ecl.closing_implied_prob.isnot(None))
             .where(ecl.closing_implied_prob > 0.01)
             .where(ecl.closing_implied_prob < 0.99)
         )
+
+        # Without market-aware join, restrict to h2h to avoid bleed
+        if not has_market_col:
+            query = query.where(PlacedBet.market == "h2h")
+
         if sport_filter and sport_filter != "general":
             matching_sports = [k for k, v in SPORT_GROUPS.items() if v == sport_filter]
             if matching_sports:
@@ -497,7 +581,11 @@ def _build_clv_dataset(sport_filter: Optional[str] = None) -> Optional[pd.DataFr
 
         query = query.order_by(PlacedBet.created_at.asc())
 
-        rows = db.execute(query).all()
+        try:
+            rows = db.execute(query).all()
+        except Exception as exc:
+            log.warning("CLV dataset query failed: %s", exc)
+            return None
 
     if len(rows) < CLV_MIN_ROWS:
         return None
@@ -1047,7 +1135,27 @@ def auto_train_all_models(min_samples: int = 2000) -> str:
             active_sport = _get_active_features(X_sport, sport_features)
 
             if not active_sport:
-                results.append(f"{group}: no feature variance")
+                # Diagnostic: show why every feature was dropped
+                nan_rates = {
+                    f: f"{X_sport[f].isna().mean()*100:.0f}% NaN"
+                    for f in sport_features
+                    if f in X_sport.columns and X_sport[f].isna().mean() > 0.5
+                }
+                const_feats = [
+                    f for f in sport_features
+                    if f in X_sport.columns and X_sport[f].nunique() <= 1
+                ]
+                log.warning(
+                    "%s: no feature variance (%d samples). High-NaN: %s. "
+                    "Constant features: %s. Run backfill_ml_features.py",
+                    group, len(subset),
+                    json.dumps(nan_rates) if nan_rates else "none",
+                    ", ".join(const_feats[:10]) if const_feats else "none",
+                )
+                results.append(
+                    f"{group}: no feature variance ({len(subset)} samples, "
+                    f"{len(const_feats)} constant features — run backfill)"
+                )
                 continue
 
             model_sport, metrics_sport, final_sport = _train_xgboost(X_sport, y_sport, active_sport)

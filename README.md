@@ -44,10 +44,11 @@ python scripts/bootstrap_history.py                        # download free datas
 cp -r data/raw/* data/imports/                             # stage into import dirs
 python scripts/import_historical_results.py                # import all sports
 
-# 5. Backfill engineered features
+# 5. Run DB migrations + backfill engineered features
+alembic upgrade head                                    # apply schema migrations
 python scripts/backfill_form_features.py
 python scripts/backfill_odds_from_imports.py
-python scripts/backfill_ml_features.py              # backfill 6 critical ML features
+python scripts/backfill_ml_features.py --force          # backfill ALL ML features (phase 1-4)
 
 # 6. Train ML models (generates ML_FEATURE_COVERAGE_REPORT.md)
 python -c "from src.core.ml_trainer import auto_train_all_models; print(auto_train_all_models(min_samples=100))"
