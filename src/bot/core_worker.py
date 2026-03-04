@@ -367,6 +367,26 @@ def _run_daily_performance():
         log.error("Daily performance report failed: %s", exc)
 
 
+def _run_source_health_check():
+    """Periodic Redis-only check: push summary if any source is degraded/open."""
+    from src.core.source_health import get_all_health, SOURCE_CONFIG
+    try:
+        all_h = get_all_health()
+        bad = {s: d for s, d in all_h.items() if d.get("status") in ("degraded", "open")}
+        if not bad:
+            return
+        lines = ["⚠️ Datenquellen-Status:"]
+        for src, data in bad.items():
+            label = SOURCE_CONFIG.get(src, {}).get("label", src)
+            status = data.get("status", "?")
+            streak = data.get("failures", 0)
+            emoji = "🔴" if status == "open" else "🟡"
+            lines.append(f"  {emoji} {label}: {status} (Fehler-Serie: {streak})")
+        push_outbox("text", {"text": "\n".join(lines)}, target="primary")
+    except Exception as exc:
+        log.error("Source health check failed: %s", exc)
+
+
 async def _run_agent_cycle():
     """Run one Scout -> Analyst -> Executioner cycle.
 
@@ -496,6 +516,10 @@ async def main_loop():
 
         # Process inbox (user actions forwarded from telegram worker)
         _process_inbox()
+
+        # Source health check every 5 min (Redis-only, no API calls)
+        if sched.should_run("source_health_check", 300):
+            _run_source_health_check()
 
         # Health heartbeat
         if sched.should_run("heartbeat", 300):
