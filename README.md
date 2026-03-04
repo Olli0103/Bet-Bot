@@ -845,7 +845,13 @@ All settings are loaded from environment variables (`.env` file) via `src/core/s
 | `FOOTBALL_DATA_API_KEY` | -- | No | football-data.org API key (free tier) |
 | `STATS_INGESTION_ENABLED` | `true` | No | Enable/disable stats ingestion pipeline |
 | `STATS_INGESTION_INTERVAL_HOURS` | `6` | No | How often stats ingestion runs |
-| **Risk Guards** | | | |
+| **EV Thresholds** | | | |
+| `MIN_EV_DEFAULT` | `0.01` | No | Min expected value for normal operation |
+| `MIN_EV_LOSING_STREAK` | `0.02` | No | Min EV when losing streak or daily loss breaker trips |
+| `MIN_EV_DRAWDOWN` | `0.02` | No | Min EV when drawdown breaker trips |
+| `MIN_EV_DEGRADATION` | `0.015` | No | Min EV when model degradation detected |
+| `MIN_EV_GOOD_RUN` | `0.005` | No | Min EV during good performance (ROI > 5%) |
+| **Confidence Gates** | | | |
 | `MIN_CONF_SOCCER_H2H` | `0.55` | No | Min model_probability for soccer H2H bets |
 | `MIN_CONF_SOCCER_TOTALS` | `0.56` | No | Min model_probability for soccer totals |
 | `MIN_CONF_SOCCER_SPREAD` | `0.56` | No | Min model_probability for soccer spreads |

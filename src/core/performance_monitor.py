@@ -76,21 +76,21 @@ class PerformanceMonitor:
 
         # If any breaker is tripped, reduce aggressiveness
         if breakers.get("losing_streak") or breakers.get("daily_loss_limit"):
-            return {"kelly_multiplier": 0.5, "min_ev": 0.02, "active": True}
+            return {"kelly_multiplier": 0.5, "min_ev": settings.min_ev_losing_streak, "active": True}
 
         if breakers.get("drawdown"):
-            return {"kelly_multiplier": 0.5, "min_ev": 0.02, "active": True}
+            return {"kelly_multiplier": 0.5, "min_ev": settings.min_ev_drawdown, "active": True}
 
         if breakers.get("model_degradation"):
-            return {"kelly_multiplier": 0.7, "min_ev": 0.015, "active": True}
+            return {"kelly_multiplier": 0.7, "min_ev": settings.min_ev_degradation, "active": True}
 
         roi = perf.get("roi", 0.0)
         if roi > 0.05:
             # Good run: slightly more aggressive
-            return {"kelly_multiplier": 1.2, "min_ev": 0.005, "active": False}
+            return {"kelly_multiplier": 1.2, "min_ev": settings.min_ev_good_run, "active": False}
 
         # Normal
-        return {"kelly_multiplier": 1.0, "min_ev": 0.01, "active": False}
+        return {"kelly_multiplier": 1.0, "min_ev": settings.min_ev_default, "active": False}
 
     def _check_losing_streak(self, threshold: int = 7) -> bool:
         """Return True if the last N consecutive bets are all losses."""

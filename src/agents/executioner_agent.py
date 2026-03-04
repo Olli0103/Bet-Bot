@@ -94,7 +94,7 @@ class ExecutionerAgent:
         recommendation = analysis.get("recommendation", "SKIP")
 
         adjustments = self.monitor.get_adjustment_factors()
-        min_ev = adjustments.get("min_ev", 0.01)
+        min_ev = adjustments.get("min_ev", settings.min_ev_default)
 
         if ev < min_ev or recommendation == "SKIP":
             result["reasoning"].append(f"EV {ev:.4f} < min_ev {min_ev:.4f}")

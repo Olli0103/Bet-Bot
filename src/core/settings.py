@@ -75,5 +75,12 @@ class Settings(BaseModel):
     # Combo leg minimum confidence (model_probability)
     min_combo_leg_confidence: float = float(os.getenv("MIN_COMBO_LEG_CONFIDENCE", "0.40"))
 
+    # EV (Expected Value) thresholds
+    min_ev_default: float = float(os.getenv("MIN_EV_DEFAULT", "0.01"))
+    min_ev_losing_streak: float = float(os.getenv("MIN_EV_LOSING_STREAK", "0.02"))
+    min_ev_drawdown: float = float(os.getenv("MIN_EV_DRAWDOWN", "0.02"))
+    min_ev_degradation: float = float(os.getenv("MIN_EV_DEGRADATION", "0.015"))
+    min_ev_good_run: float = float(os.getenv("MIN_EV_GOOD_RUN", "0.005"))
+
 
 settings = Settings()
