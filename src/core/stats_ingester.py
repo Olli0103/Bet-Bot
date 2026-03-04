@@ -58,14 +58,17 @@ def ingest_from_sportsdb(sport_keys: Optional[List[str]] = None) -> int:
             log.warning("SportsDB ingest failed for %s: %s", sport_key, exc)
             continue
 
-        with SessionLocal() as db:
-            for event in events:
-                if event["home_score"] is None or event["away_score"] is None:
-                    continue
-                inserted += _upsert_match_stats(
-                    db, event, sport_key, source="thesportsdb"
-                )
-            db.commit()
+        try:
+            with SessionLocal() as db:
+                for event in events:
+                    if event["home_score"] is None or event["away_score"] is None:
+                        continue
+                    inserted += _upsert_match_stats(
+                        db, event, sport_key, source="thesportsdb"
+                    )
+                db.commit()
+        except Exception as exc:
+            log.warning("SportsDB commit failed for %s: %s", sport_key, exc)
 
     log.info("SportsDB ingestion: %d new rows from %d sports", inserted, len(sport_keys))
     return inserted
@@ -92,14 +95,17 @@ def ingest_from_football_data(sport_keys: Optional[List[str]] = None) -> int:
             log.warning("football-data.org ingest failed for %s: %s", sport_key, exc)
             continue
 
-        with SessionLocal() as db:
-            for match in matches:
-                if match["home_score"] is None or match["away_score"] is None:
-                    continue
-                inserted += _upsert_match_stats_fdata(
-                    db, match, sport_key, source="football-data.org"
-                )
-            db.commit()
+        try:
+            with SessionLocal() as db:
+                for match in matches:
+                    if match["home_score"] is None or match["away_score"] is None:
+                        continue
+                    inserted += _upsert_match_stats_fdata(
+                        db, match, sport_key, source="football-data.org"
+                    )
+                db.commit()
+        except Exception as exc:
+            log.warning("football-data.org commit failed for %s: %s", sport_key, exc)
 
     log.info("football-data.org ingestion: %d new rows from %d sports", inserted, len(sport_keys))
     return inserted

@@ -2,6 +2,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from src.data.postgres import SessionLocal
@@ -31,7 +32,11 @@ def auto_place_virtual_bets(signals: list, features_dict: dict):
     start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
     with SessionLocal() as db:
-        existing = db.query(PlacedBet.event_id, PlacedBet.selection).filter(PlacedBet.created_at >= start_of_day).all()
+        existing = db.execute(
+            select(PlacedBet.event_id, PlacedBet.selection).where(
+                PlacedBet.created_at >= start_of_day
+            )
+        ).all()
         existing_set = {f"{e[0]}|{e[1]}" for e in existing}
 
         for sig in signals:

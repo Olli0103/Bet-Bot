@@ -117,6 +117,7 @@ def log_closing_lines(
                         event_id=event_id,
                         sport=sport_key,
                         selection=selection,
+                        market=market_key,
                         home_team=home,
                         away_team=away,
                         sharp_book=sharp_book,
@@ -127,7 +128,7 @@ def log_closing_lines(
                         model_ev_at_signal=round(model_ev, 4) if model_ev else None,
                         commence_time=commence_dt,
                     ).on_conflict_do_update(
-                        constraint="uq_closing_event_sel",
+                        constraint="uq_closing_event_sel_mkt",
                         set_={
                             "closing_odds": odds,
                             "closing_implied_prob": round(closing_prob, 6),

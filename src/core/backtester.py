@@ -63,8 +63,15 @@ class Backtester:
     def __init__(self, config: Optional[BacktestConfig] = None):
         self.config = config or BacktestConfig()
 
-    def load_historical_data(self) -> pd.DataFrame:
-        """Load all settled bets from the database."""
+    def load_historical_data(self, include_training_data: bool = False) -> pd.DataFrame:
+        """Load settled bets from the database.
+
+        Parameters
+        ----------
+        include_training_data : bool
+            If True, include historical imports. Default False (live only)
+            for realistic backtest results.
+        """
         try:
             from src.data.models import PlacedBet
         except ImportError:
@@ -73,6 +80,8 @@ class Backtester:
 
         with SessionLocal() as db:
             query = select(PlacedBet).where(PlacedBet.status.in_(["won", "lost"]))
+            if not include_training_data:
+                query = query.where(PlacedBet.is_training_data.is_(False))
             df = pd.read_sql(query, db.bind)
 
         if df.empty:

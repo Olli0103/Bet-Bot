@@ -84,7 +84,12 @@ async def run_auto_grading() -> int:
     settled_count = 0
 
     with SessionLocal() as db:
-        open_bets = db.scalars(select(PlacedBet).where(PlacedBet.status == "open")).all()
+        open_bets = db.scalars(
+            select(PlacedBet).where(
+                PlacedBet.status == "open",
+                PlacedBet.is_training_data.is_(False),
+            )
+        ).all()
         if not open_bets:
             return 0
 

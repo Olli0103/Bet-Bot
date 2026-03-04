@@ -1,7 +1,7 @@
 """add is_training_data and data_source columns to placed_bets
 
 Revision ID: e7f4a28d1c03
-Revises: c4f2b83d9a12
+Revises: d5a3c91e2b04
 Create Date: 2026-03-04 14:00:00.000000
 
 """
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = 'e7f4a28d1c03'
-down_revision: Union[str, Sequence[str], None] = 'c4f2b83d9a12'
+down_revision: Union[str, Sequence[str], None] = 'd5a3c91e2b04'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
