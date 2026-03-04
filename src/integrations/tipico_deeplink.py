@@ -79,7 +79,12 @@ def combo_betslip_link(
 
     Each leg dict should contain ``event_id``, and optionally
     ``market_id`` and ``selection_id``.
+
+    Caps at 15 legs to stay under browser/mobile URL length limits
+    (~2000 chars).  Excess legs are silently dropped.
     """
+    _MAX_URL_LEGS = 15
+
     options = []
     for leg in legs:
         eid = str(leg.get("event_id", ""))
@@ -91,6 +96,9 @@ def combo_betslip_link(
             options.append(eid)
     if not options:
         return _BASE
+
+    if len(options) > _MAX_URL_LEGS:
+        options = options[:_MAX_URL_LEGS]
 
     params = {"options": ",".join(options), "type": "combo"}
     if stake is not None and stake > 0:
