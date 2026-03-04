@@ -321,7 +321,7 @@ def fetch_and_build_signals(
         try:
             sentiment = batch_team_sentiment([t for t in all_teams if t], max_teams=24)
         except Exception as exc:
-            log.warning("Batch sentiment enrichment failed: %s", exc)
+            log.warning("sentiment_fallback_neutral: Batch sentiment enrichment failed: %s — all teams default to 0.0", exc)
 
         # --- Injury news enrichment (Rotowire RSS, best-effort) ---
         try:
@@ -338,7 +338,9 @@ def fetch_and_build_signals(
                 except Exception:
                     pass
         except Exception as exc:
-            log.warning("RSS injury enrichment failed: %s", exc)
+            log.warning("injury_fallback_neutral: RSS injury enrichment failed: %s — injury_news_delta defaults to 0.0", exc)
+    else:
+        log.info("sentiment_fallback_neutral: Enrichment disabled — sentiment_delta and injury_delta default to 0.0")
 
     now_utc = datetime.now(timezone.utc)
     _, window_end = _bet_window(now_utc)
@@ -387,14 +389,16 @@ def fetch_and_build_signals(
         if settings.enrichment_enabled and sport.startswith("soccer"):
             try:
                 inj_home, inj_away = soccer_injury_delta(home, away, commence)
-            except Exception:
+            except Exception as exc:
+                log.debug("injury_fallback_neutral: Soccer injury delta failed for %s vs %s: %s", home, away, exc)
                 inj_home = inj_away = 0
 
         # --- Form tracking ---
         try:
             home_wr, home_gp = get_form_l5(home)
             away_wr, away_gp = get_form_l5(away)
-        except Exception:
+        except Exception as exc:
+            log.debug("form_fallback_neutral: Form tracking failed for %s / %s: %s", home, away, exc)
             home_wr, home_gp = 0.5, 0
             away_wr, away_gp = 0.5, 0
 

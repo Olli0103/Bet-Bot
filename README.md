@@ -47,8 +47,9 @@ python scripts/import_historical_results.py                # import all sports
 # 5. Backfill engineered features
 python scripts/backfill_form_features.py
 python scripts/backfill_odds_from_imports.py
+python scripts/backfill_ml_features.py              # backfill 6 critical ML features
 
-# 6. Train ML models
+# 6. Train ML models (generates ML_FEATURE_COVERAGE_REPORT.md)
 python -c "from src.core.ml_trainer import auto_train_all_models; print(auto_train_all_models(min_samples=100))"
 
 # 7. Launch
@@ -867,9 +868,23 @@ All settings are loaded from environment variables (`.env` file) via `src/core/s
 | `scripts/bootstrap_history.py` | Download free datasets from public sources | `python scripts/bootstrap_history.py` |
 | `scripts/backfill_form_features.py` | Populate `form_winrate_l5` and `form_games_l5` | `python scripts/backfill_form_features.py` |
 | `scripts/backfill_odds_from_imports.py` | Backfill `odds_open`/`odds_close`/`clv` from CSVs | `python scripts/backfill_odds_from_imports.py` |
+| `scripts/backfill_ml_features.py` | Backfill 6 critical ML features in `meta_features` | `python scripts/backfill_ml_features.py` |
 | `scripts/run_backtest.py` | Walk-forward backtesting engine | `python scripts/run_backtest.py --compare` |
 | `scripts/auto_grade_once.py` | Settle open bets against API results | `python scripts/auto_grade_once.py` |
 | `scripts/run_bot.py` | Alternative bot launcher | `python scripts/run_bot.py` |
+
+### backfill_ml_features.py CLI Arguments
+
+```
+--limit N       Max rows to process (0=all)
+--sport SPORT   Filter by sport (e.g. soccer, tennis)
+--dry-run       Preview changes without writing to DB
+--force         Rewrite all rows, not only missing
+```
+
+Fills missing critical features: `sentiment_delta`, `injury_delta`, `sharp_implied_prob`,
+`sharp_vig`, `form_winrate_l5`, `form_games_l5`. Batchwise (200 rows), idempotent.
+Derives `sharp_implied_prob` from odds when missing, computes form from `TeamMatchStats`.
 
 ### Importer CLI Arguments
 

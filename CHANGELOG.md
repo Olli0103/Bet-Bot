@@ -1,5 +1,62 @@
 # Changelog
 
+## [2026-03-04] Fix: Training Features Pipeline — 6 Critical Features Restored
+
+### Root Cause: `_clean_frame()` meta_features unpacking bug
+
+The 6 critical features (`sentiment_delta`, `injury_delta`, `sharp_implied_prob`,
+`sharp_vig`, `form_winrate_l5`, `form_games_l5`) were 100% NaN during training
+because `_clean_frame()` skipped JSONB unpacking for columns that already existed
+in the DataFrame. Since these features have dedicated DB columns (nullable, often
+NULL for old rows), the JSONB values were never extracted.
+
+**Fix:** Changed `_clean_frame()` to fill NaN cells from `meta_features` JSONB
+even when dedicated columns exist. Added NaN→default fallback using
+`FEATURE_DEFAULTS` for all 6 critical features.
+
+### Live pipeline: enrichment fallback logging
+
+- Sentiment/injury enrichment failures now log explicit reason codes
+  (`sentiment_fallback_neutral`, `injury_fallback_neutral`, `form_fallback_neutral`)
+- No silent drops — pipeline continues with neutral 0.0 defaults
+
+### Historical backfill script
+
+New `scripts/backfill_ml_features.py`:
+- Finds rows with missing critical features in `meta_features`
+- Backfills: `sentiment_delta`/`injury_delta` → 0.0, `sharp_implied_prob`/`sharp_vig`
+  → derived from odds, `form_winrate_l5`/`form_games_l5` → from TeamMatchStats history
+- Supports `--dry-run`, `--limit`, `--sport`, `--force`
+- Batchwise (200 rows), idempotent
+
+### Training coverage gate + report
+
+- Pre-training feature coverage report per sport: non-null rate, zero rate,
+  variance, unique count
+- Hard warnings when critical features are 100% NaN with root-cause hints
+- Artifacts: `ML_FEATURE_COVERAGE_REPORT.md` + `artifacts/feature_coverage.json`
+
+### Tests
+
+6 new tests in `tests/test_ml_feature_pipeline.py`:
+1. `test_new_bets_persist_required_ml_features`
+2. `test_sentiment_failure_sets_neutral_not_nan`
+3. `test_injury_failure_sets_neutral_not_nan`
+4. `test_clean_frame_unpacks_meta_features_no_nan_for_defaults`
+5. `test_backfill_script_fills_missing_features_idempotent`
+6. `test_training_report_detects_no_feature_variance`
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `src/core/ml_trainer.py` | Fixed `_clean_frame()` JSONB unpacking, explicit `FEATURE_DEFAULTS` for all 6 critical features, `generate_feature_coverage_report()`, `write_feature_coverage_artifacts()`, coverage gate in `auto_train_all_models()` |
+| `src/core/live_feed.py` | Enrichment fallback logging with reason codes |
+| `scripts/backfill_ml_features.py` | New: comprehensive feature backfill script |
+| `tests/test_ml_feature_pipeline.py` | New: 15 tests for the feature pipeline fix |
+
+---
+
 ## [2026-03-04] Production Hardening: Feature Pruning, Drawdown Protection, Source Gates
 
 ### ML: Permutation-importance feature pruning

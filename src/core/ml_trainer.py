@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -100,15 +101,13 @@ EPS = 1e-12
 # Using 0.0 for everything is wrong — e.g. elo_expected=0.0 implies zero
 # chance, when the correct neutral value is 0.5 (no Elo advantage).
 FEATURE_DEFAULTS: Dict[str, float] = {
-    # --- Phase 1: core ---
-    # sharp_implied_prob: 0.0 would mean "impossible" — but _clean_frame has
-    # a separate fallback that derives it from 1/odds, so 0.0 is fine here
-    # (it triggers the derivation logic).
+    # --- Phase 1: core (all 6 critical features explicit) ---
+    "sharp_implied_prob": 0.0,    # triggers 1/odds derivation in _clean_frame
+    "sharp_vig": 0.0,             # triggers derivation in _clean_frame
+    "sentiment_delta": 0.0,       # neutral = no sentiment data
+    "injury_delta": 0.0,          # neutral = no injury advantage
     "form_winrate_l5": 0.5,       # 50% = no form data
-    # form_games_l5: 0 is correct (no games = no data)
-    # sentiment_delta: 0.0 is correct (no sentiment = neutral)
-    # injury_delta: 0.0 is correct (no injury advantage)
-    # sharp_vig: 0.0 triggers derivation in _clean_frame, intentional
+    "form_games_l5": 0.0,         # 0 = no games recorded
     # --- Phase 2: market + enrichment ---
     "elo_expected": 0.5,           # 50% = no Elo advantage
     # elo_diff: 0.0 is correct (no difference)
@@ -187,23 +186,38 @@ def _model_path(sport_group: str) -> Path:
 def _clean_frame(df: pd.DataFrame, feature_list: List[str]) -> pd.DataFrame:
     out = df.copy()
 
-    # Unpack meta_features JSONB blob — this is where Phase 2-4 features
-    # are stored since they don't have dedicated DB columns.
+    # Unpack meta_features JSONB blob.
+    # Phase 2-4 features are stored here; the 6 "core" features
+    # (sentiment_delta, injury_delta, sharp_implied_prob, sharp_vig,
+    # form_winrate_l5, form_games_l5) also have dedicated DB columns
+    # that may be NULL for old rows.  We must fill NaN cells in those
+    # columns from the JSONB blob when available — the previous code
+    # skipped columns that already existed, leaving NaN in place.
     if "meta_features" in out.columns:
         meta_rows = out["meta_features"].dropna()
         if len(meta_rows) > 0:
             meta_df = pd.json_normalize(meta_rows)
             meta_df.index = meta_rows.index
             for col in meta_df.columns:
-                if col in feature_list and col not in out.columns:
+                if col not in feature_list:
+                    continue
+                meta_vals = pd.to_numeric(meta_df[col], errors="coerce")
+                if col not in out.columns:
                     out[col] = np.nan
-                    out.loc[meta_df.index, col] = pd.to_numeric(
-                        meta_df[col], errors="coerce"
-                    )
+                    out.loc[meta_df.index, col] = meta_vals
+                else:
+                    # Fill only NaN cells from JSONB (don't overwrite valid data)
+                    mask = out[col].isna() & meta_vals.notna()
+                    if mask.any():
+                        out.loc[mask, col] = meta_vals[mask]
 
     for c in feature_list:
         if c not in out.columns:
             out[c] = FEATURE_DEFAULTS.get(c, 0.0)
+        else:
+            # Fill remaining NaN with semantically correct defaults
+            default = FEATURE_DEFAULTS.get(c, 0.0)
+            out[c] = out[c].fillna(default)
     # Convert to numeric but preserve NaN — XGBoost handles missing values
     # natively and will learn the optimal split direction.  Replacing NaN
     # with 0.0 is dangerous because 0 carries semantic meaning for many
@@ -677,12 +691,116 @@ def _champion_challenger(
     )
 
 
+CRITICAL_FEATURES = [
+    "sentiment_delta",
+    "injury_delta",
+    "sharp_implied_prob",
+    "sharp_vig",
+    "form_winrate_l5",
+    "form_games_l5",
+]
+
+
+def generate_feature_coverage_report(
+    df: pd.DataFrame,
+    feature_list: List[str],
+    sport_label: str = "all",
+) -> Dict[str, Dict[str, float]]:
+    """Generate per-feature coverage stats: non-null rate, zero rate, variance, unique count.
+
+    Returns a dict keyed by feature name.
+    """
+    report: Dict[str, Dict[str, float]] = {}
+    n = len(df)
+    if n == 0:
+        return report
+
+    for feat in feature_list:
+        if feat not in df.columns:
+            report[feat] = {
+                "non_null_rate": 0.0,
+                "zero_rate": 1.0,
+                "variance": 0.0,
+                "unique_count": 0,
+                "is_critical": feat in CRITICAL_FEATURES,
+            }
+            continue
+
+        col = pd.to_numeric(df[feat], errors="coerce")
+        non_null = int(col.notna().sum())
+        non_null_rate = round(non_null / n, 4) if n > 0 else 0.0
+        zero_count = int((col == 0.0).sum())
+        zero_rate = round(zero_count / n, 4) if n > 0 else 0.0
+        var = round(float(col.var()), 6) if non_null > 1 else 0.0
+        unique = int(col.nunique())
+
+        report[feat] = {
+            "non_null_rate": non_null_rate,
+            "zero_rate": zero_rate,
+            "variance": var,
+            "unique_count": unique,
+            "is_critical": feat in CRITICAL_FEATURES,
+        }
+    return report
+
+
+def write_feature_coverage_artifacts(
+    all_reports: Dict[str, Dict[str, Dict[str, float]]],
+) -> None:
+    """Write ML_FEATURE_COVERAGE_REPORT.md and artifacts/feature_coverage.json."""
+    artifacts_dir = Path("artifacts")
+    artifacts_dir.mkdir(exist_ok=True)
+
+    # JSON artifact
+    json_path = artifacts_dir / "feature_coverage.json"
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(all_reports, f, indent=2, default=str)
+    log.info("Feature coverage JSON written to %s", json_path)
+
+    # Markdown report
+    md_lines = ["# ML Feature Coverage Report\n"]
+    md_lines.append(f"Generated: {datetime.now(timezone.utc).isoformat()}\n")
+
+    for sport_label, report in all_reports.items():
+        md_lines.append(f"\n## {sport_label}\n")
+        md_lines.append("| Feature | Non-null % | Zero % | Variance | Unique | Critical |")
+        md_lines.append("|---------|-----------|--------|----------|--------|----------|")
+        for feat, stats in report.items():
+            crit = "YES" if stats.get("is_critical") else ""
+            md_lines.append(
+                f"| {feat} | {stats['non_null_rate']*100:.1f}% "
+                f"| {stats['zero_rate']*100:.1f}% "
+                f"| {stats['variance']:.6f} "
+                f"| {stats['unique_count']} "
+                f"| {crit} |"
+            )
+
+        # Warnings
+        issues = []
+        for feat, stats in report.items():
+            if stats.get("is_critical") and stats["non_null_rate"] < 0.01:
+                issues.append(f"  - **{feat}**: 100% NaN — likely missing from pipeline or backfill needed")
+            elif stats.get("is_critical") and stats["variance"] < EPS:
+                issues.append(f"  - **{feat}**: zero variance — all values identical (constant {stats['zero_rate']*100:.0f}% zero)")
+        if issues:
+            md_lines.append(f"\n### Warnings for {sport_label}\n")
+            md_lines.extend(issues)
+
+    md_path = Path("ML_FEATURE_COVERAGE_REPORT.md")
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(md_lines) + "\n")
+    log.info("Feature coverage report written to %s", md_path)
+
+
 def auto_train_all_models(min_samples: int = 2000) -> str:
     """Train general + sport-specific models with Champion vs Challenger.
 
     A newly trained model (Challenger) is only promoted to production if
     it achieves a strictly better log loss than the currently deployed
     model (Champion) on the holdout set.  This prevents model degradation.
+
+    Before training, generates a feature coverage report per sport and
+    emits hard warnings if critical features are 100% NaN.
     """
     MODELS_DIR.mkdir(exist_ok=True)
 
@@ -696,6 +814,26 @@ def auto_train_all_models(min_samples: int = 2000) -> str:
         return f"Zu wenig Daten: {len(df)}/{min_samples}"
 
     df = _clean_frame(df, FEATURES)
+
+    # --- Feature coverage report (before training) ---
+    coverage_reports: Dict[str, Dict] = {}
+    coverage_reports["general"] = generate_feature_coverage_report(df, FEATURES, "general")
+
+    # Log critical feature warnings
+    for feat, stats in coverage_reports["general"].items():
+        if stats.get("is_critical") and stats["non_null_rate"] < 0.01:
+            log.warning(
+                "CRITICAL: Feature '%s' is 100%% NaN in general dataset — "
+                "check pipeline or run backfill_ml_features.py",
+                feat,
+            )
+        elif stats.get("is_critical") and stats["variance"] < EPS:
+            log.warning(
+                "CRITICAL: Feature '%s' has zero variance in general dataset — "
+                "all values identical; hint: check meta_features unpacking",
+                feat,
+            )
+
     results = []
 
     # --- Train general model ---
@@ -737,6 +875,20 @@ def auto_train_all_models(min_samples: int = 2000) -> str:
             sport_features = FEATURES + [f for f in extra if f not in FEATURES]
 
             subset = _clean_frame(subset, sport_features)
+
+            # Per-sport coverage report
+            sport_cov = generate_feature_coverage_report(subset, sport_features, group)
+            coverage_reports[group] = sport_cov
+
+            # Log critical feature warnings per sport
+            for feat, stats in sport_cov.items():
+                if stats.get("is_critical") and stats["non_null_rate"] < 0.01:
+                    log.warning(
+                        "CRITICAL: Feature '%s' is 100%% NaN for %s — "
+                        "check pipeline or run backfill_ml_features.py",
+                        feat, group,
+                    )
+
             X_sport = subset[sport_features]
             y_sport = (subset["status"] == "won").astype(int)
             active_sport = _get_active_features(X_sport, sport_features)
@@ -760,6 +912,12 @@ def auto_train_all_models(min_samples: int = 2000) -> str:
             else:
                 results.append(f"{group}: REJECTED — {reason}")
             log.info("Champion/Challenger (%s): %s", group, reason)
+
+    # Write coverage report artifacts
+    try:
+        write_feature_coverage_artifacts(coverage_reports)
+    except Exception as exc:
+        log.warning("Failed to write feature coverage report: %s", exc)
 
     return " | ".join(results)
 

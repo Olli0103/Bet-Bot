@@ -9,6 +9,7 @@ from src.data.redis_cache import cache
 from src.integrations.apisports_fetcher import APISportsFetcher
 from src.integrations.news_fetcher import NewsFetcher
 from src.integrations.ollama_sentiment import OllamaSentimentClient
+from src.integrations.reddit_fetcher import RedditFetcher
 
 log = logging.getLogger(__name__)
 
@@ -33,9 +34,6 @@ def team_sentiment_score(team: str, limit_articles: int = 8) -> float:
         nlp = OllamaSentimentClient()
         payload = news.search_news(query=team)
         articles = (payload.get("articles") or [])[:limit_articles]
-        if not articles:
-            cache.set_json(k, 0.0, 6 * 3600)
-            return 0.0
 
         vals: List[float] = []
         for a in articles:
@@ -46,6 +44,20 @@ def team_sentiment_score(team: str, limit_articles: int = 8) -> float:
                 continue
             s = nlp.analyze(text=text, context=f"Team={team}")
             vals.append(_norm_label(s.label) * float(s.confidence))
+
+        # ── Reddit sentiment (supplementary source) ──────────────
+        try:
+            reddit = RedditFetcher()
+            reddit_text = reddit.fetch_team_sentiment_posts_sync(team)
+            if reddit_text:
+                rs = nlp.analyze(text=reddit_text, context=f"Reddit r/sportsbook Team={team}")
+                vals.append(_norm_label(rs.label) * float(rs.confidence))
+        except Exception as exc:
+            log.debug("reddit_sentiment_skip: %s for %s", exc, team)
+
+        if not vals:
+            cache.set_json(k, 0.0, 6 * 3600)
+            return 0.0
 
         score = float(sum(vals) / max(1, len(vals)))
         cache.set_json(k, score, 6 * 3600)
