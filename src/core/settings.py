@@ -75,5 +75,35 @@ class Settings(BaseModel):
     # Combo leg minimum confidence (model_probability)
     min_combo_leg_confidence: float = float(os.getenv("MIN_COMBO_LEG_CONFIDENCE", "0.40"))
 
+    # EV (Expected Value) thresholds
+    min_ev_default: float = float(os.getenv("MIN_EV_DEFAULT", "0.01"))
+    min_ev_losing_streak: float = float(os.getenv("MIN_EV_LOSING_STREAK", "0.02"))
+    min_ev_drawdown: float = float(os.getenv("MIN_EV_DRAWDOWN", "0.02"))
+    min_ev_degradation: float = float(os.getenv("MIN_EV_DEGRADATION", "0.015"))
+    min_ev_good_run: float = float(os.getenv("MIN_EV_GOOD_RUN", "0.005"))
+
+    # Signal modes: Trading vs Learning
+    learning_capture_all_signals: bool = os.getenv("LEARNING_CAPTURE_ALL_SIGNALS", "true").lower() == "true"
+    allow_watchlist_signals: bool = os.getenv("ALLOW_WATCHLIST_SIGNALS", "true").lower() == "true"
+
+    # Fetch scheduler
+    fetch_min_delay_ms: int = int(os.getenv("FETCH_MIN_DELAY_MS", "800"))
+    fetch_max_delay_ms: int = int(os.getenv("FETCH_MAX_DELAY_MS", "1500"))
+    fetch_max_retries: int = int(os.getenv("FETCH_MAX_RETRIES", "3"))
+
+    # Kelly fraction (used by executioner agent)
+    kelly_fraction_default: float = float(os.getenv("KELLY_FRACTION_DEFAULT", "0.20"))
+    kelly_fraction_reactive: float = float(os.getenv("KELLY_FRACTION_REACTIVE", "0.15"))
+
+    # Circuit breaker thresholds
+    losing_streak_threshold: int = int(os.getenv("LOSING_STREAK_THRESHOLD", "7"))
+    daily_loss_limit_pct: float = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "0.05"))
+    drawdown_max_pct: float = float(os.getenv("DRAWDOWN_MAX_PCT", "0.10"))
+    drawdown_lookback_days: int = int(os.getenv("DRAWDOWN_LOOKBACK_DAYS", "7"))
+
+    # Combo correlation penalty
+    combo_correlation_penalty: float = float(os.getenv("COMBO_CORRELATION_PENALTY", "0.80"))
+    combo_correlation_floor: float = float(os.getenv("COMBO_CORRELATION_FLOOR", "0.20"))
+
 
 settings = Settings()

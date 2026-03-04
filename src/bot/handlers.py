@@ -51,15 +51,19 @@ def _get_bankroll() -> float:
 
 
 def _sync_get_dashboard_data() -> Dict[str, Any]:
-    """Fetch lightweight dashboard aggregates from DB.
+    """Fetch lightweight LIVE dashboard aggregates from DB.
 
-    Returns raw tuples instead of full ORM objects to avoid loading
-    every historical bet into memory (OOM risk at 5000+ bets).
+    Excludes historical imports and training data — only real trading
+    activity is shown.  Returns raw tuples instead of full ORM objects
+    to avoid loading every historical bet into memory.
     """
     from sqlalchemy import func, case, literal_column
 
+    # Base filter: only non-training live data
+    live_filter = PlacedBet.is_training_data.is_(False)
+
     with SessionLocal() as db:
-        # Aggregate counts and sums in SQL
+        # Aggregate counts and sums in SQL — live bets only
         agg = db.execute(
             select(
                 func.count(PlacedBet.id).label("total"),
@@ -74,13 +78,13 @@ def _sync_get_dashboard_data() -> Dict[str, Any]:
                     (PlacedBet.status.in_(["won", "lost"]), PlacedBet.stake),
                     else_=literal_column("0"),
                 )).label("staked"),
-            )
+            ).where(live_filter)
         ).one()
 
-        # Equity curve: only fetch (id, pnl) for settled bets — tiny payload
+        # Equity curve: only fetch (id, pnl) for settled LIVE bets
         equity_rows = db.execute(
             select(PlacedBet.id, PlacedBet.pnl)
-            .where(PlacedBet.status.in_(["won", "lost"]))
+            .where(PlacedBet.status.in_(["won", "lost"]), live_filter)
             .order_by(PlacedBet.id.asc())
         ).all()
 
@@ -127,6 +131,8 @@ def _sync_place_bet(payload: dict) -> bool:
                     odds=float(payload["odds"]),
                     stake=float(payload["stake"]),
                     status="open",
+                    is_training_data=False,
+                    data_source="manual",
                 )
             )
             db.commit()
@@ -388,49 +394,13 @@ def _fetched_within(hours: int = 4) -> bool:
 # ---------------------------------------------------------------------------
 
 def _format_signal_card(b: dict, index: int, total: int) -> str:
-    """Format a single signal as a rich card with all transparency fields.
+    """Format a single signal as a compact, card-like message with status badge.
 
-    model_probability is the SINGLE confidence value shown in UI.
-    source_quality is the odds-pair reliability (shown separately).
+    Delegates to the shared signal_formatter for consistent output across
+    all channels (inline pagination, daily push, Telegram worker).
     """
-    sport = str(b.get("sport", "")).replace("_", " ").upper()
-    market = str(b.get("market", "h2h"))
-    model_p = float(b.get("model_probability", 0))
-    ev = float(b.get("expected_value", 0))
-    odds = float(b.get("bookmaker_odds", 0))
-    stake = float(b.get("recommended_stake", 0))
-    source = b.get("source_mode", "n/a")
-    ref = b.get("reference_book", "n/a")
-    src_q = float(b.get("source_quality", b.get("confidence", 0)))
-
-    # Transparency: kelly_raw, stake_before_cap, cap status, trigger
-    kelly_raw = float(b.get("kelly_raw", b.get("kelly_fraction", 0)))
-    stake_before = float(b.get("stake_before_cap", stake))
-    cap_applied = b.get("stake_cap_applied", False)
-    trigger = b.get("trigger", "")
-
-    badge = _calibration_badge(model_p)
-    trap = _retail_trap_badge(b)
-
-    # Show market type if not plain h2h
-    market_tag = f" | {market}" if market != "h2h" else ""
-    cap_tag = " [CAP]" if cap_applied else ""
-    trigger_tag = f" | trigger={trigger}" if trigger else ""
-
-    explanation = b.get("explanation", "")
-    why_line = f"\n{explanation}" if explanation else ""
-
-    return (
-        f"Signal {index + 1}/{total} | {sport}{market_tag}\n"
-        f"--------------------\n"
-        f"Tipp: {b['selection']}\n"
-        f"Quote: {odds:.2f}\n"
-        f"Confidence: {_progress_bar(model_p)} {badge}{trap}\n"
-        f"EV: {ev:+.4f} | SrcQ: {src_q:.0%}\n"
-        f"Kelly: {kelly_raw:.4f} | Stake: {stake_before:.2f} -> {stake:.2f} EUR{cap_tag}\n"
-        f"{source} | {ref}{trigger_tag}"
-        f"{why_line}"
-    )
+    from src.utils.signal_formatter import format_signal_card
+    return format_signal_card(b, index, total)
 
 
 def _signal_nav_keyboard(index: int, total: int, bet_data: Optional[dict] = None) -> InlineKeyboardMarkup:

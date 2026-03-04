@@ -2,6 +2,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from src.data.postgres import SessionLocal
@@ -31,7 +32,11 @@ def auto_place_virtual_bets(signals: list, features_dict: dict):
     start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
     with SessionLocal() as db:
-        existing = db.query(PlacedBet.event_id, PlacedBet.selection).filter(PlacedBet.created_at >= start_of_day).all()
+        existing = db.execute(
+            select(PlacedBet.event_id, PlacedBet.selection).where(
+                PlacedBet.created_at >= start_of_day
+            )
+        ).all()
         existing_set = {f"{e[0]}|{e[1]}" for e in existing}
 
         for sig in signals:
@@ -55,6 +60,8 @@ def auto_place_virtual_bets(signals: list, features_dict: dict):
                     sharp_vig=float(feat.get("sharp_vig", 0.0)),
                     sentiment_delta=float(feat.get("sentiment_delta", 0.0)),
                     injury_delta=float(feat.get("injury_delta", 0.0)),
+                    is_training_data=False,
+                    data_source="live_trade",
                     # Persist ALL ML features so the trainer can use them
                     meta_features=_safe_meta(feat),
                 )
@@ -100,6 +107,8 @@ def place_virtual_bet(
                 sharp_vig=float(features.get("sharp_vig", 0.0)),
                 sentiment_delta=float(features.get("sentiment_delta", 0.0)),
                 injury_delta=float(features.get("injury_delta", 0.0)),
+                is_training_data=False,
+                data_source="live_trade",
                 # Persist ALL ML features so the trainer can use them
                 meta_features=_safe_meta(features),
             )

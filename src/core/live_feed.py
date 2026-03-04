@@ -11,12 +11,19 @@ from src.core.betting_math import public_bias_score
 from src.core.elo_ratings import EloSystem
 from src.core.enrichment import batch_team_sentiment, soccer_injury_delta
 from src.core.feature_engineering import FeatureEngineer
+from src.core.fetch_scheduler import (
+    FetchCycleStats,
+    filter_match_keys,
+    sequential_fetch_odds,
+)
 from src.core.form_tracker import get_form_l5
 from src.core.ghost_trading import auto_place_virtual_bets
 from src.core.h2h_tracker import get_h2h_features
+from src.core.paper_signals import capture_paper_signal
 from src.core.poisson_model import PoissonSoccerModel
 from src.core.pricing_model import QuantPricingModel
 from src.core.settings import settings
+from src.core.source_gap_report import StageDropTracker
 from src.core.volatility_tracker import (
     detect_steam_move,
     get_line_velocity,
@@ -27,6 +34,12 @@ from src.core.volatility_tracker import (
 from src.data.redis_cache import cache
 from src.integrations.odds_fetcher import OddsFetcher
 from src.models.betting import BetSignal, ComboBet
+from src.utils.signal_formatter import (
+    canonical_market_group,
+    deduplicate_signals,
+    display_status,
+    sort_signals,
+)
 
 log = logging.getLogger(__name__)
 
@@ -203,6 +216,8 @@ def fetch_and_build_signals(
     """
     from src.core.dynamic_settings import dynamic_settings
 
+    gap_tracker = StageDropTracker()
+
     def _progress(phase: str, detail: str = "", pct: int = 0, **extra):
         if progress_callback:
             try:
@@ -231,6 +246,7 @@ def fetch_and_build_signals(
     engine = BettingEngine(bankroll=bankroll)
 
     signals: List[BetSignal] = []
+    all_signals: List[BetSignal] = []  # includes paper-only signals
     combo_legs: List[Dict[str, Any]] = []
     features: Dict[str, Dict[str, float]] = {}
     qpm = QuantPricingModel()
@@ -257,6 +273,7 @@ def fetch_and_build_signals(
     # Fetch historical odds for momentum calculation (Pro API)
     momentum_data: Dict[str, Dict[str, Dict[str, float]]] = {}
     done_sports: List[str] = []
+    fetch_cycle_stats: Optional[Dict[str, Any]] = None
 
     if _cached_events is not None:
         # Enrichment rebuild: reuse previously fetched events
@@ -269,29 +286,33 @@ def fetch_and_build_signals(
                   sport_idx=len(expanded_sports), sport_total=len(expanded_sports),
                   events=stats["events_seen"], done_sports=done_sports)
     else:
-        for sport_idx, sport in enumerate(expanded_sports):
-            try:
-                events = odds.get_sport_odds(sport_key=sport, regions="eu", markets="h2h,spreads,totals", ttl_seconds=120)
-            except Exception:
-                continue
-            if not isinstance(events, list):
-                continue
+        # Use sequential fetch scheduler with rate limiting
+        raw_events, cycle_stats = sequential_fetch_odds(
+            sport_keys=expanded_sports,
+            odds_fetcher=odds,
+            regions="eu",
+            markets="h2h,spreads,totals",
+            ttl_seconds=120,
+            min_delay_ms=settings.fetch_min_delay_ms,
+            max_delay_ms=settings.fetch_max_delay_ms,
+            max_retries=settings.fetch_max_retries,
+        )
+        fetch_cycle_stats = cycle_stats.to_dict()
+        gap_tracker.set_fetch_stats(fetch_cycle_stats)
+        stats["events_seen"] = len(raw_events)
+        done_sports = list(cycle_stats.fetched_keys)
 
-            # Fetch 12h-ago odds for momentum (best-effort, non-blocking)
+        # Fetch 12h-ago odds for momentum (best-effort, per-sport)
+        for sport in done_sports:
             try:
                 momentum_data[sport] = odds.get_odds_12h_ago(sport_key=sport)
             except Exception:
                 momentum_data[sport] = {}
 
-            for e in events:
-                stats["events_seen"] += 1
-                raw_events.append((sport, e))
-
-            done_sports.append(sport)
-            fetch_pct = 5 + int((sport_idx + 1) / max(1, len(expanded_sports)) * 45)
-            _progress("fetch_odds", sport, fetch_pct,
-                      sport_idx=sport_idx + 1, sport_total=len(expanded_sports),
-                      events=stats["events_seen"], done_sports=list(done_sports))
+        fetch_pct = 50
+        _progress("fetch_odds", f"{len(done_sports)} Keys fetched", fetch_pct,
+                  sport_idx=len(done_sports), sport_total=len(expanded_sports),
+                  events=stats["events_seen"], done_sports=list(done_sports))
 
         # Cache raw events + context for background enrichment pass
         if skip_enrichment:
@@ -354,11 +375,15 @@ def fetch_and_build_signals(
         away = e.get("away_team") or ""
         commence = str(e.get("commence_time") or "")
 
+        gap_tracker.record_raw_event(sport)
+
         try:
             ct = datetime.fromisoformat(commence.replace("Z", "+00:00")).astimezone(timezone.utc)
             if ct < now_utc or ct >= window_end:
+                gap_tracker.record_drop(sport, "time_window")
                 continue
         except Exception:
+            gap_tracker.record_drop(sport, "time_window")
             continue
 
         # Time to kickoff in hours
@@ -367,11 +392,19 @@ def fetch_and_build_signals(
         # --- H2H prices (primary market) ---
         prices = _extract_prices(e.get("bookmakers") or [])
         last_updates = _extract_last_updates(e.get("bookmakers") or [])
+
+        # Track bookmaker availability
+        has_tipico = "tipico_de" in prices
+        has_sharp = any(b in prices for b in SHARP_PRIORITY)
+        gap_tracker.record_parsed_event(sport, has_tipico, has_sharp)
+
         sharp_book, sharp = _pick_sharp(prices)
         if not sharp_book or not sharp:
+            gap_tracker.record_drop(sport, "no_bookmaker_overlap")
             continue
         target_book, target = _pick_target_book(prices, sharp_book)
         if not target_book or not target:
+            gap_tracker.record_drop(sport, "no_bookmaker_overlap")
             continue
 
         source_mode = "primary" if target_book == "tipico_de" and sharp_book == "pinnacle" else (
@@ -480,6 +513,7 @@ def fetch_and_build_signals(
 
             # Skip markets not in active_markets
             if "h2h" not in active_markets:
+                gap_tracker.record_drop(sport, "invalid_market")
                 continue
 
             is_home = selection == home
@@ -595,11 +629,6 @@ def fetch_and_build_signals(
                 features=ml_features,
             )
 
-            # NOTE: poisson_true_prob, market_momentum, elo_expected, and
-            # injury_delta are all standard XGBoost input features.  The tree
-            # ensemble learns their optimal weights organically — no manual
-            # post-hoc blending is applied here.
-
             features[f"{event_id}:{selection}"] = ml_features
 
             sig = engine.make_signal(
@@ -614,7 +643,40 @@ def fetch_and_build_signals(
                 source_quality=conf,
                 tax_rate=effective_tax,
             )
-            signals.append(sig)
+
+            # Track in gap report
+            is_playable = sig.recommended_stake > 0 and not sig.rejected_reason
+            gap_tracker.record_signal(sport, playable=is_playable)
+            if sig.rejected_reason:
+                if "confidence" in sig.rejected_reason:
+                    gap_tracker.record_drop(sport, "confidence")
+                elif "ev" in sig.rejected_reason.lower():
+                    gap_tracker.record_drop(sport, "ev")
+                elif "stake" in sig.rejected_reason.lower():
+                    gap_tracker.record_drop(sport, "stake_zero")
+
+            # Paper signal capture: record ALL candidates for learning
+            if settings.learning_capture_all_signals:
+                from src.core.risk_guards import passes_confidence_gate
+                gate_passed, _ = passes_confidence_gate(model_p, sport, "h2h")
+                capture_paper_signal(
+                    event_id=event_id,
+                    sport=sport,
+                    market="h2h",
+                    selection=f"{selection} ({home} vs {away})",
+                    bookmaker_odds=float(target_odds),
+                    model_probability=model_p,
+                    expected_value=sig.expected_value,
+                    recommended_stake=sig.recommended_stake,
+                    confidence_gate_passed=gate_passed,
+                    reject_reason=sig.rejected_reason,
+                    features=ml_features,
+                )
+
+            all_signals.append(sig)
+            if is_playable:
+                signals.append(sig)
+
             combo_legs.append(
                 {
                     "event_id": event_id,
@@ -658,7 +720,11 @@ def fetch_and_build_signals(
                                 source_quality=conf * 0.9,
                                 tax_rate=effective_tax,
                             )
-                            signals.append(sig)
+                            is_playable = sig.recommended_stake > 0 and not sig.rejected_reason
+                            gap_tracker.record_signal(sport, playable=is_playable)
+                            all_signals.append(sig)
+                            if is_playable:
+                                signals.append(sig)
                             combo_legs.append({
                                 "event_id": event_id,
                                 "selection": dc_label,
@@ -695,7 +761,11 @@ def fetch_and_build_signals(
                                     source_quality=conf * 0.85,
                                     tax_rate=effective_tax,
                                 )
-                                signals.append(sig)
+                                is_playable = sig.recommended_stake > 0 and not sig.rejected_reason
+                                gap_tracker.record_signal(sport, playable=is_playable)
+                                all_signals.append(sig)
+                                if is_playable:
+                                    signals.append(sig)
                                 combo_legs.append({
                                     "event_id": event_id,
                                     "selection": f"DNB {dnb_name}",
@@ -740,7 +810,11 @@ def fetch_and_build_signals(
                         source_quality=conf * 0.8,
                         tax_rate=effective_tax,
                     )
-                    signals.append(sig)
+                    is_playable = sig.recommended_stake > 0 and not sig.rejected_reason
+                    gap_tracker.record_signal(sport, playable=is_playable)
+                    all_signals.append(sig)
+                    if is_playable:
+                        signals.append(sig)
                     combo_legs.append({
                         "event_id": event_id,
                         "selection": f"{sel_name} {point_val:+.1f}",
@@ -771,9 +845,6 @@ def fetch_and_build_signals(
                     point_val = float(parts[1]) if len(parts) > 1 else 2.5
                     sharp_prob_tot = 1.0 / s_odds if s_odds > 1.0 else 0.5
 
-                    # For totals, use sharp implied probability as the base.
-                    # Poisson-derived features (over25_rate, expected_total_proxy)
-                    # are available as XGBoost inputs when training a totals model.
                     model_p_tot = sharp_prob_tot
 
                     sig = engine.make_signal(
@@ -788,7 +859,11 @@ def fetch_and_build_signals(
                         source_quality=conf * 0.85,
                         tax_rate=effective_tax,
                     )
-                    signals.append(sig)
+                    is_playable = sig.recommended_stake > 0 and not sig.rejected_reason
+                    gap_tracker.record_signal(sport, playable=is_playable)
+                    all_signals.append(sig)
+                    if is_playable:
+                        signals.append(sig)
                     combo_legs.append({
                         "event_id": event_id,
                         "selection": f"{sel_name} {point_val}",
@@ -808,13 +883,19 @@ def fetch_and_build_signals(
         key=lambda s: (s.model_probability, s.expected_value, -s.bookmaker_odds),
         reverse=True,
     )
+
+    # Deduplicate: one pick per (event_id, canonical_market_group)
+    ranked_dicts = [r.model_dump() for r in ranked]
+    deduped_dicts = deduplicate_signals(ranked_dicts)
+    deduped_dicts = sort_signals(deduped_dicts)
+
     log.info(
-        "Ranking: %d signals total, %d after EV>0+confidence gate, "
-        "%d rejected by gate",
-        len(signals), len(ranked),
-        sum(1 for s in signals if s.rejected_reason),
+        "Ranking: %d signals total (%d all incl. paper), %d after EV>0+confidence gate, "
+        "%d after dedup, %d rejected by gate",
+        len(signals), len(all_signals), len(ranked), len(deduped_dicts),
+        sum(1 for s in all_signals if s.rejected_reason),
     )
-    top10 = ranked[:10]
+    top10 = deduped_dicts[:10]
 
     # Build combos for configured sizes (default: 10, 20, 30)
     # Hard confidence floor for every combo leg (default 40%)
@@ -833,22 +914,40 @@ def fetch_and_build_signals(
 
     now_iso = datetime.now(timezone.utc).isoformat()
 
+    # Finalize gap report
+    gap_tracker.set_final_count(len(top10))
+    try:
+        gap_tracker.save_report()
+    except Exception as exc:
+        log.warning("source_gap_report save failed: %s", exc)
+
     # Cache global top-10 snapshot (used by daily push + backward compat)
+    # top10 is already a list of dicts (post-dedup)
     payload = {
         "ts": now_iso,
         "count": len(top10),
-        "items": [r.model_dump() for r in top10],
+        "items": top10,
+        "raw_signal_count": len(ranked),
+        "dedup_count": len(deduped_dicts),
+        "status_counts": {
+            "PLAYABLE": sum(1 for s in deduped_dicts if s.get("display_status") == "PLAYABLE"),
+            "WATCHLIST": sum(1 for s in deduped_dicts if s.get("display_status") == "WATCHLIST"),
+            "BLOCKED": sum(1 for s in deduped_dicts if s.get("display_status") == "BLOCKED"),
+        },
     }
     stats["signals"] = len(top10)
     stats["signals_ranked"] = len(ranked)
+    stats["signals_deduped"] = len(deduped_dicts)
+    stats["signals_total"] = len(all_signals)
+    stats["signals_paper_only"] = len(all_signals) - len(signals)
 
     cache.set_json(SNAPSHOT_KEY, payload, ttl_seconds=12 * 3600)
 
-    # Cache ALL ranked signals so per-sport Top10 can draw from a full pool
+    # Cache ALL ranked signals (deduped) so per-sport Top10 can draw from a full pool
     all_ranked_payload = {
         "ts": now_iso,
-        "count": len(ranked),
-        "items": [r.model_dump() for r in ranked],
+        "count": len(deduped_dicts),
+        "items": deduped_dicts,
     }
     cache.set_json(ALL_RANKED_KEY, all_ranked_payload, ttl_seconds=12 * 3600)
 
@@ -857,7 +956,10 @@ def fetch_and_build_signals(
     cache.set_json(META_KEY, stats, ttl_seconds=12 * 3600)
 
     try:
-        auto_place_virtual_bets(top10, features)
+        # Convert deduped dicts back to BetSignal for ghost trading
+        top10_signals = [BetSignal(**{k: v for k, v in d.items()
+                         if k in BetSignal.model_fields}) for d in top10]
+        auto_place_virtual_bets(top10_signals, features)
     except Exception as exc:
         log.warning("Ghost trading failed: %s", exc)
 
@@ -865,7 +967,12 @@ def fetch_and_build_signals(
               signals=len(top10), events=stats["events_seen"],
               combos=len(combos), done_sports=list(done_sports))
 
-    return top10
+    # Return BetSignal objects for backward compatibility
+    try:
+        return [BetSignal(**{k: v for k, v in d.items()
+                if k in BetSignal.model_fields}) for d in top10]
+    except Exception:
+        return top10
 
 
 def run_enrichment_pass(progress_callback=None) -> Dict[str, Any]:

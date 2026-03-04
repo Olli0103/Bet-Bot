@@ -11,6 +11,7 @@ from src.core.betting_math import (
     kelly_stake,
 )
 from src.core.risk_guards import apply_stake_cap, check_data_source_health, explain_signal, passes_confidence_gate
+from src.core.settings import settings
 from src.models.betting import BetSignal, ComboBet, ComboLeg
 
 log = logging.getLogger(__name__)
@@ -145,11 +146,11 @@ class BettingEngine:
                     "Same-game parlay detected: %d legs share event_id=%s "
                     "(correlation penalty applied)", cnt, eid,
                 )
-        # 0.80 per correlated pair (stronger than previous 0.90 to reflect
-        # high intra-match correlation, e.g. "Home Win" + "Over 2.5").
-        # Floor at 0.20 to prevent exponential blow-up on large SGPs
-        # (e.g. 8-leg SGP → 28 pairs → 0.80^28 = 0.002 is unrealistic).
-        return max(0.20, 0.80 ** correlated_pairs)
+        # Configurable penalty per correlated pair (default 0.80).
+        # Floor prevents exponential blow-up on large SGPs.
+        penalty = settings.combo_correlation_penalty
+        floor = settings.combo_correlation_floor
+        return max(floor, penalty ** correlated_pairs)
 
     def build_combo(
         self,

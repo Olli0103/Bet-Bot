@@ -3,6 +3,9 @@
 Tracks ROI, hit rate, calibration, and Brier score over rolling windows.
 Circuit breakers halt or reduce betting during losing streaks, daily loss
 limits, or detected model degradation.
+
+All queries exclude training data (historical imports) by default —
+only live trading bets affect circuit breaker decisions.
 """
 from __future__ import annotations
 
@@ -18,17 +21,21 @@ from src.data.postgres import SessionLocal
 
 log = logging.getLogger(__name__)
 
+# Shared filter: exclude training data from all live performance queries
+_LIVE_ONLY = PlacedBet.is_training_data.is_(False)
+
 
 class PerformanceMonitor:
     """Tracks betting performance and provides circuit breaker signals."""
 
     def get_recent_performance(self, days: int = 7) -> Dict:
-        """ROI, hit rate, and PnL for the last N days."""
+        """ROI, hit rate, and PnL for the last N days (live bets only)."""
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         with SessionLocal() as db:
             bets = db.scalars(
                 select(PlacedBet).where(
                     PlacedBet.status.in_(["won", "lost"]),
+                    _LIVE_ONLY,
                 )
             ).all()
 
@@ -63,10 +70,10 @@ class PerformanceMonitor:
     def check_circuit_breakers(self) -> Dict[str, bool]:
         """Check all circuit breaker conditions. True = breaker tripped."""
         return {
-            "losing_streak": self._check_losing_streak(threshold=7),
-            "daily_loss_limit": self._check_daily_loss(max_pct=0.05),
+            "losing_streak": self._check_losing_streak(threshold=settings.losing_streak_threshold),
+            "daily_loss_limit": self._check_daily_loss(max_pct=settings.daily_loss_limit_pct),
             "model_degradation": self._check_model_degradation(),
-            "drawdown": self._check_drawdown(max_pct=0.10, lookback_days=7),
+            "drawdown": self._check_drawdown(max_pct=settings.drawdown_max_pct, lookback_days=settings.drawdown_lookback_days),
         }
 
     def get_adjustment_factors(self) -> Dict[str, float]:
@@ -76,28 +83,28 @@ class PerformanceMonitor:
 
         # If any breaker is tripped, reduce aggressiveness
         if breakers.get("losing_streak") or breakers.get("daily_loss_limit"):
-            return {"kelly_multiplier": 0.5, "min_ev": 0.02, "active": True}
+            return {"kelly_multiplier": 0.5, "min_ev": settings.min_ev_losing_streak, "active": True}
 
         if breakers.get("drawdown"):
-            return {"kelly_multiplier": 0.5, "min_ev": 0.02, "active": True}
+            return {"kelly_multiplier": 0.5, "min_ev": settings.min_ev_drawdown, "active": True}
 
         if breakers.get("model_degradation"):
-            return {"kelly_multiplier": 0.7, "min_ev": 0.015, "active": True}
+            return {"kelly_multiplier": 0.7, "min_ev": settings.min_ev_degradation, "active": True}
 
         roi = perf.get("roi", 0.0)
         if roi > 0.05:
             # Good run: slightly more aggressive
-            return {"kelly_multiplier": 1.2, "min_ev": 0.005, "active": False}
+            return {"kelly_multiplier": 1.2, "min_ev": settings.min_ev_good_run, "active": False}
 
         # Normal
-        return {"kelly_multiplier": 1.0, "min_ev": 0.01, "active": False}
+        return {"kelly_multiplier": 1.0, "min_ev": settings.min_ev_default, "active": False}
 
     def _check_losing_streak(self, threshold: int = 7) -> bool:
-        """Return True if the last N consecutive bets are all losses."""
+        """Return True if the last N consecutive LIVE bets are all losses."""
         with SessionLocal() as db:
             bets = db.scalars(
                 select(PlacedBet)
-                .where(PlacedBet.status.in_(["won", "lost"]))
+                .where(PlacedBet.status.in_(["won", "lost"]), _LIVE_ONLY)
                 .order_by(PlacedBet.id.desc())
                 .limit(threshold)
             ).all()
@@ -107,11 +114,14 @@ class PerformanceMonitor:
         return all(b.status == "lost" for b in bets)
 
     def _check_daily_loss(self, max_pct: float = 0.05) -> bool:
-        """Return True if today's losses exceed max_pct of bankroll."""
+        """Return True if today's LIVE losses exceed max_pct of bankroll."""
         today = datetime.now(timezone.utc).date()
         with SessionLocal() as db:
             bets = db.scalars(
-                select(PlacedBet).where(PlacedBet.status.in_(["won", "lost"]))
+                select(PlacedBet).where(
+                    PlacedBet.status.in_(["won", "lost"]),
+                    _LIVE_ONLY,
+                )
             ).all()
 
         daily_pnl = 0.0
@@ -146,7 +156,7 @@ class PerformanceMonitor:
         return perf["total_pnl"] < -(bankroll * max_pct)
 
     def generate_report(self) -> str:
-        """Generate a performance summary for Telegram."""
+        """Generate a performance summary for Telegram (live bets only)."""
         perf_7d = self.get_recent_performance(days=7)
         perf_30d = self.get_recent_performance(days=30)
         breakers = self.check_circuit_breakers()
@@ -157,7 +167,7 @@ class PerformanceMonitor:
             breaker_status.append(f"{'🔴' if tripped else '🟢'} {name}")
 
         report = (
-            "📊 Performance Report\n\n"
+            "📊 Performance Report (Live Only)\n\n"
             f"7-Tage:\n"
             f"  ROI: {perf_7d['roi']:.2%} | Hit Rate: {perf_7d['hit_rate']:.2%}\n"
             f"  PnL: {perf_7d['total_pnl']:.2f} EUR | Bets: {perf_7d['bets']}\n\n"

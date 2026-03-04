@@ -546,6 +546,31 @@ Agent Orchestrator (adaptive: 60s pre-kickoff / 5min normal)
 9. **Virtual Trading** -- Ghost-trades all signals for tracking without real money
 10. **Source Health** -- Per-source circuit breakers with failure counting, cooldown timers, and half-open recovery for all 8 data sources
 
+### Data Source Separation
+
+All `placed_bets` rows carry two classification columns:
+
+| Column | Type | Default | Purpose |
+|--------|------|---------|---------|
+| `is_training_data` | `Boolean` | `false` | Excludes row from live PnL / ROI / bankroll |
+| `data_source` | `String(32)` | `live_trade` | Origin tag for filtering and analytics |
+
+**Allowed `data_source` values:** `live_trade`, `paper_signal`, `historical_import`, `manual`
+
+Every PnL, ROI, bankroll, and equity-curve query filters with `WHERE is_training_data = false`, ensuring ~760k historical import rows never pollute live performance numbers.
+
+**Backfill existing rows:**
+
+```bash
+# Preview what would change
+python scripts/backfill_data_source_flags.py --dry-run
+
+# Apply (idempotent, safe to re-run)
+python scripts/backfill_data_source_flags.py --force
+```
+
+The backfill recognises historical rows via: (1) `notes LIKE '%source=historical_import%'`, (2) `notes LIKE '%source=paper_signal%'`, (3) heuristic — `stake=1.0` + settled + no notes.
+
 ---
 
 ## Features
@@ -568,6 +593,14 @@ Configurable via Telegram settings dashboard or `LIVE_SPORTS` env var.
 - **double_chance** (1X, X2, 12) -- mathematically derived from 1X2 sharp odds (soccer)
 - **draw_no_bet** (DNB) -- derived from 1X2 via draw-removed redistribution (soccer)
 - Cross-market value detection via Poisson model (soccer: over/under 0.5/1.5/2.5/3.5, BTTS)
+
+### Signal Deduplication & Card Format
+
+- **One pick per leg**: Enforces one signal per `(event_id, canonical_market_group)`. Market groups: `h2h`, `double_chance`, `draw_no_bet`, `spreads`, `totals`.
+- **Selection rule**: `model_probability DESC → expected_value DESC → bookmaker_odds ASC`
+- **Status badges**: 🟢 PLAYABLE (positive EV, stake > 0) | 🟡 WATCHLIST (EV ≤ 0) | 🔴 BLOCKED (rejected by gate)
+- **Summary header**: Shows raw vs deduped count, status breakdown, active EV-cut and confidence gates
+- **Card format**: Compact, card-like layout with sport emoji, status badge, and all transparency fields preserved
 
 ### Telegram UI/UX
 
@@ -801,10 +834,10 @@ Feature importance and pruning decisions are stored in the model's `metrics` dic
 
 | Breaker | Trigger | Action |
 |---------|---------|--------|
-| Losing streak | 7+ consecutive losses | Kelly x0.5, min EV raised to 0.02 |
-| Daily loss limit | > 5% of bankroll lost today | Kelly x0.5, min EV raised to 0.02 |
-| Drawdown | 7-day PnL loss > 10% of bankroll | Kelly x0.5, min EV raised to 0.02 |
-| Model degradation | Hit rate < 40% over 14 days | Kelly x0.7, min EV raised to 0.015 |
+| Losing streak | `LOSING_STREAK_THRESHOLD` consecutive losses (default 7) | Kelly x0.5, min EV raised (`MIN_EV_LOSING_STREAK`, default 0.02) |
+| Daily loss limit | > `DAILY_LOSS_LIMIT_PCT` of bankroll lost today (default 5%) | Kelly x0.5, min EV raised (`MIN_EV_LOSING_STREAK`) |
+| Drawdown | `DRAWDOWN_LOOKBACK_DAYS`-day PnL loss > `DRAWDOWN_MAX_PCT` of bankroll (default 10%) | Kelly x0.5, min EV raised (`MIN_EV_DRAWDOWN`, default 0.02) |
+| Model degradation | Hit rate < 40% over 14 days | Kelly x0.7, min EV raised (`MIN_EV_DEGRADATION`, default 0.015) |
 | Data source offline | Odds API circuit breaker open | All betting halted |
 
 ### Backtesting
@@ -845,7 +878,13 @@ All settings are loaded from environment variables (`.env` file) via `src/core/s
 | `FOOTBALL_DATA_API_KEY` | -- | No | football-data.org API key (free tier) |
 | `STATS_INGESTION_ENABLED` | `true` | No | Enable/disable stats ingestion pipeline |
 | `STATS_INGESTION_INTERVAL_HOURS` | `6` | No | How often stats ingestion runs |
-| **Risk Guards** | | | |
+| **EV Thresholds** | | | |
+| `MIN_EV_DEFAULT` | `0.01` | No | Min expected value for normal operation |
+| `MIN_EV_LOSING_STREAK` | `0.02` | No | Min EV when losing streak or daily loss breaker trips |
+| `MIN_EV_DRAWDOWN` | `0.02` | No | Min EV when drawdown breaker trips |
+| `MIN_EV_DEGRADATION` | `0.015` | No | Min EV when model degradation detected |
+| `MIN_EV_GOOD_RUN` | `0.005` | No | Min EV during good performance (ROI > 5%) |
+| **Confidence Gates** | | | |
 | `MIN_CONF_SOCCER_H2H` | `0.55` | No | Min model_probability for soccer H2H bets |
 | `MIN_CONF_SOCCER_TOTALS` | `0.56` | No | Min model_probability for soccer totals |
 | `MIN_CONF_SOCCER_SPREAD` | `0.56` | No | Min model_probability for soccer spreads |
@@ -858,6 +897,24 @@ All settings are loaded from environment variables (`.env` file) via `src/core/s
 | `MAX_STAKE_LONGSHOT_PCT` | `0.0075` | No | Max stake for draws/longshots (0.75%) |
 | `LONGSHOT_ODDS_THRESHOLD` | `3.5` | No | Odds >= this trigger longshot cap |
 | `MIN_COMBO_LEG_CONFIDENCE` | `0.40` | No | Min model_probability per combo leg |
+| **Kelly Fraction** | | | |
+| `KELLY_FRACTION_DEFAULT` | `0.20` | No | Standard Kelly fraction for bet sizing |
+| `KELLY_FRACTION_REACTIVE` | `0.15` | No | Reduced Kelly fraction for reactive bets (steam moves) |
+| **Circuit Breakers** | | | |
+| `LOSING_STREAK_THRESHOLD` | `7` | No | Consecutive losses to trigger losing streak breaker |
+| `DAILY_LOSS_LIMIT_PCT` | `0.05` | No | Daily loss as fraction of bankroll to trigger breaker (5%) |
+| `DRAWDOWN_MAX_PCT` | `0.10` | No | Rolling drawdown as fraction of bankroll to trigger breaker (10%) |
+| `DRAWDOWN_LOOKBACK_DAYS` | `7` | No | Days lookback for drawdown calculation |
+| **Combo Correlation** | | | |
+| `COMBO_CORRELATION_PENALTY` | `0.80` | No | Probability penalty per correlated pair in combos |
+| `COMBO_CORRELATION_FLOOR` | `0.20` | No | Minimum correlation penalty floor (prevents near-zero) |
+| **Signal Modes / Learning** | | | |
+| `LEARNING_CAPTURE_ALL_SIGNALS` | `true` | No | Capture all signal candidates as paper records for learning |
+| `ALLOW_WATCHLIST_SIGNALS` | `true` | No | Include watchlist/paper-only signals in output |
+| **Fetch Scheduler** | | | |
+| `FETCH_MIN_DELAY_MS` | `800` | No | Min delay between sequential odds API requests (ms) |
+| `FETCH_MAX_DELAY_MS` | `1500` | No | Max delay between sequential odds API requests (ms) |
+| `FETCH_MAX_RETRIES` | `3` | No | Max retries per sport key on 429/5xx errors |
 
 ---
 

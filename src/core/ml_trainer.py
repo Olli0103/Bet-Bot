@@ -568,6 +568,7 @@ def _build_clv_dataset(sport_filter: Optional[str] = None) -> Optional[pd.DataFr
             .where(ecl.closing_implied_prob.isnot(None))
             .where(ecl.closing_implied_prob > 0.01)
             .where(ecl.closing_implied_prob < 0.99)
+            .where(PlacedBet.is_training_data.is_(False))
         )
 
         # Without market-aware join, restrict to h2h to avoid bleed
@@ -818,14 +819,23 @@ def _validate_model(model, metrics: Dict, active_features: List[str]) -> List[st
     return warnings
 
 
-def auto_train_model(min_samples: int = 500) -> str:
-    """Train the general model and also save legacy JSON weights for backward compatibility."""
+def auto_train_model(min_samples: int = 500, include_training_data: bool = True) -> str:
+    """Train the general model and also save legacy JSON weights for backward compatibility.
+
+    Parameters
+    ----------
+    include_training_data : bool
+        If True (default), include historical imports for maximum training data.
+        Set to False to train only on live/paper bets.
+    """
     MODELS_DIR.mkdir(exist_ok=True)
 
     with SessionLocal() as db:
         query = select(PlacedBet).where(
             PlacedBet.status.in_(["won", "lost"])
         ).order_by(PlacedBet.created_at.asc())
+        if not include_training_data:
+            query = query.where(PlacedBet.is_training_data.is_(False))
         df = pd.read_sql(query, db.bind)
 
     if len(df) < min_samples:
@@ -1033,7 +1043,7 @@ def write_feature_coverage_artifacts(
     log.info("Feature coverage report written to %s", md_path)
 
 
-def auto_train_all_models(min_samples: int = 2000) -> str:
+def auto_train_all_models(min_samples: int = 2000, include_training_data: bool = True) -> str:
     """Train general + sport-specific models with Champion vs Challenger.
 
     A newly trained model (Challenger) is only promoted to production if
@@ -1042,6 +1052,12 @@ def auto_train_all_models(min_samples: int = 2000) -> str:
 
     Before training, generates a feature coverage report per sport and
     emits hard warnings if critical features are 100% NaN.
+
+    Parameters
+    ----------
+    include_training_data : bool
+        If True (default), include historical imports for maximum training data.
+        Set to False to train only on live/paper bets.
     """
     MODELS_DIR.mkdir(exist_ok=True)
 
@@ -1049,6 +1065,8 @@ def auto_train_all_models(min_samples: int = 2000) -> str:
         query = select(PlacedBet).where(
             PlacedBet.status.in_(["won", "lost"])
         ).order_by(PlacedBet.created_at.asc())
+        if not include_training_data:
+            query = query.where(PlacedBet.is_training_data.is_(False))
         df = pd.read_sql(query, db.bind)
 
     if len(df) < min_samples:
