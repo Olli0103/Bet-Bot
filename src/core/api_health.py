@@ -7,6 +7,7 @@ from src.data.redis_cache import cache
 from src.integrations.apisports_fetcher import APISportsFetcher
 from src.integrations.news_fetcher import NewsFetcher
 from src.integrations.odds_fetcher import OddsFetcher
+from src.integrations.reddit_fetcher import RedditFetcher
 
 
 def _ts() -> str:
@@ -73,6 +74,17 @@ async def run_api_health_check() -> dict:
         out["newsapi"] = {"ok": False, "error": str(e)}
         _fail("newsapi", str(e))
 
+    # Reddit (unauthenticated — no API key needed)
+    try:
+        reddit = RedditFetcher()
+        text = await reddit.fetch_team_sentiment_posts("test", cache_ttl=60)
+        await reddit.close()
+        out["reddit"] = {"ok": True, "chars": len(text)}
+        _ok("reddit")
+    except Exception as e:
+        out["reddit"] = {"ok": False, "error": str(e)}
+        _fail("reddit", str(e))
+
     return out
 
 
@@ -88,4 +100,5 @@ def format_api_health_report(result: dict) -> str:
         line("OddsAPI", result.get("oddsapi", {})),
         line("API-Sports", result.get("apisports", {})),
         line("NewsAPI", result.get("newsapi", {})),
+        line("Reddit", result.get("reddit", {})),
     ])

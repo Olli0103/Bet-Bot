@@ -13,6 +13,9 @@ from typing import List
 
 import aiohttp
 
+from src.data.redis_cache import cache
+from src.integrations.base_fetcher import _safe_sync_run
+
 log = logging.getLogger(__name__)
 
 # ── Reddit rate-limit guard ──────────────────────────────────
@@ -83,13 +86,21 @@ class RedditFetcher:
 
     # -- public API -----------------------------------------------------------
 
-    async def fetch_team_sentiment_posts(self, team_name: str) -> str:
+    async def fetch_team_sentiment_posts(self, team_name: str, cache_ttl: int = 3600) -> str:
         """Search ``/r/sportsbook`` for recent posts mentioning *team_name*.
 
         Returns the concatenated ``title + selftext`` of up to 5 posts as
         a single string suitable for downstream LLM sentiment analysis.
         Returns an empty string on any error (never crashes the bot).
+
+        Results are cached in Redis for *cache_ttl* seconds (default 1 h)
+        to avoid unnecessary Reddit requests.
         """
+        cache_key = f"reddit:posts:{team_name.lower()}"
+        cached = cache.get_json(cache_key)
+        if cached is not None:
+            return str(cached)
+
         session = self._ensure_session()
         await self._respect_rate_limit()
 
@@ -131,7 +142,9 @@ class RedditFetcher:
             log.warning("reddit_unexpected_error: %s for team '%s'", exc, team_name)
             return ""
 
-        return self._parse_posts(data, team_name)
+        text = self._parse_posts(data, team_name)
+        cache.set_json(cache_key, text, cache_ttl)
+        return text
 
     # -- internal helpers -----------------------------------------------------
 
@@ -159,3 +172,11 @@ class RedditFetcher:
                 parts.append(body)
 
         return "\n\n".join(parts)
+
+    # -- sync convenience wrapper ---------------------------------------------
+
+    def fetch_team_sentiment_posts_sync(self, team_name: str, cache_ttl: int = 3600) -> str:
+        """Synchronous wrapper — safe to call from inside a running event loop."""
+        return _safe_sync_run(
+            self.fetch_team_sentiment_posts(team_name, cache_ttl=cache_ttl)
+        )
