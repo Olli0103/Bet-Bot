@@ -50,10 +50,48 @@ def _get_bankroll() -> float:
         return settings.initial_bankroll
 
 
-def _sync_get_all_bets() -> List[PlacedBet]:
-    """Sync DB call — always call via asyncio.to_thread."""
+def _sync_get_dashboard_data() -> Dict[str, Any]:
+    """Fetch lightweight dashboard aggregates from DB.
+
+    Returns raw tuples instead of full ORM objects to avoid loading
+    every historical bet into memory (OOM risk at 5000+ bets).
+    """
+    from sqlalchemy import func, case, literal_column
+
     with SessionLocal() as db:
-        return db.scalars(select(PlacedBet)).all()
+        # Aggregate counts and sums in SQL
+        agg = db.execute(
+            select(
+                func.count(PlacedBet.id).label("total"),
+                func.sum(case((PlacedBet.status == "open", 1), else_=0)).label("open_n"),
+                func.sum(case((PlacedBet.status == "won", 1), else_=0)).label("won_n"),
+                func.sum(case((PlacedBet.status == "lost", 1), else_=0)).label("lost_n"),
+                func.sum(case(
+                    (PlacedBet.status.in_(["won", "lost"]), PlacedBet.pnl),
+                    else_=literal_column("0"),
+                )).label("pnl"),
+                func.sum(case(
+                    (PlacedBet.status.in_(["won", "lost"]), PlacedBet.stake),
+                    else_=literal_column("0"),
+                )).label("staked"),
+            )
+        ).one()
+
+        # Equity curve: only fetch (id, pnl) for settled bets — tiny payload
+        equity_rows = db.execute(
+            select(PlacedBet.id, PlacedBet.pnl)
+            .where(PlacedBet.status.in_(["won", "lost"]))
+            .order_by(PlacedBet.id.asc())
+        ).all()
+
+    return {
+        "open_n": int(agg.open_n or 0),
+        "won_n": int(agg.won_n or 0),
+        "lost_n": int(agg.lost_n or 0),
+        "pnl": round(float(agg.pnl or 0), 2),
+        "staked": round(float(agg.staked or 0), 2),
+        "equity_pnls": [float(r.pnl or 0) for r in equity_rows],
+    }
 
 
 def _sync_place_bet(payload: dict) -> bool:
@@ -761,22 +799,21 @@ async def combo_suggestions(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show balance with a visual PnL dashboard chart."""
-    rows = await asyncio.to_thread(_sync_get_all_bets)
-    settled = [r for r in rows if r.status in {"won", "lost"}]
-    pnl = round(sum(float(r.pnl or 0) for r in settled), 2)
-    open_n = sum(1 for r in rows if r.status == "open")
-    won_n = sum(1 for r in settled if r.status == "won")
-    lost_n = sum(1 for r in settled if r.status == "lost")
+    data = await asyncio.to_thread(_sync_get_dashboard_data)
+    pnl = data["pnl"]
+    open_n = data["open_n"]
+    won_n = data["won_n"]
+    lost_n = data["lost_n"]
+    staked = data["staked"]
     current_bankroll = await asyncio.to_thread(_get_bankroll)
     initial = settings.initial_bankroll
-    staked = sum(float(r.stake or 0) for r in settled)
     roi = pnl / max(1.0, staked) if staked > 0 else 0.0
 
-    # Build equity curve from settled bets
+    # Build equity curve from lightweight PnL list
     equity = [initial]
     running = initial
-    for r in sorted(settled, key=lambda x: x.id if hasattr(x, "id") else 0):
-        running += float(r.pnl or 0)
+    for bet_pnl in data["equity_pnls"]:
+        running += bet_pnl
         equity.append(round(running, 2))
 
     # Try to generate and send chart

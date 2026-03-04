@@ -146,8 +146,10 @@ class BettingEngine:
                     "(correlation penalty applied)", cnt, eid,
                 )
         # 0.80 per correlated pair (stronger than previous 0.90 to reflect
-        # high intra-match correlation, e.g. "Home Win" + "Over 2.5")
-        return 0.80 ** correlated_pairs
+        # high intra-match correlation, e.g. "Home Win" + "Over 2.5").
+        # Floor at 0.20 to prevent exponential blow-up on large SGPs
+        # (e.g. 8-leg SGP → 28 pairs → 0.80^28 = 0.002 is unrealistic).
+        return max(0.20, 0.80 ** correlated_pairs)
 
     def build_combo(
         self,
