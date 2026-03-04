@@ -10,7 +10,7 @@ from src.core.betting_math import (
     kelly_fraction,
     kelly_stake,
 )
-from src.core.risk_guards import apply_stake_cap, passes_confidence_gate
+from src.core.risk_guards import apply_stake_cap, explain_signal, passes_confidence_gate
 from src.models.betting import BetSignal, ComboBet, ComboLeg
 
 log = logging.getLogger(__name__)
@@ -66,6 +66,19 @@ class BettingEngine:
                 sport, selection, model_probability, ev, trigger or "none", stake_final,
             )
 
+        # Generate natural-language explanation for the Telegram UI
+        why = ""
+        if not rejected_reason:
+            try:
+                why = explain_signal(
+                    model_probability=model_probability,
+                    expected_value=ev,
+                    bookmaker_odds=bookmaker_odds,
+                    sport=sport,
+                )
+            except Exception:
+                pass
+
         return BetSignal(
             sport=sport,
             event_id=event_id,
@@ -86,6 +99,7 @@ class BettingEngine:
             stake_cap_applied=stake_final < stake_raw and stake_final > 0,
             trigger=trigger,
             rejected_reason=rejected_reason,
+            explanation=why,
         )
 
     @staticmethod

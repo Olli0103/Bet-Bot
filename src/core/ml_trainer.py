@@ -31,12 +31,16 @@ log = logging.getLogger(__name__)
 MODELS_DIR = Path("models")
 
 # Full feature set (Phase 1-4 + stats-based features)
+# NOTE: "clv" (target_odds/sharp_odds - 1) is intentionally excluded.
+# It is derived from sharp_implied_prob (already a feature), creates
+# circular reasoning in the training set (we only bet when CLV > 0),
+# and its name is dangerously close to the post-match closing line
+# value stored in sharp_closing_odds/prob.
 FEATURES = [
     # Phase 1-3: core + market + enrichment
     "sentiment_delta",
     "injury_delta",
     "sharp_implied_prob",
-    "clv",
     "sharp_vig",
     "form_winrate_l5",
     "form_games_l5",
@@ -85,7 +89,6 @@ LEGACY_FEATURES = [
     "sentiment_delta",
     "injury_delta",
     "sharp_implied_prob",
-    "clv",
     "sharp_vig",
     "form_winrate_l5",
     "form_games_l5",
@@ -584,6 +587,30 @@ def _save_legacy_weights(df: pd.DataFrame, y: pd.Series, active_features: List[s
             json.dump(learned_weights, f)
     except Exception as exc:
         log.warning("Failed to save legacy weights: %s", exc)
+
+
+def should_retrain(threshold: int = 500) -> Tuple[bool, int]:
+    """Check whether enough new graded bets have accumulated since the last training.
+
+    Compares the current count of graded bets in the DB against the
+    ``n_samples`` stored in the deployed champion model.  Triggers
+    retraining when ``threshold`` (default 500) new bets are available.
+
+    Returns (should_retrain, new_bets_count).
+    """
+    champion = load_model("general")
+    last_n = champion.get("n_samples", 0) if champion else 0
+
+    with SessionLocal() as db:
+        from sqlalchemy import func
+        total = db.execute(
+            select(func.count(PlacedBet.id)).where(
+                PlacedBet.status.in_(["won", "lost"])
+            )
+        ).scalar() or 0
+
+    new_bets = total - last_n
+    return new_bets >= threshold, new_bets
 
 
 def load_model(sport_group: str = "general") -> Optional[Dict]:
