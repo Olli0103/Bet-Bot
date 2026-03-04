@@ -19,6 +19,7 @@ from src.core.pricing_model import QuantPricingModel
 from src.core.settings import settings
 from src.core.volatility_tracker import (
     detect_steam_move,
+    get_line_velocity,
     get_volatility,
     get_volatility_features,
     record_odds_snapshot,
@@ -497,6 +498,9 @@ def fetch_and_build_signals(
             historical_ip = sport_momentum.get(event_id, {}).get(selection, current_ip)
             market_momentum = current_ip - historical_ip
 
+            # Line movement velocity: implied prob change per hour
+            line_velocity = get_line_velocity(selection)
+
             # Resolve snapshot features for selected team vs opponent
             sel_snap = home_snapshot if is_home else away_snapshot
             opp_snap = away_snapshot if is_home else home_snapshot
@@ -543,6 +547,7 @@ def fetch_and_build_signals(
                 time_to_kickoff_hours=time_to_kickoff,
                 public_bias=bias_scores.get(selection, 0.0),
                 market_momentum=market_momentum,
+                line_velocity=line_velocity,
                 # Phase 4: stats-based features
                 team_attack_strength=float(sel_snap.get("attack_strength", 1.0)),
                 team_defense_strength=float(sel_snap.get("defense_strength", 1.0)),

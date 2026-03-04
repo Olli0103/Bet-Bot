@@ -20,7 +20,7 @@ from src.core.poisson_model import PoissonSoccerModel
 from src.core.pricing_model import QuantPricingModel
 from src.core.settings import settings
 from src.core.sport_mapping import normalize_team
-from src.core.volatility_tracker import get_volatility_features
+from src.core.volatility_tracker import get_line_velocity, get_volatility_features
 
 log = logging.getLogger(__name__)
 
@@ -192,6 +192,7 @@ class AnalystAgent:
             poisson_true_prob=poisson_prob,
             public_bias=sel_bias,
             market_momentum=market_momentum,
+            line_velocity=get_line_velocity(selection),
             team_attack_strength=sel_snap.get("attack_strength", 1.0),
             team_defense_strength=sel_snap.get("defense_strength", 1.0),
             opp_attack_strength=opp_snap.get("attack_strength", 1.0),

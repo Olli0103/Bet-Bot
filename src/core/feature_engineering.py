@@ -61,6 +61,8 @@ class FeatureEngineer:
         time_to_kickoff_hours: float = 24.0,
         public_bias: float = 0.0,
         market_momentum: float = 0.0,
+        # Line movement velocity (implied prob change per hour)
+        line_velocity: float = 0.0,
         # --- Phase 4: stats-based features (from EventStatsSnapshot) ---
         team_attack_strength: float = 1.0,
         team_defense_strength: float = 1.0,
@@ -128,6 +130,7 @@ class FeatureEngineer:
             "time_to_kickoff_hours": float(time_to_kickoff_hours),
             "public_bias": float(public_bias),
             "market_momentum": float(market_momentum),
+            "line_velocity": float(line_velocity),
             # Phase 4: stats-based features
             "team_attack_strength": float(team_attack_strength),
             "team_defense_strength": float(team_defense_strength),

@@ -76,19 +76,20 @@ def _extract_league(sport_key: str) -> str:
 
 
 def _combo_score(prob: float, odds: float, market_type: str = "h2h") -> float:
-    """Score a leg for combo selection: balance win probability with payout contribution.
+    """Score a leg for combo selection using Expected Value.
 
-    High-probability markets (Over 0.5/1.5, Double Chance) get a boost
-    to prioritize them in Lotto combos where hit rate matters most.
+    EV = prob * (odds - 1) - (1 - prob).  Only EV-positive legs should
+    appear in a well-constructed combo.  High-probability safety markets
+    (Double Chance, DNB) receive a small boost because lotto combos
+    need hit rate to survive 10-30 legs.
     """
     if prob <= 0 or odds <= 1.0:
         return 0.0
-    base = prob * math.log(odds)
+    ev = prob * (odds - 1.0) - (1.0 - prob)
+    # Small boost for safety markets in lotto combos
     if market_type in ("double_chance", "draw_no_bet"):
-        base *= 1.20
-    elif market_type == "totals" and prob >= 0.80:
-        base *= 1.15
-    return base
+        ev *= 1.10
+    return ev
 
 
 class ComboOptimizer:

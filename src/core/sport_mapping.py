@@ -5,12 +5,20 @@ Single source of truth bridging:
   - Odds API sport keys (e.g. 'soccer_germany_bundesliga')
   - Human-readable German display names for the Telegram UI
   - Team name alias resolution across different APIs
+
+Team aliases are loaded from ``team_aliases.json`` so they can be
+updated (promotions, relegations, transfers) without redeploying code.
 """
 from __future__ import annotations
 
+import json
+import logging
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,228 +119,30 @@ def all_api_keys() -> List[str]:
 
 
 # ── Team name alias resolution ───────────────────────────────────────────────
-# Maps common abbreviations, alternate spellings, and API-specific names
-# to a single canonical (already-normalized) form.
-# Keys MUST be lowercase, alphanumeric only (as produced by the strip regex).
+# Loaded from team_aliases.json so aliases can be updated (promotions,
+# relegations, transfers) without redeploying the Python code.
 
-TEAM_ALIASES: Dict[str, str] = {
-    # --- Germany (Bundesliga) ---
-    "bayernmunich": "bayernmnchen",
-    "bayernmuenchen": "bayernmnchen",
-    "fcbayern": "bayernmnchen",
-    "bayern": "bayernmnchen",
-    "bvb": "borussiadortmund",
-    "dortmund": "borussiadortmund",
-    "bmg": "borussiamnchengladbach",
-    "gladbach": "borussiamnchengladbach",
-    "mgladbach": "borussiamnchengladbach",
-    "monchengladbach": "borussiamnchengladbach",
-    "schalke": "fcschalke04",
-    "s04": "fcschalke04",
-    "rbleipzig": "rbrasenballsportleipzig",
-    "leipzg": "rbrasenballsportleipzig",
-    "leipzig": "rbrasenballsportleipzig",
-    "leverkusen": "bayerleverkusen",
-    "bayer04": "bayerleverkusen",
-    "wolfsburg": "vflwolfsburg",
-    "freiburg": "scfreiburg",
-    "mainz": "1fsvmainz05",
-    "mainz05": "1fsvmainz05",
-    "hoffenheim": "tsg1899hoffenheim",
-    "tsghoffenheim": "tsg1899hoffenheim",
-    "union": "1fcunionberlin",
-    "unionberlin": "1fcunionberlin",
-    "koln": "1fckoln",
-    "koeln": "1fckoln",
-    "effzeh": "1fckoln",
-    "frankfurt": "eintrachtfrankfurt",
-    "sge": "eintrachtfrankfurt",
-    "stuttgart": "vfbstuttgart",
-    "augsburg": "fcaugsburg",
-    "bremen": "svwerderbremen",
-    "werder": "svwerderbremen",
-    "werderbremen": "svwerderbremen",
-    "heidenheim": "1fcheidenheim",
-    "stpauli": "fcstpauli",
+_ALIASES_PATH = Path(__file__).parent / "team_aliases.json"
 
-    # --- England (Premier League / Championship) ---
-    "manutd": "manchesterunited",
-    "manunited": "manchesterunited",
-    "mufc": "manchesterunited",
-    "mancity": "manchestercity",
-    "mcfc": "manchestercity",
-    "spurs": "tottenhamhotspur",
-    "tottenham": "tottenhamhotspur",
-    "thfc": "tottenhamhotspur",
-    "arsenal": "arsenalfc",
-    "afc": "arsenalfc",
-    "gunners": "arsenalfc",
-    "chelsea": "chelseafc",
-    "cfc": "chelseafc",
-    "liverpool": "liverpoolfc",
-    "lfc": "liverpoolfc",
-    "wolves": "wolverhamptonwanderers",
-    "wolverhampton": "wolverhamptonwanderers",
-    "westham": "westhamunited",
-    "whu": "westhamunited",
-    "newcastle": "newcastleunited",
-    "nufc": "newcastleunited",
-    "toon": "newcastleunited",
-    "palace": "crystalpalace",
-    "cpfc": "crystalpalace",
-    "everton": "evertonfc",
-    "efc": "evertonfc",
-    "toffees": "evertonfc",
-    "brighton": "brightonhovealbifc",
-    "bhafc": "brightonhovealbifc",
-    "brightonhovealbion": "brightonhovealbifc",
-    "villa": "astonvilla",
-    "avfc": "astonvilla",
-    "fulham": "fulhamfc",
-    "ffc": "fulhamfc",
-    "bournemouth": "afcbournemouth",
-    "brentford": "brentfordfc",
-    "forest": "nottinghamforest",
-    "nffc": "nottinghamforest",
-    "nottmforest": "nottinghamforest",
-    "luton": "lutontown",
-    "burnley": "burnleyfc",
-    "sheffield": "sheffieldunited",
-    "sheffutd": "sheffieldunited",
-    "blades": "sheffieldunited",
-    "ipswich": "ipswichtown",
-    "leicester": "leicestercity",
-    "lcfc": "leicestercity",
-    "southampton": "southamptonfc",
 
-    # --- Spain (La Liga) ---
-    "barca": "fcbarcelona",
-    "barcelona": "fcbarcelona",
-    "fcb": "fcbarcelona",
-    "realmadrid": "realmadridcf",
-    "real": "realmadridcf",
-    "rmcf": "realmadridcf",
-    "atletico": "atleticodemadrid",
-    "atleticomadrid": "atleticodemadrid",
-    "atleti": "atleticodemadrid",
-    "sevilla": "sevillafc",
-    "betis": "realbetis",
-    "realsociedad": "realsociedaddefutbol",
-    "rsociedad": "realsociedaddefutbol",
-    "villarreal": "villarrealcf",
-    "valencia": "valenciacf",
-    "bilbao": "athleticbilbao",
-    "athletic": "athleticbilbao",
-    "athleticclub": "athleticbilbao",
+def _load_aliases() -> Dict[str, str]:
+    """Load team aliases from JSON file, falling back to empty dict."""
+    try:
+        with open(_ALIASES_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        # Strip internal metadata keys (e.g. _comment)
+        return {k: v for k, v in data.items() if not k.startswith("_")}
+    except Exception as exc:
+        _log.warning("Failed to load team_aliases.json: %s", exc)
+        return {}
 
-    # --- Italy (Serie A) ---
-    "juve": "juventusfc",
-    "juventus": "juventusfc",
-    "inter": "internazionalemilano",
-    "intermilan": "internazionalemilano",
-    "acmilan": "acmilan",
-    "milan": "acmilan",
-    "roma": "asroma",
-    "asroma": "asroma",
-    "napoli": "sscnapoli",
-    "sscnapoli": "sscnapoli",
-    "lazio": "sslazio",
-    "fiorentina": "acffiorentina",
-    "viola": "acffiorentina",
-    "atalanta": "atalantabc",
-    "torino": "torinofc",
-    "toro": "torinofc",
 
-    # --- France (Ligue 1) ---
-    "psg": "parisstgermain",
-    "parissaintgermain": "parisstgermain",
-    "om": "olympiquedemarseille",
-    "marseille": "olympiquedemarseille",
-    "ol": "olympiquelyonnais",
-    "lyon": "olympiquelyonnais",
-    "monaco": "asmonaco",
-    "lille": "lilleosc",
-    "losc": "lilleosc",
-    "lens": "rclens",
-    "nice": "ogcnice",
-
-    # --- NBA ---
-    "lal": "losangeleslakers",
-    "lakers": "losangeleslakers",
-    "gsw": "goldenstatewarriors",
-    "warriors": "goldenstatewarriors",
-    "bos": "bostonceltics",
-    "celtics": "bostonceltics",
-    "mil": "milwaukeebucks",
-    "bucks": "milwaukeebucks",
-    "den": "denvernuggets",
-    "nuggets": "denvernuggets",
-    "phx": "phoenixsuns",
-    "suns": "phoenixsuns",
-    "dal": "dallasmavericks",
-    "mavs": "dallasmavericks",
-    "mavericks": "dallasmavericks",
-    "nyknicks": "newyorkknicks",
-    "knicks": "newyorkknicks",
-    "nyk": "newyorkknicks",
-    "phi": "philadelphia76ers",
-    "sixers": "philadelphia76ers",
-    "76ers": "philadelphia76ers",
-    "mia": "miamiheat",
-    "heat": "miamiheat",
-    "lac": "losangelesclippers",
-    "clippers": "losangelesclippers",
-    "okc": "oklahomacitythunder",
-    "thunder": "oklahomacitythunder",
-    "min": "minnesotatimberwolves",
-    "wolves": "minnesotatimberwolves",
-    "timberwolves": "minnesotatimberwolves",
-
-    # --- NFL ---
-    "kc": "kansascitychiefs",
-    "chiefs": "kansascitychiefs",
-    "sf": "sanfrancisco49ers",
-    "niners": "sanfrancisco49ers",
-    "49ers": "sanfrancisco49ers",
-    "buf": "buffalobills",
-    "bills": "buffalobills",
-    "bal": "baltimoreravens",
-    "ravens": "baltimoreravens",
-    "det": "detroitlions",
-    "lions": "detroitlions",
-    "gb": "greenbaypackers",
-    "packers": "greenbaypackers",
-    "phi": "philadelphiaeagles",
-    "eagles": "philadelphiaeagles",
-    "dal": "dallascowboys",
-    "cowboys": "dallascowboys",
-
-    # --- NHL ---
-    "edm": "edmontonoilers",
-    "oilers": "edmontonoilers",
-    "fla": "floridapanthers",
-    "panthers": "floridapanthers",
-    "nyr": "newyorkrangers",
-    "rangers": "newyorkrangers",
-    "bos": "bostonbruins",
-    "bruins": "bostonbruins",
-    "col": "coloradoavalanche",
-    "avs": "coloradoavalanche",
-    "avalanche": "coloradoavalanche",
-    "tor": "torontomapleleafs",
-    "leafs": "torontomapleleafs",
-    "mapleleafs": "torontomapleleafs",
-    "van": "vancouvercanucks",
-    "canucks": "vancouvercanucks",
-    "wpg": "winnipegjets",
-    "jets": "winnipegjets",
-}
+TEAM_ALIASES: Dict[str, str] = _load_aliases()
 
 # Build reverse index at import time (canonical -> canonical, alias -> canonical)
 _ALIAS_INDEX: Dict[str, str] = {}
 for _alias, _canonical in TEAM_ALIASES.items():
     _ALIAS_INDEX[_alias] = _canonical
-    # Also index the canonical form to itself
     _ALIAS_INDEX[_canonical] = _canonical
 
 
