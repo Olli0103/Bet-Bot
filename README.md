@@ -594,6 +594,25 @@ Configurable via Telegram settings dashboard or `LIVE_SPORTS` env var.
 - **draw_no_bet** (DNB) -- derived from 1X2 via draw-removed redistribution (soccer)
 - Cross-market value detection via Poisson model (soccer: over/under 0.5/1.5/2.5/3.5, BTTS)
 
+### Probability Calibration
+
+Raw model probabilities are passed through a calibration layer before EV computation:
+
+- **Isotonic regression** (default) or **Platt scaling** (configurable via `CALIBRATION_METHOD`)
+- **Per sport/market** calibrators (e.g. `basketball_h2h`, `soccer_h2h`) with minimum 30 samples
+- **Global fallback** when sport/market has insufficient data
+- **Raw passthrough** with warning when no calibrator is available at all
+
+Each signal exposes three probability fields:
+- `model_probability_raw` — direct model output
+- `model_probability_calibrated` — after calibration (used for EV)
+- `calibration_source` — which calibrator was used
+
+**Calibration artifacts:**
+- `artifacts/calibration_report.json` — per-sport/market ECE, MCE, Brier, log-loss
+- `CALIBRATION_REPORT.md` — human-readable calibration dashboard
+- `artifacts/ev_diagnostics.jsonl` — per-signal EV breakdown (raw_prob, calibrated_prob, target_odds, sharp_odds, vig, tax, EV_final)
+
 ### Signal Deduplication & Card Format
 
 - **One pick per leg**: Enforces one signal per `(event_id, canonical_market_group)`. Market groups: `h2h`, `double_chance`, `draw_no_bet`, `spreads`, `totals`.

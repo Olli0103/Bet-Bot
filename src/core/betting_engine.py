@@ -35,6 +35,10 @@ class BettingEngine:
         source_quality: float = 1.0,
         tax_rate: float = 0.0,
         trigger: str = "",
+        model_probability_raw: float = 0.0,
+        calibration_source: str = "",
+        sharp_odds: float = 0.0,
+        vig: float = 0.0,
     ) -> BetSignal:
         ev = expected_value(model_probability, bookmaker_odds, tax_rate=tax_rate)
         kf_raw = kelly_fraction(model_probability, bookmaker_odds, frac=kelly_frac, tax_rate=tax_rate)
@@ -47,6 +51,7 @@ class BettingEngine:
             rejected_reason = f"data_source_offline: {source_reason}"
             log.warning("Data source gate blocked signal: %s %s — %s",
                         sport, selection, rejected_reason)
+            eff_raw_early = model_probability_raw if model_probability_raw > 0 else model_probability
             return BetSignal(
                 sport=sport, event_id=event_id, market=market,
                 selection=selection, bookmaker_odds=bookmaker_odds,
@@ -57,6 +62,9 @@ class BettingEngine:
                 kelly_raw=kf_raw, stake_before_cap=stake_raw,
                 stake_cap_applied=False, trigger=trigger,
                 rejected_reason=rejected_reason, explanation="",
+                model_probability_raw=eff_raw_early,
+                model_probability_calibrated=model_probability,
+                calibration_source=calibration_source,
             )
 
         # --- Confidence gate (uses model_probability as THE confidence) ---
@@ -98,6 +106,9 @@ class BettingEngine:
             except Exception:
                 pass
 
+        # Effective raw prob: caller may pass 0.0 meaning "same as model_probability"
+        eff_raw = model_probability_raw if model_probability_raw > 0 else model_probability
+
         return BetSignal(
             sport=sport,
             event_id=event_id,
@@ -119,6 +130,9 @@ class BettingEngine:
             trigger=trigger,
             rejected_reason=rejected_reason,
             explanation=why,
+            model_probability_raw=eff_raw,
+            model_probability_calibrated=model_probability,
+            calibration_source=calibration_source,
         )
 
     @staticmethod

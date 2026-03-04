@@ -1,5 +1,97 @@
 # Changelog
 
+## [2026-03-04] Improve EV Quality: Calibration Layer + Sharp/Target Price Audit
+
+### A) Calibration Layer (P0)
+
+**Problem:** High confidence values but systematically negative EV across multiple
+markets (e.g. basketball h2h). Model probabilities were miscalibrated — raw model
+output didn't match actual win rates.
+
+**Fix: Per-sport/market calibration layer**
+
+New module `src/core/calibration.py`:
+- **Isotonic regression** (default) and **Platt scaling** (configurable)
+- Per sport/market calibrators (e.g. `basketball_h2h`, `soccer_h2h`)
+- Global fallback when sport/market has < 30 samples
+- Raw passthrough with warning when no calibrator is available
+- Calibration report generation: `artifacts/calibration_report.json` + `CALIBRATION_REPORT.md`
+- Metrics: ECE, MCE, Brier score, log-loss per sport/market
+
+**New fields on BetSignal:**
+- `model_probability_raw` — raw model output before calibration
+- `model_probability_calibrated` — calibrated probability (= `model_probability`)
+- `calibration_source` — "sport_market", "global", or "raw_passthrough"
+
+**EV computation** now uses calibrated probability by default.
+
+### B) Sharp/Target Price Logic Audit (P0)
+
+**Problem:** Potential systematic negative EV from odds normalization, vig/tax
+handling, or incorrect target/sharp mapping.
+
+**Verified:**
+- Selection matching: target and sharp use identical selection keys (no team-side flip)
+- Vig removal happens exactly once in `FeatureEngineer.calculate_vig()`
+- Tax applied exactly once in `expected_value()` on gross payout
+- No double tax/vig deductions in the EV chain
+- Sharp implied probability computed without tax
+- CLV proxy sign consistency (positive = target better than sharp)
+
+### C) EV Diagnostics (Debug Mode)
+
+New module `src/core/ev_diagnostics.py`:
+- Per-signal diagnostic payload written to `artifacts/ev_diagnostics.jsonl`
+- Each entry contains: `raw_prob`, `calibrated_prob`, `target_odds`, `sharp_odds`,
+  `implied_prob_target`, `implied_prob_sharp`, `vig`, `tax_rate`, `EV_final`
+- Per-cycle calibration stats: `avg_raw_prob`, `avg_calibrated_prob`,
+  `calibration_adjustment_mean`
+
+### D) No Functional Regressions
+
+- PLAYABLE flow unchanged — signals still flow through confidence gates + stake caps
+- All existing signal generation paths updated to pass calibration metadata
+- Backward-compatible: new BetSignal fields have safe defaults
+
+### E) Tests (27 new, 6 required + 21 supporting)
+
+| # | Test | Validates |
+|---|------|-----------|
+| 1 | `test_calibrated_probability_used_for_ev` | EV uses calibrated prob, not raw |
+| 2 | `test_probability_scale_consistency_0_1` | All probs on 0-1 scale |
+| 3 | `test_target_sharp_selection_alignment` | Selection keys match, no team flip |
+| 4 | `test_vig_and_tax_applied_once` | No double tax/vig in EV |
+| 5 | `test_ev_diagnostics_contains_required_fields` | Full EV decomposition in diagnostics |
+| 6 | `test_fallback_calibrator_when_low_samples` | Global fallback when sport has low samples |
+
+### F) New env vars
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CALIBRATION_METHOD` | `isotonic` | Calibration method: "isotonic" or "platt" |
+| `CALIBRATION_ENABLED` | `true` | Enable/disable calibration layer |
+| `EV_DIAGNOSTICS_ENABLED` | `true` | Write per-signal EV diagnostics |
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `src/core/calibration.py` | NEW: Calibration module (isotonic/Platt, per-sport/market, global fallback, report generation) |
+| `src/core/ev_diagnostics.py` | NEW: EV diagnostics logger (per-signal + per-cycle stats) |
+| `src/core/pricing_model.py` | Calibration integration: raw prob stored, calibrated prob returned |
+| `src/core/betting_engine.py` | Propagate calibration fields (raw, calibrated, source) to BetSignal |
+| `src/core/betting_math.py` | No change (verified: EV formula correct) |
+| `src/core/live_feed.py` | Pass `market` to pricing model, log EV diagnostics, cycle calibration stats |
+| `src/core/settings.py` | + `calibration_method`, `calibration_enabled`, `ev_diagnostics_enabled` |
+| `src/models/betting.py` | + `model_probability_raw`, `model_probability_calibrated`, `calibration_source` |
+| `src/agents/analyst_agent.py` | Pass `market` to pricing model, log EV diagnostics |
+| `tests/test_ev_calibration.py` | NEW: 27 tests covering all 6 required + calibrator basics |
+| `.env.example` | + calibration settings |
+| `CHANGELOG.md` | This entry |
+| `README.md` | Calibration documentation section |
+
+---
+
 ## [2026-03-04] Fix: Training Blockers — Schema, Feature Coverage, Backfill
 
 ### A) CLV Regressor Schema Fix

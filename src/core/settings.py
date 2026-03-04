@@ -105,5 +105,10 @@ class Settings(BaseModel):
     combo_correlation_penalty: float = float(os.getenv("COMBO_CORRELATION_PENALTY", "0.80"))
     combo_correlation_floor: float = float(os.getenv("COMBO_CORRELATION_FLOOR", "0.20"))
 
+    # Calibration
+    calibration_method: str = os.getenv("CALIBRATION_METHOD", "isotonic")  # "isotonic" or "platt"
+    calibration_enabled: bool = os.getenv("CALIBRATION_ENABLED", "true").lower() == "true"
+    ev_diagnostics_enabled: bool = os.getenv("EV_DIAGNOSTICS_ENABLED", "true").lower() == "true"
+
 
 settings = Settings()
