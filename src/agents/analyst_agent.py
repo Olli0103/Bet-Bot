@@ -230,7 +230,12 @@ class AnalystAgent:
             form_games_l5=ml_features["form_games_l5"],
             sport=sport,
             features=ml_features,
+            market="h2h",
         )
+
+        # Retrieve calibration metadata
+        raw_p = getattr(self.qpm, "_last_raw_prob", model_p)
+        cal_source = getattr(self.qpm, "_last_calibration_source", "")
 
         # NOTE: poisson_true_prob, market_momentum, elo_expected, and
         # injury_delta are all standard XGBoost input features (via
@@ -251,6 +256,27 @@ class AnalystAgent:
         tax_rate = settings.tipico_tax_rate if not settings.tax_free_mode else 0.0
         ev = expected_value(model_p, target_odds, tax_rate=tax_rate)
 
+        # EV diagnostics
+        if settings.ev_diagnostics_enabled:
+            try:
+                from src.core.ev_diagnostics import log_ev_diagnostic
+                log_ev_diagnostic(
+                    event_id=event_id,
+                    sport=sport,
+                    market="h2h",
+                    selection=selection,
+                    raw_prob=raw_p,
+                    calibrated_prob=model_p,
+                    calibration_source=cal_source,
+                    target_odds=target_odds,
+                    sharp_odds=sharp_odds,
+                    vig=ml_features.get("sharp_vig", 0.0),
+                    tax_rate=tax_rate,
+                    ev_final=ev,
+                )
+            except _OP_ERRORS:
+                pass
+
         # Public bias skepticism: if Tipico is shading this favorite heavily,
         # raise the EV threshold for a BET recommendation
         ev_threshold = 0.01
@@ -259,6 +285,8 @@ class AnalystAgent:
 
         result.update({
             "model_probability": round(model_p, 4),
+            "model_probability_raw": round(raw_p, 4),
+            "calibration_source": cal_source,
             "expected_value": round(ev, 4),
             "features": ml_features,
             "sentiment": {"home": sent_home, "away": sent_away},

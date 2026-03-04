@@ -118,6 +118,7 @@ class QuantPricingModel:
         form_games_l5: float = 0.0,
         sport: str = "",
         features: Optional[Dict[str, float]] = None,
+        market: str = "h2h",
     ) -> float:
         """Get true probability using the best available model.
 
@@ -128,23 +129,58 @@ class QuantPricingModel:
             If provided, attempts XGBoost prediction first.
         sport : str
             Sport key for selecting the sport-specific model.
+        market : str
+            Market type for calibration lookup.
+
+        When calibration is enabled, the raw model output is passed through
+        the CalibrationManager and the calibrated probability is returned.
+        The raw probability is stored as ``_last_raw_prob`` and the
+        calibration source as ``_last_calibration_source`` for diagnostic
+        logging by the caller.
         """
         # Try XGBoost model if we have the full feature dict
         if features is not None:
             prob = self._xgboost_predict(features, sport)
             if prob is not None:
-                return prob
+                raw = prob
+            else:
+                raw = self._legacy_predict(
+                    sharp_prob=sharp_prob,
+                    sentiment=sentiment,
+                    injuries=injuries,
+                    clv=clv,
+                    sharp_vig=sharp_vig,
+                    form_winrate_l5=form_winrate_l5,
+                    form_games_l5=form_games_l5,
+                )
+        else:
+            raw = self._legacy_predict(
+                sharp_prob=sharp_prob,
+                sentiment=sentiment,
+                injuries=injuries,
+                clv=clv,
+                sharp_vig=sharp_vig,
+                form_winrate_l5=form_winrate_l5,
+                form_games_l5=form_games_l5,
+            )
 
-        # Fallback to legacy JSON weights
-        return self._legacy_predict(
-            sharp_prob=sharp_prob,
-            sentiment=sentiment,
-            injuries=injuries,
-            clv=clv,
-            sharp_vig=sharp_vig,
-            form_winrate_l5=form_winrate_l5,
-            form_games_l5=form_games_l5,
-        )
+        # Store raw for diagnostic access
+        self._last_raw_prob = raw
+        self._last_calibration_source = "raw_passthrough"
+
+        # Apply calibration layer
+        from src.core.settings import settings as _s
+        if _s.calibration_enabled:
+            try:
+                from src.core.calibration import get_calibration_manager
+                mgr = get_calibration_manager(_s.calibration_method)
+                calibrated, source = mgr.calibrate(raw, sport, market)
+                self._last_calibration_source = source
+                return calibrated
+            except Exception as exc:
+                log.debug("Calibration failed, using raw: %s", exc)
+
+        return raw
 
     def _xgboost_predict(self, features: Dict[str, float], sport: str) -> Optional[float]:
         """Try to predict using sport-specific or general XGBoost model.

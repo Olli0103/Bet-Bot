@@ -627,9 +627,16 @@ def fetch_and_build_signals(
                 form_games_l5=ml_features["form_games_l5"],
                 sport=sport,
                 features=ml_features,
+                market="h2h",
             )
 
+            # Retrieve calibration metadata from pricing model
+            raw_p = getattr(qpm, "_last_raw_prob", model_p)
+            cal_source = getattr(qpm, "_last_calibration_source", "")
+
             features[f"{event_id}:{selection}"] = ml_features
+
+            sharp_vig_val = ml_features.get("sharp_vig", 0.0)
 
             sig = engine.make_signal(
                 sport=sport,
@@ -642,7 +649,32 @@ def fetch_and_build_signals(
                 reference_book=sharp_book,
                 source_quality=conf,
                 tax_rate=effective_tax,
+                model_probability_raw=raw_p,
+                calibration_source=cal_source,
+                sharp_odds=float(sharp_odds),
+                vig=sharp_vig_val,
             )
+
+            # EV diagnostics logging
+            if settings.ev_diagnostics_enabled:
+                try:
+                    from src.core.ev_diagnostics import log_ev_diagnostic
+                    log_ev_diagnostic(
+                        event_id=event_id,
+                        sport=sport,
+                        market="h2h",
+                        selection=selection,
+                        raw_prob=raw_p,
+                        calibrated_prob=model_p,
+                        calibration_source=cal_source,
+                        target_odds=float(target_odds),
+                        sharp_odds=float(sharp_odds),
+                        vig=sharp_vig_val,
+                        tax_rate=effective_tax,
+                        ev_final=sig.expected_value,
+                    )
+                except Exception:
+                    pass
 
             # Track in gap report
             is_playable = sig.recommended_stake > 0 and not sig.rejected_reason
@@ -962,6 +994,20 @@ def fetch_and_build_signals(
         auto_place_virtual_bets(top10_signals, features)
     except Exception as exc:
         log.warning("Ghost trading failed: %s", exc)
+
+    # --- Log per-cycle calibration statistics ---
+    if all_signals and settings.ev_diagnostics_enabled:
+        try:
+            from src.core.ev_diagnostics import log_cycle_calibration_stats
+            raw_probs = [s.model_probability_raw for s in all_signals if s.model_probability_raw > 0]
+            cal_probs = [s.model_probability_calibrated for s in all_signals if s.model_probability_calibrated > 0]
+            if raw_probs and cal_probs:
+                avg_raw = sum(raw_probs) / len(raw_probs)
+                avg_cal = sum(cal_probs) / len(cal_probs)
+                adj_mean = avg_cal - avg_raw
+                log_cycle_calibration_stats(avg_raw, avg_cal, adj_mean, len(all_signals))
+        except Exception:
+            pass
 
     _progress("done", "Fertig!", 100,
               signals=len(top10), events=stats["events_seen"],

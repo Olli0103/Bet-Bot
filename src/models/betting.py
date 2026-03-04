@@ -31,6 +31,10 @@ class BetSignal(BaseModel):
     rejected_reason: str = ""
     # Natural-language explanation for non-technical users ("Why this bet?")
     explanation: str = ""
+    # Calibration fields
+    model_probability_raw: float = 0.0  # raw model output before calibration
+    model_probability_calibrated: float = 0.0  # calibrated probability
+    calibration_source: str = ""  # "sport_market", "global", "raw_passthrough"
 
 
 class ComboLeg(BaseModel):
