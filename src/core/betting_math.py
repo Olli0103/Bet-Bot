@@ -37,9 +37,14 @@ def expected_value(
     decimal_odds: float,
     tax_rate: float = 0.0,
 ) -> float:
-    """EV per 1 unit stake. tax_rate adjusts gross profit (e.g., 0.05 for Tipico 5% tax)."""
-    gross_profit = decimal_odds - 1.0
-    net_profit = gross_profit * (1.0 - tax_rate)
+    """EV per 1 unit stake.
+
+    German betting tax (Tipico) is levied on the **gross payout**
+    (stake * odds), not just the profit.  Example at odds 2.0 with
+    5 % tax: payout = 2.0 * 0.95 = 1.90, net profit = 0.90 (not 0.95).
+    """
+    net_odds = decimal_odds * (1.0 - tax_rate)
+    net_profit = net_odds - 1.0
     return model_probability * net_profit - (1.0 - model_probability)
 
 
@@ -52,16 +57,21 @@ def kelly_fraction(
 ) -> float:
     """Kelly criterion using net odds after tax.
 
-    Hard-capped at ``max_fraction`` (default 5 %) of bankroll to prevent
-    a single bet from risking too much, regardless of model confidence.
+    Returns the *true* fractional Kelly value (scaled by ``frac`` but
+    **not** hard-capped).  The hard cap should be applied at the
+    execution / UI layer (e.g. ``apply_stake_cap``) so that internal
+    ranking and EV systems can distinguish between a 6 % and 15 %
+    Kelly edge.
+
+    ``max_fraction`` is retained in the signature for backward
+    compatibility but is no longer applied here.
     """
-    gross_b = decimal_odds - 1.0
-    net_b = gross_b * (1.0 - tax_rate)
+    net_b = decimal_odds * (1.0 - tax_rate) - 1.0
     q = 1.0 - model_probability
     if net_b <= 0:
         return 0.0
     raw = (net_b * model_probability - q) / net_b
-    return min(max(0.0, raw) * frac, max_fraction)
+    return max(0.0, raw) * frac
 
 
 def kelly_stake(bankroll: float, kelly_f: float) -> float:

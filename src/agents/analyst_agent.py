@@ -64,6 +64,7 @@ class AnalystAgent:
             sent_home = await asyncio.to_thread(team_sentiment_score, home)
             sent_away = await asyncio.to_thread(team_sentiment_score, away)
         except Exception:
+            log.warning("Sentiment fetch failed for %s vs %s", home, away, exc_info=True)
             sent_home = sent_away = 0.0
 
         # 2. Injury aggregation (API-Sports + Rotowire RSS + LLM)
@@ -100,6 +101,7 @@ class AnalystAgent:
             home_wr, home_gp = get_form_l5(home)
             away_wr, away_gp = get_form_l5(away)
         except Exception:
+            log.warning("Form fetch failed for %s vs %s", home, away, exc_info=True)
             home_wr, home_gp = 0.5, 0
             away_wr, away_gp = 0.5, 0
 
@@ -107,18 +109,21 @@ class AnalystAgent:
         try:
             elo_feats = self.elo.get_elo_features(home, away)
         except Exception:
+            log.warning("Elo fetch failed for %s vs %s", home, away, exc_info=True)
             elo_feats = {"elo_diff": 0.0, "elo_expected": 0.5}
 
         # 5. H2H
         try:
             h2h_feats = get_h2h_features(home, away)
         except Exception:
+            log.warning("H2H fetch failed for %s vs %s", home, away, exc_info=True)
             h2h_feats = {"h2h_home_winrate": 0.5}
 
         # 6. Volatility
         try:
             vol_feats = get_volatility_features(home, away)
         except Exception:
+            log.warning("Volatility fetch failed for %s vs %s", home, away, exc_info=True)
             vol_feats = {"home_volatility": 0.0, "away_volatility": 0.0}
 
         # 7. Poisson (soccer)
@@ -135,7 +140,7 @@ class AnalystAgent:
                 else:
                     poisson_prob = poisson_pred.get("h2h_away")
             except Exception:
-                pass
+                log.warning("Poisson prediction failed for %s vs %s", home, away, exc_info=True)
 
         is_home = selection == home
         sel_wr = home_wr if is_home else away_wr
@@ -149,7 +154,7 @@ class AnalystAgent:
             home_snap = get_event_snapshot(event_id, home) or {}
             away_snap = get_event_snapshot(event_id, away) or {}
         except Exception:
-            pass
+            log.warning("Stats snapshot fetch failed for event %s", event_id, exc_info=True)
 
         sel_snap = home_snap if is_home else away_snap
         opp_snap = away_snap if is_home else home_snap
@@ -215,37 +220,12 @@ class AnalystAgent:
             features=ml_features,
         )
 
-        # Dynamic Poisson/XGBoost blending based on xG extremity
-        if poisson_prob is not None and poisson_prob > 0:
-            is_draw = selection == "Draw"
-            home_xg = poisson_pred.get("home_xg", 1.35) if poisson_pred else 1.35
-            away_xg = poisson_pred.get("away_xg", 1.35) if poisson_pred else 1.35
-            xg_diff = abs(home_xg - away_xg)
-            xg_bonus = min(0.15, xg_diff * 0.10)
-
-            if is_draw:
-                poisson_w = min(0.75, 0.60 + xg_bonus)
-            else:
-                poisson_w = min(0.50, 0.30 + xg_bonus)
-            model_p = (1.0 - poisson_w) * model_p + poisson_w * poisson_prob
-
-        # Momentum adjustment: nudge model_p toward market direction
-        if abs(market_momentum) > 0.005:
-            model_p = model_p + market_momentum * 0.15
-            model_p = max(0.01, min(0.99, model_p))
-
-        # 11. Injury penalty: if key players are confirmed Out for the selected
-        # team, apply a negative confidence adjustment to model_p.
-        # Both penalty values are <= 0 (negative impact scores).
-        sel_injury_penalty = injury_penalty_home if is_home else injury_penalty_away
-        opp_injury_penalty = injury_penalty_away if is_home else injury_penalty_home
-        # Net effect: injuries on selected team hurt (negative), opponent injuries help (positive).
-        # sel_injury_penalty is <= 0 → makes net negative (hurts selected team)
-        # opp_injury_penalty is <= 0 → subtracting it makes net positive (helps selected team)
-        net_injury_effect = sel_injury_penalty - opp_injury_penalty
-        # Apply as a direct probability adjustment (clamped)
-        if abs(net_injury_effect) > 0.01:
-            model_p = max(0.01, min(0.99, model_p + net_injury_effect * 0.50))
+        # NOTE: poisson_true_prob, market_momentum, elo_expected, and
+        # injury_delta are all standard XGBoost input features (via
+        # FeatureEngineer.build_core_features).  The tree ensemble learns
+        # their optimal weights organically per sport — no manual post-hoc
+        # blending is applied here, as doing so would destroy the calibrated
+        # probability output.
 
         # 12. EV calculation
         tax_rate = settings.tipico_tax_rate if not settings.tax_free_mode else 0.0

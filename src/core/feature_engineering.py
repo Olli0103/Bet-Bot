@@ -77,8 +77,15 @@ class FeatureEngineer:
         goals_conceded_avg: float = 0.0,
     ) -> Dict[str, float]:
         clv_proxy = FeatureEngineer.calculate_clv_proxy(target_odds, sharp_odds)
-        sharp_prob = 1.0 / sharp_odds if sharp_odds > 1.0 else 0.0
         sharp_vig = FeatureEngineer.calculate_vig(sharp_market)
+
+        # Strip vig (overround) from the sharp implied probability.
+        # Raw 1/odds systematically overestimates the true probability by
+        # the bookmaker's margin.  We normalise by dividing by the total
+        # implied probability of all outcomes in the market.
+        raw_sharp_prob = 1.0 / sharp_odds if sharp_odds > 1.0 else 0.0
+        overround = 1.0 + sharp_vig  # e.g. 1.052 for a 5.2% overround
+        sharp_prob = raw_sharp_prob / overround if overround > 0 else raw_sharp_prob
 
         is_home = selection == home_team
         sent_delta = (sentiment_home - sentiment_away) if is_home else (sentiment_away - sentiment_home)

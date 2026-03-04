@@ -71,10 +71,60 @@ class PlacedBet(Base):
         nullable=True,
     )
 
+    # Closing line snapshot (logged at kickoff for CLV-based continuous learning)
+    sharp_closing_odds = Column(Float, nullable=True)
+    sharp_closing_prob = Column(Float, nullable=True)
+    commence_time = Column(DateTime(timezone=True), nullable=True)
+
     def __repr__(self) -> str:
         return (
             f"<PlacedBet id={self.id} event={self.event_id} "
             f"sel={self.selection} status={self.status}>"
+        )
+
+
+class EventClosingLine(Base):
+    """Sharp closing line logged exactly at kickoff for every tracked event.
+
+    One row per event + selection.  Used by the ML trainer as the primary
+    regression target (``sharp_closing_prob``) for continuous learning.
+    The closing line is the mathematical ground truth: if the model
+    consistently prices selections better than the sharp close, it has
+    a genuine edge -- regardless of noisy won/lost variance.
+    """
+
+    __tablename__ = "event_closing_lines"
+    __table_args__ = (
+        UniqueConstraint("event_id", "selection", name="uq_closing_event_sel"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(String(128), nullable=False, index=True)
+    sport = Column(String(64), nullable=False)
+    selection = Column(String(256), nullable=False)
+    home_team = Column(String(256), nullable=True)
+    away_team = Column(String(256), nullable=True)
+
+    sharp_book = Column(String(64), nullable=False, default="pinnacle")
+    closing_odds = Column(Float, nullable=False)
+    closing_implied_prob = Column(Float, nullable=False)
+    closing_vig = Column(Float, nullable=True)
+
+    # Model's prediction at signal-generation time (for CLV evaluation)
+    model_prob_at_signal = Column(Float, nullable=True)
+    model_ev_at_signal = Column(Float, nullable=True)
+
+    commence_time = Column(DateTime(timezone=True), nullable=True)
+    logged_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<EventClosingLine {self.event_id} {self.selection} "
+            f"close={self.closing_odds} prob={self.closing_implied_prob}>"
         )
 
 

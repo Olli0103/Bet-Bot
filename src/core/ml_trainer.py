@@ -140,14 +140,27 @@ def _clean_frame(df: pd.DataFrame, feature_list: List[str]) -> pd.DataFrame:
     for c in feature_list:
         if c not in out.columns:
             out[c] = 0.0
-    out[feature_list] = out[feature_list].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    # Convert to numeric but preserve NaN — XGBoost handles missing values
+    # natively and will learn the optimal split direction.  Replacing NaN
+    # with 0.0 is dangerous because 0 carries semantic meaning for many
+    # features (e.g. clv=0 means "exactly accurate odds", injury_delta=0
+    # means "no injury advantage").
+    out[feature_list] = out[feature_list].apply(pd.to_numeric, errors="coerce")
 
     # Derive sharp_implied_prob from odds when it has near-zero variance
     # (common for raw imported datasets that lack engineered columns).
+    # Strip the vig so implied probabilities are not systematically inflated.
     if "sharp_implied_prob" in feature_list and "odds" in out.columns:
         if float(out["sharp_implied_prob"].var()) < EPS:
             valid_odds = out["odds"].where(out["odds"] > 1.0)
-            out["sharp_implied_prob"] = (1.0 / valid_odds).clip(0.0, 1.0).fillna(0.0)
+            raw_prob = (1.0 / valid_odds).fillna(0.0)
+            # Use per-row overround if sharp_vig is available, else 0
+            if "sharp_vig" in out.columns:
+                overround = 1.0 + out["sharp_vig"]
+                overround = overround.where(overround > 0, 1.0)
+                out["sharp_implied_prob"] = (raw_prob / overround).clip(0.0, 1.0).fillna(0.0)
+            else:
+                out["sharp_implied_prob"] = raw_prob.clip(0.0, 1.0)
 
     # clamp outliers
     if "sentiment_delta" in out.columns:
@@ -210,9 +223,22 @@ def _train_xgboost(
     y: pd.Series,
     active_features: List[str],
 ) -> Tuple[CalibratedClassifierCV, Dict]:
-    """Train XGBoost with isotonic calibration and TimeSeriesSplit CV."""
+    """Train XGBoost with isotonic calibration and a strict holdout test set.
+
+    The final 20% of the data (chronologically) is held out *before*
+    CalibratedClassifierCV sees anything, so the calibrator's isotonic
+    regression has never touched the test samples.  This prevents the
+    previous data leak where the calibrator's validation folds overlapped
+    with the evaluation set.
+    """
     X_active = X[active_features].values
     y_vals = y.values
+
+    # --- strict temporal holdout (last 20%) ---
+    holdout_frac = 0.20
+    split_idx = max(1, int(len(X_active) * (1.0 - holdout_frac)))
+    X_train, X_holdout = X_active[:split_idx], X_active[split_idx:]
+    y_train, y_holdout = y_vals[:split_idx], y_vals[split_idx:]
 
     base_model = XGBClassifier(
         objective="binary:logistic",
@@ -230,8 +256,8 @@ def _train_xgboost(
         verbosity=0,
     )
 
-    # Calibrate with TimeSeriesSplit
-    n_splits = min(5, max(2, len(X_active) // 200))
+    # Calibrate with TimeSeriesSplit on *training* data only
+    n_splits = min(5, max(2, len(X_train) // 200))
     tscv = TimeSeriesSplit(n_splits=n_splits)
 
     calibrated = CalibratedClassifierCV(
@@ -239,62 +265,67 @@ def _train_xgboost(
         method="isotonic",
         cv=tscv,
     )
-    calibrated.fit(X_active, y_vals)
+    calibrated.fit(X_train, y_train)
 
-    # Evaluate on last fold
-    metrics = _evaluate_model(calibrated, X_active, y_vals, tscv)
+    # Evaluate on the strict holdout that the calibrator never saw
+    metrics = _evaluate_holdout(calibrated, X_holdout, y_holdout, y_train)
 
     return calibrated, metrics
 
 
-def _evaluate_model(
+def _evaluate_holdout(
     model: CalibratedClassifierCV,
-    X: np.ndarray,
-    y: np.ndarray,
-    tscv: TimeSeriesSplit,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    y_train: np.ndarray,
 ) -> Dict:
-    """Evaluate model on the last temporal fold with reliability diagram data."""
-    metrics = {}
-    splits = list(tscv.split(X))
-    if splits:
-        _, test_idx = splits[-1]
-        X_test, y_test = X[test_idx], y[test_idx]
-        y_pred = model.predict_proba(X_test)[:, 1]
+    """Evaluate model on a strict holdout set with reliability diagram data.
 
-        metrics["brier_score"] = round(float(brier_score_loss(y_test, y_pred)), 6)
-        metrics["log_loss"] = round(float(log_loss(y_test, y_pred)), 6)
-        metrics["test_size"] = len(test_idx)
+    Also computes a *dummy* Brier score (predicting the training-set
+    class average for every sample) so downstream validation can compare
+    the model against a meaningful baseline instead of the arbitrary 0.25
+    threshold.
+    """
+    metrics: Dict = {}
+    if len(X_test) == 0:
+        return metrics
 
-        # Reliability diagram: bin predictions into buckets and compute
-        # actual vs predicted rates + adjustment factors for Kelly scaling.
-        # If model says 60% but actual is 55%, the Kelly multiplier for
-        # that bucket should be scaled down by actual/predicted.
-        bins = [0.0, 0.3, 0.45, 0.55, 0.7, 1.0]
-        reliability_bins: Dict[str, Dict] = {}
-        for i in range(len(bins) - 1):
-            mask = (y_pred >= bins[i]) & (y_pred < bins[i + 1])
-            if mask.sum() > 5:
-                actual_rate = float(y_test[mask].mean())
-                predicted_rate = float(y_pred[mask].mean())
-                # Kelly adjustment: scale stakes by actual/predicted ratio.
-                # > 1.0 means model under-predicts (bet more),
-                # < 1.0 means model over-predicts (trim stakes).
-                kelly_adj = round(actual_rate / max(0.01, predicted_rate), 4)
-                bin_key = f"{bins[i]:.2f}_{bins[i+1]:.2f}"
-                reliability_bins[bin_key] = {
-                    "predicted": round(predicted_rate, 4),
-                    "actual": round(actual_rate, 4),
-                    "n": int(mask.sum()),
-                    "kelly_adjustment": kelly_adj,
-                    "over_predicting": predicted_rate > actual_rate + 0.02,
-                }
-                metrics[f"calib_{bins[i]:.1f}_{bins[i+1]:.1f}"] = {
-                    "predicted": round(predicted_rate, 4),
-                    "actual": round(actual_rate, 4),
-                    "n": int(mask.sum()),
-                }
+    y_pred = model.predict_proba(X_test)[:, 1]
 
-        metrics["reliability_bins"] = reliability_bins
+    metrics["brier_score"] = round(float(brier_score_loss(y_test, y_pred)), 6)
+    metrics["log_loss"] = round(float(log_loss(y_test, y_pred)), 6)
+    metrics["test_size"] = len(X_test)
+
+    # Dummy baseline: always predict the training-set win rate
+    train_mean = float(y_train.mean()) if len(y_train) > 0 else 0.5
+    dummy_pred = np.full(len(y_test), train_mean)
+    metrics["brier_score_dummy"] = round(float(brier_score_loss(y_test, dummy_pred)), 6)
+
+    # Reliability diagram: bin predictions into buckets and compute
+    # actual vs predicted rates + adjustment factors for Kelly scaling.
+    bins = [0.0, 0.3, 0.45, 0.55, 0.7, 1.0]
+    reliability_bins: Dict[str, Dict] = {}
+    for i in range(len(bins) - 1):
+        mask = (y_pred >= bins[i]) & (y_pred < bins[i + 1])
+        if mask.sum() > 5:
+            actual_rate = float(y_test[mask].mean())
+            predicted_rate = float(y_pred[mask].mean())
+            kelly_adj = round(actual_rate / max(0.01, predicted_rate), 4)
+            bin_key = f"{bins[i]:.2f}_{bins[i+1]:.2f}"
+            reliability_bins[bin_key] = {
+                "predicted": round(predicted_rate, 4),
+                "actual": round(actual_rate, 4),
+                "n": int(mask.sum()),
+                "kelly_adjustment": kelly_adj,
+                "over_predicting": predicted_rate > actual_rate + 0.02,
+            }
+            metrics[f"calib_{bins[i]:.1f}_{bins[i+1]:.1f}"] = {
+                "predicted": round(predicted_rate, 4),
+                "actual": round(actual_rate, 4),
+                "n": int(mask.sum()),
+            }
+
+    metrics["reliability_bins"] = reliability_bins
     return metrics
 
 
@@ -303,8 +334,14 @@ def _validate_model(model, metrics: Dict, active_features: List[str]) -> List[st
     warnings = []
 
     brier = metrics.get("brier_score", 1.0)
-    if brier > 0.25:
-        warnings.append(f"Brier score {brier:.4f} > 0.25 (worse than random). Model may be unreliable.")
+    brier_dummy = metrics.get("brier_score_dummy")
+    if brier_dummy is not None and brier >= brier_dummy:
+        warnings.append(
+            f"Brier score {brier:.4f} >= dummy baseline {brier_dummy:.4f} "
+            f"(model is no better than always predicting the training win-rate)."
+        )
+    elif brier > 0.25:
+        warnings.append(f"Brier score {brier:.4f} > 0.25 (worse than balanced-class random). Model may be unreliable.")
 
     ll = metrics.get("log_loss", 1.0)
     if ll > 0.693:
@@ -369,8 +406,54 @@ def auto_train_model(min_samples: int = 500) -> str:
     return f"Erfolg: {len(df)} Wetten trainiert. Aktiv: {', '.join(active_features)} | {brier_str}{suffix}"
 
 
-def auto_train_all_models(min_samples: int = 200) -> str:
-    """Train general + sport-specific XGBoost models."""
+def _champion_challenger(
+    challenger_metrics: Dict,
+    sport_group: str,
+) -> Tuple[bool, str]:
+    """Compare a challenger model against the currently deployed champion.
+
+    The challenger is promoted ONLY if it achieves a strictly better
+    log loss on the holdout set.  This prevents model degradation from
+    anomalous training data or overfitting.
+
+    Returns (promoted: bool, reason: str).
+    """
+    champion_data = load_model(sport_group)
+    if champion_data is None:
+        return True, "no_existing_champion"
+
+    champ_metrics = champion_data.get("metrics", {})
+    champ_ll = champ_metrics.get("log_loss", 999.0)
+    champ_brier = champ_metrics.get("brier_score", 999.0)
+    chall_ll = challenger_metrics.get("log_loss", 999.0)
+    chall_brier = challenger_metrics.get("brier_score", 999.0)
+
+    # Primary gate: log loss must be strictly better
+    if chall_ll < champ_ll:
+        return True, (
+            f"promoted: challenger log_loss={chall_ll:.6f} < champion={champ_ll:.6f} "
+            f"(brier: {chall_brier:.6f} vs {champ_brier:.6f})"
+        )
+
+    # Secondary: if log loss is within 0.001, check Brier
+    if abs(chall_ll - champ_ll) < 0.001 and chall_brier < champ_brier:
+        return True, (
+            f"promoted (brier tiebreak): {chall_brier:.6f} < {champ_brier:.6f}"
+        )
+
+    return False, (
+        f"rejected: challenger log_loss={chall_ll:.6f} >= champion={champ_ll:.6f} "
+        f"(brier: {chall_brier:.6f} vs {champ_brier:.6f})"
+    )
+
+
+def auto_train_all_models(min_samples: int = 2000) -> str:
+    """Train general + sport-specific models with Champion vs Challenger.
+
+    A newly trained model (Challenger) is only promoted to production if
+    it achieves a strictly better log loss than the currently deployed
+    model (Champion) on the holdout set.  This prevents model degradation.
+    """
     MODELS_DIR.mkdir(exist_ok=True)
 
     with SessionLocal() as db:
@@ -385,7 +468,7 @@ def auto_train_all_models(min_samples: int = 200) -> str:
     df = _clean_frame(df, FEATURES)
     results = []
 
-    # Train general model on all data
+    # --- Train general model ---
     X_all = df[FEATURES]
     y_all = (df["status"] == "won").astype(int)
     active_all = _get_active_features(X_all, FEATURES)
@@ -395,15 +478,20 @@ def auto_train_all_models(min_samples: int = 200) -> str:
         warnings = _validate_model(model, metrics, active_all)
         for w in warnings:
             log.warning("ML validation (general): %s", w)
-        joblib.dump({"model": model, "features": active_all, "metrics": metrics, "n_samples": len(df)}, _model_path("general"))
-        results.append(f"general: {len(df)} samples, brier={metrics.get('brier_score', 'N/A')}")
-        _save_legacy_weights(df, y_all, active_all, metrics)
 
-    # Train sport-specific models
+        promoted, reason = _champion_challenger(metrics, "general")
+        if promoted:
+            joblib.dump({"model": model, "features": active_all, "metrics": metrics, "n_samples": len(df)}, _model_path("general"))
+            results.append(f"general: PROMOTED ({len(df)} samples, brier={metrics.get('brier_score', 'N/A')})")
+            _save_legacy_weights(df, y_all, active_all, metrics)
+        else:
+            results.append(f"general: REJECTED — {reason}")
+        log.info("Champion/Challenger (general): %s", reason)
+
+    # --- Train sport-specific models ---
     if "sport" in df.columns:
         df["sport_group"] = df["sport"].apply(_get_sport_group)
 
-        # Sport-specific extra features
         sport_extra_map = {
             "soccer": SOCCER_EXTRA_FEATURES,
             "basketball": BASKETBALL_EXTRA_FEATURES,
@@ -415,11 +503,9 @@ def auto_train_all_models(min_samples: int = 200) -> str:
                 results.append(f"{group}: skipped ({len(subset)} < {min_samples})")
                 continue
 
-            # Combine base features with sport-specific extras
             extra = sport_extra_map.get(group, [])
             sport_features = FEATURES + [f for f in extra if f not in FEATURES]
 
-            # Ensure columns exist
             subset = _clean_frame(subset, sport_features)
             X_sport = subset[sport_features]
             y_sport = (subset["status"] == "won").astype(int)
@@ -434,11 +520,16 @@ def auto_train_all_models(min_samples: int = 200) -> str:
             for w in warnings_sport:
                 log.warning("ML validation (%s): %s", group, w)
 
-            joblib.dump(
-                {"model": model_sport, "features": active_sport, "metrics": metrics_sport, "n_samples": len(subset)},
-                _model_path(group),
-            )
-            results.append(f"{group}: {len(subset)} samples, brier={metrics_sport.get('brier_score', 'N/A')}")
+            promoted, reason = _champion_challenger(metrics_sport, group)
+            if promoted:
+                joblib.dump(
+                    {"model": model_sport, "features": active_sport, "metrics": metrics_sport, "n_samples": len(subset)},
+                    _model_path(group),
+                )
+                results.append(f"{group}: PROMOTED ({len(subset)} samples, brier={metrics_sport.get('brier_score', 'N/A')})")
+            else:
+                results.append(f"{group}: REJECTED — {reason}")
+            log.info("Champion/Challenger (%s): %s", group, reason)
 
     return " | ".join(results)
 
