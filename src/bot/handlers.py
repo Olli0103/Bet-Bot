@@ -355,6 +355,9 @@ def _format_signal_card(b: dict, index: int, total: int) -> str:
     cap_tag = " [CAP]" if cap_applied else ""
     trigger_tag = f" | trigger={trigger}" if trigger else ""
 
+    explanation = b.get("explanation", "")
+    why_line = f"\n{explanation}" if explanation else ""
+
     return (
         f"Signal {index + 1}/{total} | {sport}{market_tag}\n"
         f"--------------------\n"
@@ -364,6 +367,7 @@ def _format_signal_card(b: dict, index: int, total: int) -> str:
         f"EV: {ev:+.4f} | SrcQ: {src_q:.0%}\n"
         f"Kelly: {kelly_raw:.4f} | Stake: {stake_before:.2f} -> {stake:.2f} EUR{cap_tag}\n"
         f"{source} | {ref}{trigger_tag}"
+        f"{why_line}"
     )
 
 
@@ -380,11 +384,16 @@ def _signal_nav_keyboard(index: int, total: int, bet_data: Optional[dict] = None
     if bet_data:
         mark_id = _store_mark_payload(bet_data)
         action_row.append(InlineKeyboardButton("✅ Als platziert", callback_data=f"markid:{mark_id}"))
-        # Tipico deep link — opens event page in browser/app
+        # Tipico deep link — search by team names (Odds API IDs ≠ Tipico IDs)
         eid = bet_data.get("event_id", "")
         if eid:
+            home = bet_data.get("home_team", "")
+            away = bet_data.get("away_team", "")
             action_row.append(
-                InlineKeyboardButton("Tipico", url=tipico_event_link(str(eid)))
+                InlineKeyboardButton(
+                    "Tipico",
+                    url=tipico_event_link(str(eid), home_team=home, away_team=away),
+                )
             )
 
     back_row = [InlineKeyboardButton("↩️ Zurück zur Sportauswahl", callback_data="top10:back")]

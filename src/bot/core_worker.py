@@ -326,6 +326,26 @@ def _run_weekly_retrain():
         log.error("Weekly retrain failed: %s", exc)
 
 
+def _check_data_driven_retrain():
+    """Trigger Champion/Challenger retraining when 500+ new graded bets accumulate.
+
+    Called after auto-grading to evaluate whether enough fresh data
+    has arrived since the last model was trained.  This makes retraining
+    data-driven rather than purely time-driven.
+    """
+    from src.core.ml_trainer import should_retrain, auto_train_all_models
+    try:
+        trigger, new_bets = should_retrain(threshold=500)
+        if trigger:
+            log.info("Data-driven retrain triggered: %d new bets since last training", new_bets)
+            msg = auto_train_all_models()
+            push_outbox("text", {
+                "text": f"📈 Auto-Retrain ({new_bets} neue Wetten): {msg}"
+            }, target="primary")
+    except Exception as exc:
+        log.error("Data-driven retrain check failed: %s", exc)
+
+
 def _run_api_health():
     from src.core.api_health import format_api_health_report, run_api_health_check
     try:
@@ -467,6 +487,8 @@ async def main_loop():
         # Auto-grading every 30 minutes
         if sched.should_run("auto_grading", 1800):
             _run_auto_grading()
+            # Check if enough new graded bets warrant a retrain
+            _check_data_driven_retrain()
 
         # Agent cycle every 5 minutes — reads from cache only, no API calls
         if sched.should_run("agent_cycle", 300):

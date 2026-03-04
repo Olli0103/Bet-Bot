@@ -29,6 +29,8 @@ class BetSignal(BaseModel):
     stake_cap_applied: bool = False
     trigger: str = ""
     rejected_reason: str = ""
+    # Natural-language explanation for non-technical users ("Why this bet?")
+    explanation: str = ""
 
 
 class ComboLeg(BaseModel):

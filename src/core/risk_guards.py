@@ -86,3 +86,67 @@ def apply_stake_cap(
     if stake > cap:
         return round(cap, 2), True
     return round(stake, 2), False
+
+
+# ---------------------------------------------------------------------------
+# "Why this bet?" — natural-language explanation for non-technical users
+# ---------------------------------------------------------------------------
+
+def explain_signal(
+    model_probability: float,
+    expected_value: float,
+    bookmaker_odds: float,
+    sport: str,
+    market_momentum: float = 0.0,
+    public_bias: float = 0.0,
+    is_steam_move: bool = False,
+    sport_group: str = "general",
+) -> str:
+    """Build a short German-language explanation of why this bet was flagged.
+
+    Uses reliability bins from the ML model (if available) to assess
+    calibration quality, and combines key signal drivers into a
+    1-3 sentence human-readable summary.
+    """
+    from src.core.ml_trainer import get_reliability_adjustment
+
+    parts: list[str] = []
+
+    # Edge size
+    ev_pct = expected_value * 100
+    if ev_pct >= 5:
+        parts.append(f"Starker Edge: +{ev_pct:.1f}% erwarteter Profit")
+    elif ev_pct >= 2:
+        parts.append(f"Solider Edge: +{ev_pct:.1f}% erwarteter Profit")
+    else:
+        parts.append(f"Kleiner Edge: +{ev_pct:.1f}% erwarteter Profit")
+
+    # Probability assessment
+    if model_probability >= 0.70:
+        parts.append("Hohe Modell-Konfidenz")
+    elif model_probability >= 0.55:
+        parts.append("Mittlere Modell-Konfidenz")
+    else:
+        parts.append("Spekulative Wette")
+
+    # Key drivers
+    drivers: list[str] = []
+    if is_steam_move:
+        drivers.append("Sharp-Money-Bewegung erkannt")
+    if market_momentum > 0.02:
+        drivers.append("Linie bewegt sich zugunsten")
+    elif market_momentum < -0.02:
+        drivers.append("Linie bewegt sich dagegen")
+    if public_bias > 0.02:
+        drivers.append("Tipico-Preis angehoben (Oeffentlichkeit wettet dagegen)")
+    if drivers:
+        parts.append(". ".join(drivers))
+
+    # Calibration quality from reliability bins
+    kelly_adj = get_reliability_adjustment(model_probability, sport_group)
+    if kelly_adj < 0.85:
+        parts.append("Modell neigt zu Ueberschaetzung in diesem Bereich — Einsatz reduziert")
+    elif kelly_adj > 1.15:
+        parts.append("Modell historisch treffsicher in diesem Bereich")
+
+    return ". ".join(parts) + "."
