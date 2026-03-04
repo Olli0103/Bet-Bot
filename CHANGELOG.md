@@ -1,5 +1,90 @@
 # Changelog
 
+## [2026-03-04] Fix: Training Blockers — Schema, Feature Coverage, Backfill
+
+### A) CLV Regressor Schema Fix
+
+**Problem:** `_build_clv_dataset()` crashed with `event_closing_lines.market does
+not exist` because the `market` column was added to the ORM model but the DB
+migration hadn't been run.
+
+**Fix:**
+- `_build_clv_dataset()` now probes the DB schema at runtime via `sqlalchemy.inspect()`.
+  If the `market` column is absent, it falls back to a legacy join
+  `(event_id, selection, sport)` with an `h2h` filter and logs a clear warning.
+- New Alembic migration `d5a3c91e2b04`: adds `market` column to
+  `event_closing_lines` (default `"h2h"`), updates unique constraint.
+
+### B) Feature Coverage Fix — 100% NaN Eliminated
+
+**Problem:** 14 Phase 2-4 features (`elo_diff`, `weather_rain`, `home_volatility`,
+`is_steam_move`, `line_staleness`, `injury_news_delta`, `public_bias`,
+`market_momentum`, `line_velocity`, `form_trend_slope`, `home_away_split_delta`,
+`league_position_delta`, etc.) were 100% NaN because they were intentionally
+left out of `FEATURE_DEFAULTS` to use XGBoost native missing handling. But with
+ALL rows being NaN, XGBoost had zero variance and dropped them entirely.
+
+**Fix:**
+- ALL 35+ features now have explicit entries in `FEATURE_DEFAULTS`.
+- No feature column is ever 100% NaN after `_clean_frame()`.
+- `_get_active_features()` now logs which features were dropped and why.
+- `auto_train_all_models()` emits detailed diagnostics (NaN rates, constant
+  features) instead of the opaque `"no feature variance"` message.
+
+### C) Missing-Indicator Features
+
+5 binary `is_missing_*` indicator features added so XGBoost can distinguish
+"value was 0.0 because measured" from "value was 0.0 because backfill default":
+- `is_missing_elo`, `is_missing_weather`, `is_missing_volatility`,
+  `is_missing_stats`, `is_missing_form_trend`
+- Generated automatically in `_clean_frame()` before defaults are applied.
+
+### D) Backfill Script Extended (Phase 2-4)
+
+`scripts/backfill_ml_features.py` now backfills ALL features, not just the 6
+critical ones:
+- Phase 2 enrichment features (Elo, weather, volatility, etc.) → semantic defaults
+- Phase 4 stats features (attack/defense strength, form trend, etc.) → league avg
+- Prints coverage BEFORE and AFTER backfill for verification
+- `_needs_backfill()` checks ALL features, not just critical 6
+
+### E) Training Guards Enhanced
+
+- `_get_active_features()` logs dropped features with reasons
+- Sport-specific "no feature variance" now emits full diagnostic:
+  NaN rates, constant features, and a hint to run backfill
+- Coverage report already existed — now benefits from full defaults
+
+### F) Tests (6 new, matching required test names)
+
+| # | Test | Validates |
+|---|------|-----------|
+| 7 | `test_clv_regression_handles_missing_event_closing_lines_market` | Schema fallback |
+| 8 | `test_feature_pipeline_persists_problem_features` | All 14 problem features in FeatureEngineer output |
+| 9 | `test_clean_frame_unpacks_meta_features_consistently` | Zero NaN after _clean_frame + missing indicators |
+| 10 | `test_backfill_fills_missing_features_idempotent` | ALL_BACKFILL_FEATURES covers phase 1-4 |
+| 11 | `test_coverage_report_flags_nan_spikes` | 100% NaN critical features flagged |
+| 12 | `test_training_does_not_fail_on_partial_schema` | _clean_frame handles missing columns |
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `src/core/ml_trainer.py` | FEATURE_DEFAULTS expanded to all features, MISSING_INDICATOR_GROUPS, defensive CLV join, diagnostic logging |
+| `src/data/models.py` | `market` column on EventClosingLine (from previous commit) |
+| `scripts/backfill_ml_features.py` | Phase 2-4 backfill, coverage before/after reporting |
+| `alembic/versions/d5a3c91e2b04_*.py` | Migration: add `market` to `event_closing_lines` |
+| `tests/test_ml_feature_pipeline.py` | 6 new tests (12 total including helpers) |
+
+### Migration required
+
+```bash
+alembic upgrade head   # adds 'market' column to event_closing_lines
+python scripts/backfill_ml_features.py --force   # backfill phase 2-4 features
+```
+
+---
+
 ## [2026-03-04] Fix: Training Features Pipeline — 6 Critical Features Restored
 
 ### Root Cause: `_clean_frame()` meta_features unpacking bug
