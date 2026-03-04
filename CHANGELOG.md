@@ -1,5 +1,37 @@
 # Changelog
 
+## [2026-03-04] ML Feature Health Check — Audit Report
+
+### Critical Finding: 29/35 features train on zeros
+
+Only 6 of 35 XGBoost features are persisted to the `PlacedBet` table via
+`ghost_trading.py`. The remaining 29 features (Phase 2-4) are correctly computed
+at signal time but never written to the database. When `ml_trainer.py` reads via
+`pd.read_sql()`, `_clean_frame()` creates missing columns as `0.0`, causing the
+model to train on ~83% zero-variance data.
+
+### Deliverable
+
+- **`ML_FEATURE_AUDIT.md`** — Full audit report with:
+  - Data coverage tables per feature (DB column, write path, null rate, variance)
+  - Preprocessing chain walkthrough with exact file:line references
+  - Leakage/timing verification (CLV removed, temporal split correct)
+  - Root-cause classification (A=empty, B=constant, C=circular, D=redundant)
+  - Prioritized KEEP/FIX/DROP action plan (P0-P3)
+  - Architecture diagram showing signal-time vs training-time data flow
+
+### Key recommendations
+
+| Priority | Action |
+|----------|--------|
+| P0 | Persist all features via `meta_features` JSONB in `ghost_trading.py` |
+| P0 | Unpack `meta_features` JSONB in `ml_trainer.py::_clean_frame()` |
+| P1 | Use `FEATURE_DEFAULTS` dict instead of blanket `0.0` for missing features |
+| P1 | Decouple `form_winrate_l5` and `h2h_home_winrate` from PlacedBet (circular) |
+| P2 | Wire Phase 4 stats pipeline into feature dict in `live_feed.py` |
+
+---
+
 ## [2026-03-03] Unified Confidence Model + Combo Leg Gate + Sorting Fix
 
 ### Root cause: "Model 28% + Conf 100%" contradiction
