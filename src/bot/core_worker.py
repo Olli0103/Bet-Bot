@@ -350,10 +350,57 @@ def _run_learning_status():
         log.error("Learning status failed: %s", exc)
 
 
+def _run_ml_training_sync(min_samples: int, include_training_data: bool) -> str:
+    """Synchronous ML training entry point (runs in child process).
+
+    Must be a module-level function (picklable for ProcessPoolExecutor).
+    """
+    from src.core.ml_trainer import auto_train_all_models
+    return auto_train_all_models(
+        min_samples=min_samples,
+        include_training_data=include_training_data,
+    )
+
+
+async def trigger_async_retrain(
+    min_samples: int = 2000,
+    include_training_data: bool = True,
+) -> str:
+    """Run XGBoost training in a separate OS process.
+
+    Prevents event-loop stalling: XGBoost + Pandas are CPU-bound and
+    would block the asyncio loop (Telegram, Scout, Queue consumers)
+    for the entire duration of training (30s-5min depending on data size).
+
+    Uses ProcessPoolExecutor to bypass the GIL entirely.
+    """
+    from concurrent.futures import ProcessPoolExecutor
+    from functools import partial
+
+    loop = asyncio.get_running_loop()
+    func = partial(_run_ml_training_sync, min_samples, include_training_data)
+
+    with ProcessPoolExecutor(max_workers=1) as pool:
+        log.info("ML training offloaded to background process...")
+        result_msg = await loop.run_in_executor(pool, func)
+        log.info("ML training completed: %s", result_msg)
+
+    return result_msg
+
+
 def _run_weekly_retrain():
     from src.core.ml_trainer import auto_train_all_models
     try:
-        msg = auto_train_all_models()
+        # Use ProcessPoolExecutor when called from async context
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # We're inside the async main_loop — offload to process
+            future = asyncio.run_coroutine_threadsafe(
+                trigger_async_retrain(), loop,
+            )
+            msg = future.result(timeout=600)  # 10 min max
+        else:
+            msg = auto_train_all_models()
         push_outbox("text", {"text": f"📈 Weekly Retrain: {msg}"}, target="primary")
     except Exception as exc:
         log.error("Weekly retrain failed: %s", exc)

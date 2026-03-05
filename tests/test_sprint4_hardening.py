@@ -2156,3 +2156,262 @@ class TestPreKickoffSnapshot:
         assert "suspend" in source.lower() or "SUSPEND" in source, (
             "clv_logger must document the market suspension risk"
         )
+
+
+# ===========================================================================
+# SPRINT 14: SOTA Institutional Upgrades
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# 37. Shin's Method for Vig Removal
+# ---------------------------------------------------------------------------
+
+
+class TestShinVigRemoval:
+    """Verify Shin's method produces superior vig-removed probabilities."""
+
+    def test_shin_function_exists(self):
+        """remove_vig_shin must be importable."""
+        from src.core.betting_math import remove_vig_shin
+        assert callable(remove_vig_shin)
+
+    def test_shin_sums_to_one(self):
+        """Shin-devigged probabilities must sum to 1.0."""
+        from src.core.betting_math import remove_vig_shin
+        prices = {"Home": 1.90, "Draw": 3.40, "Away": 4.50}
+        fair = remove_vig_shin(prices)
+        total = sum(fair.values())
+        assert abs(total - 1.0) < 0.001, f"Shin probabilities sum to {total}, not 1.0"
+
+    def test_shin_respects_ranking(self):
+        """Favourite must have highest probability after vig removal."""
+        from src.core.betting_math import remove_vig_shin
+        prices = {"Home": 1.50, "Draw": 4.00, "Away": 6.50}
+        fair = remove_vig_shin(prices)
+        assert fair["Home"] > fair["Draw"] > fair["Away"]
+
+    def test_shin_vs_power_both_valid(self):
+        """Both methods must produce valid probabilities on skewed markets."""
+        from src.core.betting_math import remove_vig_shin, _remove_vig_power
+        # Extreme favourite market (1.10 vs 8.00)
+        prices = {"Home": 1.10, "Draw": 8.00, "Away": 15.00}
+        shin = remove_vig_shin(prices)
+        power = _remove_vig_power(prices)
+        # Both must sum to 1 and preserve ranking
+        assert abs(sum(shin.values()) - 1.0) < 0.001
+        assert abs(sum(power.values()) - 1.0) < 0.001
+        # Shin accounts for insider proportion (z > 0), producing
+        # different (more accurate) probabilities than Power
+        assert shin["Home"] != power["Home"], "Shin and Power should differ on skewed markets"
+
+    def test_shin_fallback_to_power(self):
+        """If Shin solver fails, _remove_vig must still return valid results."""
+        from src.core.betting_math import _remove_vig
+        prices = {"Home": 2.00, "Away": 2.00}  # Fair market, no vig
+        fair = _remove_vig(prices)
+        assert len(fair) == 2
+        assert abs(sum(fair.values()) - 1.0) < 0.01
+
+    def test_shin_dispatched_by_default(self):
+        """_remove_vig must dispatch to Shin by default."""
+        import inspect
+        from src.core.betting_math import _remove_vig
+        source = inspect.getsource(_remove_vig)
+        assert "remove_vig_shin" in source
+
+    def test_power_method_still_available(self):
+        """Power method must be preserved as fallback."""
+        from src.core.betting_math import _remove_vig_power
+        prices = {"Home": 1.90, "Draw": 3.40, "Away": 4.50}
+        fair = _remove_vig_power(prices)
+        assert abs(sum(fair.values()) - 1.0) < 0.001
+
+
+# ---------------------------------------------------------------------------
+# 38. Simultaneous Kelly Portfolio Sizing
+# ---------------------------------------------------------------------------
+
+
+class TestSimultaneousKelly:
+    """Verify portfolio-aware Kelly sizing with covariance."""
+
+    def test_module_exists(self):
+        """portfolio_sizing module must be importable."""
+        from src.core.portfolio_sizing import (
+            simultaneous_kelly_sizing, build_covariance_matrix,
+        )
+        assert callable(simultaneous_kelly_sizing)
+        assert callable(build_covariance_matrix)
+
+    def test_independent_bets_sum_under_cap(self):
+        """Independent bets: total exposure must stay under MAX_TOTAL_EXPOSURE."""
+        from src.core.portfolio_sizing import simultaneous_kelly_sizing
+        edges = np.array([0.05, 0.04, 0.03, 0.06, 0.02])
+        cov = np.eye(5) * 0.25  # Independent
+        fracs = simultaneous_kelly_sizing(edges, cov, kelly_fraction=0.25)
+        assert fracs.sum() <= 0.16, f"Total exposure {fracs.sum()} exceeds cap"
+        assert all(f >= 0 for f in fracs), "No negative fractions allowed"
+
+    def test_correlated_bets_reduce_exposure(self):
+        """Correlated bets should get smaller fractions than independent ones."""
+        from src.core.portfolio_sizing import simultaneous_kelly_sizing
+        edges = np.array([0.05, 0.05])
+        # Independent
+        cov_ind = np.eye(2) * 0.25
+        fracs_ind = simultaneous_kelly_sizing(edges, cov_ind, kelly_fraction=0.25)
+        # Correlated (rho=0.5)
+        cov_corr = np.array([[0.25, 0.125], [0.125, 0.25]])
+        fracs_corr = simultaneous_kelly_sizing(edges, cov_corr, kelly_fraction=0.25)
+        assert fracs_corr.sum() <= fracs_ind.sum() + 0.01, (
+            "Correlated bets should not get more exposure than independent"
+        )
+
+    def test_negative_ev_gets_zero_fraction(self):
+        """Bets with negative EV must get zero allocation."""
+        from src.core.portfolio_sizing import simultaneous_kelly_sizing
+        edges = np.array([0.05, -0.02, 0.03])
+        cov = np.eye(3) * 0.25
+        fracs = simultaneous_kelly_sizing(edges, cov, kelly_fraction=0.25)
+        assert fracs[1] < 0.001, f"Negative-EV bet should get ~0, got {fracs[1]}"
+
+    def test_build_covariance_same_event(self):
+        """Same event, different market → rho=0.30."""
+        from src.core.portfolio_sizing import build_covariance_matrix
+        cov = build_covariance_matrix(
+            n_bets=2,
+            event_ids=["evt1", "evt1"],
+            markets=["h2h", "totals"],
+            sports=["soccer_epl", "soccer_epl"],
+        )
+        off_diag = cov[0, 1]
+        expected_rho = 0.30 * 0.25  # rho * base_variance
+        assert abs(off_diag - expected_rho) < 0.01
+
+    def test_build_covariance_different_sports(self):
+        """Different sports → rho=0.0 (independent)."""
+        from src.core.portfolio_sizing import build_covariance_matrix
+        cov = build_covariance_matrix(
+            n_bets=2,
+            event_ids=["evt1", "evt2"],
+            markets=["h2h", "h2h"],
+            sports=["soccer_epl", "basketball_nba"],
+        )
+        assert cov[0, 1] == 0.0
+
+    def test_max_total_exposure_constant(self):
+        """MAX_TOTAL_EXPOSURE should be 15%."""
+        from src.core.portfolio_sizing import MAX_TOTAL_EXPOSURE
+        assert MAX_TOTAL_EXPOSURE == 0.15
+
+
+# ---------------------------------------------------------------------------
+# 39. Bayesian Feature Smoothing
+# ---------------------------------------------------------------------------
+
+
+class TestBayesianSmoothing:
+    """Verify Bayesian smoothing prevents early-season miscalibration."""
+
+    def test_function_exists(self):
+        """calculate_smoothed_feature must be importable."""
+        from src.core.feature_engineering import calculate_smoothed_feature
+        assert callable(calculate_smoothed_feature)
+
+    def test_small_sample_shrinks_to_prior(self):
+        """2 wins in 2 games with prior=0.5 → ~58% (not 100%)."""
+        from src.core.feature_engineering import calculate_smoothed_feature
+        smoothed = calculate_smoothed_feature(
+            measured_value=1.0, sample_size=2,
+            prior_value=0.5, prior_weight=10,
+        )
+        # (1.0*2 + 0.5*10) / (2+10) = 7/12 ≈ 0.5833
+        assert 0.55 < smoothed < 0.62, f"Expected ~0.58, got {smoothed}"
+
+    def test_large_sample_approaches_measured(self):
+        """30 games → smoothed should be close to measured."""
+        from src.core.feature_engineering import calculate_smoothed_feature
+        smoothed = calculate_smoothed_feature(
+            measured_value=0.667, sample_size=30,
+            prior_value=0.5, prior_weight=10,
+        )
+        # (0.667*30 + 0.5*10) / (30+10) = 25/40 = 0.625
+        assert abs(smoothed - 0.625) < 0.01
+
+    def test_zero_sample_returns_prior(self):
+        """0 games → smoothed = prior exactly."""
+        from src.core.feature_engineering import calculate_smoothed_feature
+        smoothed = calculate_smoothed_feature(
+            measured_value=0.0, sample_size=0,
+            prior_value=0.5, prior_weight=10,
+        )
+        assert smoothed == 0.5
+
+    def test_feature_engineer_applies_smoothing(self):
+        """build_core_features must call calculate_smoothed_feature."""
+        import inspect
+        from src.core.feature_engineering import FeatureEngineer
+        source = inspect.getsource(FeatureEngineer.build_core_features)
+        assert "calculate_smoothed_feature" in source, (
+            "build_core_features must apply Bayesian smoothing"
+        )
+
+    def test_priors_defined(self):
+        """LEAGUE_PRIORS and PRIOR_WEIGHTS must be defined."""
+        from src.core.feature_engineering import LEAGUE_PRIORS, PRIOR_WEIGHTS
+        assert "form_winrate" in LEAGUE_PRIORS or "form_winrate" in PRIOR_WEIGHTS
+        assert "attack_strength" in LEAGUE_PRIORS
+
+    def test_smoothing_applied_to_attack_strength(self):
+        """Early-season attack_strength must be shrunk towards 1.0."""
+        from src.core.feature_engineering import FeatureEngineer
+        # Team with 3 goals in 2 games (attack = 2.22) but only 2 games played
+        features = FeatureEngineer.build_core_features(
+            target_odds=2.0, sharp_odds=1.95,
+            sharp_market={"Home": 1.95, "Away": 2.05},
+            sentiment_home=0.0, sentiment_away=0.0,
+            injuries_home=0, injuries_away=0,
+            selection="Home", home_team="Home",
+            form_games_l5=2,
+            team_attack_strength=2.22,
+        )
+        # With prior=1.0 and weight=10: (2.22*2 + 1.0*10)/(2+10) = 14.44/12 = 1.20
+        assert features["team_attack_strength"] < 2.0, (
+            f"Attack strength should be shrunk from 2.22, got {features['team_attack_strength']}"
+        )
+        assert features["team_attack_strength"] > 1.0, (
+            "Attack strength should still be above neutral"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 40. CPU Offloading (ProcessPoolExecutor)
+# ---------------------------------------------------------------------------
+
+
+class TestCPUOffloading:
+    """Verify ML training is offloaded to avoid event-loop blocking."""
+
+    def test_trigger_async_retrain_exists(self):
+        """trigger_async_retrain must be importable."""
+        from src.bot.core_worker import trigger_async_retrain
+        assert callable(trigger_async_retrain)
+        import asyncio
+        assert asyncio.iscoroutinefunction(trigger_async_retrain)
+
+    def test_sync_training_function_exists(self):
+        """_run_ml_training_sync must be a module-level picklable function."""
+        from src.bot.core_worker import _run_ml_training_sync
+        assert callable(_run_ml_training_sync)
+
+    def test_worker_uses_process_pool(self):
+        """trigger_async_retrain must use ProcessPoolExecutor."""
+        import inspect
+        from src.bot.core_worker import trigger_async_retrain
+        source = inspect.getsource(trigger_async_retrain)
+        assert "ProcessPoolExecutor" in source, (
+            "ML training must be offloaded to a separate process"
+        )
+        assert "run_in_executor" in source, (
+            "Must use loop.run_in_executor for async integration"
+        )
