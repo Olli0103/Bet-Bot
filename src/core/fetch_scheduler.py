@@ -276,14 +276,25 @@ def _extract_retry_after(error_str: str) -> Optional[float]:
 # In-Play Terminator: per-sport adaptive fetch interval
 # ---------------------------------------------------------------------------
 
+# Grace period for delayed kickoffs: even if the scheduled kickoff time
+# has passed, keep sniper-mode active for this many seconds in case of
+# weather delays, fan protests, pyro incidents, etc.
+DELAYED_KICKOFF_GRACE_SECONDS = 1200  # 20 minutes
+
+
 def get_sport_fetch_interval(sport_key: str) -> int:
     """Return the optimal polling interval for a sport based on its kickoff times.
 
-    This is the "In-Play Terminator": once ALL matches of a sport have
-    kicked off (delta <= 0), the sport enters deep-sleep until the next
-    trading window.  This prevents the ghost-polling bug where negative
-    deltas (e.g. -600s for 10 min after kickoff) still satisfy
-    ``delta <= 900`` and trigger 10s sniper polling on live games.
+    This is the "In-Play Terminator" with a "Delayed Kickoff Guard":
+    - Once ALL matches are confirmed live (delta exceeds grace period),
+      the sport enters deep-sleep.
+    - Matches within the grace window (up to 20 min past scheduled KO)
+      are treated as potentially still pre-match (delayed starts are
+      common: weather, fan protests, pyro incidents).
+
+    The function also checks cached match statuses from the API.
+    If a match reports status="not_started" even though delta <= 0,
+    it's kept in the active set (delayed kickoff).
 
     Returns interval in seconds:
         No future kickoffs today:   sleep until trading window end (min 3600s)
@@ -296,16 +307,33 @@ def get_sport_fetch_interval(sport_key: str) -> int:
     if not kickoffs:
         return 3600  # No data — idle
 
+    # Check for cached match statuses (set by Scout from API response)
+    match_statuses = cache.get_json(f"match_status:sport:{sport_key}") or {}
+
     now = datetime.now(timezone.utc)
     future_kickoffs = []
 
     for ts in kickoffs:
         try:
             kt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-            # CRITICAL: Only include matches that have NOT yet started.
-            # If delta <= 0, the match is LIVE or FINISHED — no pre-match edge.
-            if (kt - now).total_seconds() > 0:
+            delta = (kt - now).total_seconds()
+
+            if delta > 0:
+                # Clearly in the future — include
                 future_kickoffs.append(kt)
+            elif delta > -DELAYED_KICKOFF_GRACE_SECONDS:
+                # Within grace window: check match status if available.
+                # If status is "not_started" or unknown, assume delayed kickoff
+                # and keep sniper-mode active.
+                ts_key = str(ts)
+                status = match_statuses.get(ts_key, "unknown")
+                if status in ("not_started", "unknown", "delayed"):
+                    future_kickoffs.append(kt)
+                    log.debug(
+                        "Delayed kickoff grace: %s status=%s, delta=%ds — keeping sniper active",
+                        sport_key, status, int(delta),
+                    )
+            # else: delta <= -grace → confirmed live/finished, skip
         except (ValueError, TypeError):
             continue
 
@@ -317,8 +345,9 @@ def get_sport_fetch_interval(sport_key: str) -> int:
 
     delta_seconds = (min(future_kickoffs) - now).total_seconds()
 
-    # HFT Sniper Matrix (only fires for strictly future matches)
-    if delta_seconds <= 900:        # < 15 min
+    # HFT Sniper Matrix (only fires for pre-match or delayed-start matches)
+    # Note: delta_seconds can be slightly negative for delayed kickoffs
+    if delta_seconds <= 900:        # < 15 min (or recently past due to delay)
         return 10
     elif delta_seconds <= 3600:     # < 1 hr
         return 60

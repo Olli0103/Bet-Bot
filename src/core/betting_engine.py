@@ -402,13 +402,16 @@ class BettingEngine:
         p_copula = self._compute_joint_probability_copula(combo_legs, corr_matrix)
 
         # TIPICO TAX-FREE RULE: Combos with 3+ legs are exempt from the
-        # 5% Wettsteuer, BUT only if every leg has odds >= 1.50 (Tipico AGB).
-        # Without the min-odds guard, the engine computes EV with 0% tax for
-        # combos containing a 1.20-odds leg, which Tipico will actually tax.
-        # This turns apparent +EV plays into massive -EV positions.
+        # 5% Wettsteuer, BUT only if:
+        #   1. Every leg has odds >= 1.50 (Tipico AGB min-odds)
+        #   2. At least 3 UNIQUE events (SGP/BetBuilder legs from the same
+        #      match count as ONE qualifying leg for Tipico's tax exemption)
+        # Without both guards, the engine computes EV at 0% tax when Tipico
+        # will actually charge 5.3%, turning +EV plays into -EV positions.
         MIN_ODDS_FOR_TAX_FREE = 1.50
+        unique_events = len(set(leg.event_id for leg in combo_legs))
         is_tax_free = (
-            len(combo_legs) >= 3
+            unique_events >= 3
             and all(leg.odds >= MIN_ODDS_FOR_TAX_FREE for leg in combo_legs)
         )
         effective_tax = 0.0 if is_tax_free else tax_rate
@@ -419,6 +422,14 @@ class BettingEngine:
         ev = expected_value(p_copula, odds, tax_rate=effective_tax)
         kf = kelly_fraction(p_copula, odds, frac=effective_kelly_frac, tax_rate=effective_tax)
         stake = round(kelly_stake(self.bankroll, kf), 2)
+
+        # COMBO LIQUIDITY CAP: the bookmaker limits the entire combo by its
+        # most illiquid leg.  A 3-leg combo with EPL (cap=1.0) + Peru 3.Liga
+        # (cap=0.1) must use 0.1 as the stake multiplier, not 1.0.
+        from src.core.risk_guards import get_liquidity_cap
+        leg_caps = [get_liquidity_cap(leg.sport, leg.market) for leg in combo_legs]
+        strictest_cap = min(leg_caps) if leg_caps else 0.1
+        stake = round(stake * strictest_cap, 2)
 
         # For backward compatibility, store the ratio vs independent as "correlation_penalty"
         p_independent = combo_probability(l.probability for l in combo_legs)

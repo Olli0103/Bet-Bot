@@ -27,7 +27,7 @@ from src.core.alert_manager import (
     pop_digest,
 )
 from src.core.bankroll import BankrollManager
-from src.core.betting_math import kelly_fraction, kelly_stake
+from src.core.betting_math import kelly_fraction, kelly_stake, calculate_mao
 from src.core.ml_trainer import get_reliability_adjustment
 from src.core.performance_monitor import PerformanceMonitor
 from src.core.settings import settings
@@ -203,12 +203,23 @@ class ExecutionerAgent:
             result["reasoning"].append(f"Calculated stake {stake:.2f} < 0.50 minimum")
             return result
 
+        # MAO (Minimum Acceptable Odds) slippage guard:
+        # Between the odds API fetch and actual execution, the line can move.
+        # If live odds at execution time drop below the MAO, the edge is gone.
+        mao = calculate_mao(model_p, tax_rate=tax_rate, required_edge=0.01)
+        result["mao"] = round(mao, 3)
+        if bookmaker_odds and bookmaker_odds < mao:
+            result["reasoning"].append(
+                f"Slippage guard: bookmaker_odds {bookmaker_odds:.3f} < MAO {mao:.3f} — bet aborted"
+            )
+            return result
+
         result["action"] = "bet"
         result["stake"] = stake
         cap_tag = " [CAPPED]" if was_capped else ""
         liq_tag = f" [LIQ={liq_cap:.1f}]" if liq_cap < 1.0 else ""
         result["reasoning"].append(
-            f"EV={ev:.4f}, Kelly frac={frac:.2f}, "
+            f"EV={ev:.4f}, Kelly frac={frac:.2f}, MAO={mao:.3f}, "
             f"stake_raw={stake_raw:.2f}, stake={stake:.2f}{cap_tag}{liq_tag}"
         )
 

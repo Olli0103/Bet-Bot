@@ -60,6 +60,9 @@ class ScoutAgent:
 
         current_snapshot: Dict[str, Dict[str, float]] = {}
         kickoff_times: List[str] = []
+        # Per-sport kickoff times and match statuses for fetch_scheduler
+        sport_kickoff_times: Dict[str, List[str]] = {}
+        sport_match_statuses: Dict[str, Dict[str, str]] = {}
 
         # Trading Session Window: scope API to "now → tomorrow 06:59 UTC"
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -117,6 +120,11 @@ class ScoutAgent:
                 commence = event.get("commence_time")
                 if commence:
                     kickoff_times.append(str(commence))
+                    # Cache per-sport kickoff times and match status
+                    sport_kickoff_times.setdefault(sport, []).append(str(commence))
+                    match_status = event.get("status", "unknown")
+                    sport_match_statuses.setdefault(sport, {})[str(commence)] = match_status
+
                     # Live-event filter: skip events that have already kicked off.
                     # In-play odds have fundamentally different dynamics — our
                     # pre-match model has zero edge on live markets.
@@ -203,6 +211,16 @@ class ScoutAgent:
         # Cache kickoff times so the orchestrator can use adaptive polling
         if kickoff_times:
             cache.set_json(KICKOFF_TIMES_KEY, kickoff_times, ttl_seconds=3600)
+
+        # Cache per-sport kickoff times + match statuses for fetch_scheduler.
+        # This enables the In-Play Terminator and Delayed Kickoff Guard.
+        for sport in active_sports:
+            sport_kos = sport_kickoff_times.get(sport, [])
+            if sport_kos:
+                cache.set_json(f"kickoffs:sport:{sport}", sport_kos, ttl_seconds=3600)
+            sport_statuses = sport_match_statuses.get(sport, {})
+            if sport_statuses:
+                cache.set_json(f"match_status:sport:{sport}", sport_statuses, ttl_seconds=3600)
 
         # Save alerts
         if alerts:

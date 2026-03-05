@@ -37,6 +37,9 @@ class BetSignal(BaseModel):
     calibration_source: str = ""  # "sport_market", "global", "raw_passthrough"
     # Paper-trading isolation: True = learning/exploration signal, not real money
     is_paper: bool = False
+    # Minimum Acceptable Odds: break-even odds after tax + required edge.
+    # If live bookmaker odds drop below this at execution time, abort the bet.
+    mao: float = 0.0
 
 
 class ComboLeg(BaseModel):
