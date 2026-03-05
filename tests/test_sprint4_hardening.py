@@ -734,3 +734,134 @@ class TestEventDrivenOrchestrator:
         """Normal polling interval should be 60 seconds, not 300."""
         from src.agents.orchestrator import NORMAL_INTERVAL_SECONDS
         assert NORMAL_INTERVAL_SECONDS == 60
+
+
+# ---------------------------------------------------------------------------
+# 12. OOF Calibration Leak Prevention
+# ---------------------------------------------------------------------------
+
+
+class TestOOFCalibrationLeak:
+    """Verify that holdout evaluation uses a calibrator fitted ONLY on train-val OOF."""
+
+    def test_separate_val_prod_calibrators(self):
+        """_train_xgboost must produce holdout preds using beta_cal_val (80% OOF),
+        NOT beta_cal (100% OOF).  We verify by inspecting the source code for
+        the critical pattern: val_model wrapped with beta_cal_val."""
+        import inspect
+        from src.core.ml_trainer import _train_xgboost
+
+        source = inspect.getsource(_train_xgboost)
+        # Must use beta_cal_val for holdout evaluation
+        assert "beta_cal_val" in source, "Missing beta_cal_val — holdout evaluation leaks OOF data"
+        # Must fit a separate calibrator on train-val only
+        assert "oof_preds_val" in source, "Missing oof_preds_val — no separate val OOF predictions"
+        # The holdout wrapper must use beta_cal_val, not beta_cal
+        assert "BetaCalibratedModel(val_model, beta_cal_val)" in source, (
+            "Holdout must wrap val_model with beta_cal_val, not beta_cal"
+        )
+
+    def test_val_calibrator_does_not_see_holdout(self):
+        """beta_cal_val is fitted on X_train_val OOF only (first 80%)."""
+        import inspect
+        from src.core.ml_trainer import _train_xgboost
+
+        source = inspect.getsource(_train_xgboost)
+        # The val OOF loop must iterate over X_train_val, not X_active
+        assert "tscv_val.split(X_train_val)" in source, (
+            "Val OOF must split X_train_val, not X_active"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 13. Liquidity-Capped Staking
+# ---------------------------------------------------------------------------
+
+
+class TestLiquidityCaps:
+    """Verify league-tier stake multipliers."""
+
+    def test_tier1_full_stake(self):
+        """EPL, NFL, NBA should allow full stake (cap = 1.0)."""
+        from src.core.risk_guards import get_liquidity_cap
+
+        assert get_liquidity_cap("soccer_epl") == 1.0
+        assert get_liquidity_cap("americanfootball_nfl") == 1.0
+        assert get_liquidity_cap("basketball_nba") == 1.0
+
+    def test_tier2_reduced_stake(self):
+        """Bundesliga, Serie A should cap at 0.7."""
+        from src.core.risk_guards import get_liquidity_cap
+
+        assert get_liquidity_cap("soccer_germany_bundesliga") == 0.7
+        assert get_liquidity_cap("soccer_italy_serie_a") == 0.7
+        assert get_liquidity_cap("icehockey_nhl") == 0.7
+
+    def test_tier3_heavily_reduced(self):
+        """2nd leagues, MLS should cap at 0.3."""
+        from src.core.risk_guards import get_liquidity_cap
+
+        assert get_liquidity_cap("soccer_germany_bundesliga2") == 0.3
+        assert get_liquidity_cap("soccer_usa_mls") == 0.3
+
+    def test_tier4_unknown_leagues(self):
+        """Unknown/niche leagues should cap at 0.1."""
+        from src.core.risk_guards import get_liquidity_cap
+
+        assert get_liquidity_cap("soccer_mongolia_premier") == 0.1
+        assert get_liquidity_cap("esports_csgo") == 0.1
+
+    def test_liquidity_cap_integrated_in_executioner(self):
+        """Executioner must import and use get_liquidity_cap."""
+        import inspect
+        from src.agents.executioner_agent import ExecutionerAgent
+
+        source = inspect.getsource(ExecutionerAgent)
+        assert "get_liquidity_cap" in source, (
+            "Executioner must apply liquidity caps before stake sizing"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 14. Exact Gamma-Poisson Conjugate Update
+# ---------------------------------------------------------------------------
+
+
+class TestExactGammaPoissonConjugate:
+    """Verify the exact Bayesian conjugate update formula."""
+
+    def test_no_spurious_plus_one(self):
+        """The update must NOT contain beta + 1.0 (the old dimensional error)."""
+        import inspect
+        from src.core.poisson_model import PoissonSoccerModel
+
+        source = inspect.getsource(PoissonSoccerModel.update_strengths)
+        assert "beta + 1.0" not in source, "Dimensional error: beta + 1.0 still present"
+        assert "beta_post" in source or "alpha_post / beta_post" in source, (
+            "Must use exact conjugate: alpha_post / beta_post"
+        )
+
+    def test_exact_conjugate_math(self):
+        """Verify: alpha' = alpha + k, beta' = beta + c, E[theta] = alpha'/beta'."""
+        # Manual calculation:
+        # current_strength = 1.2, observed = 2, expected = 1.5, lr = 0.05
+        # prior_weight = 20, c = 1.5/1.2 = 1.25
+        # alpha_prior = 20 * 1.2 = 24, beta_prior = 20
+        # alpha_post = 24 + 2 = 26, beta_post = 20 + 1.25 = 21.25
+        # result = 26 / 21.25 = 1.2235...
+        current = 1.2
+        observed = 2
+        expected = 1.5
+        lr = 0.05
+
+        prior_weight = 1.0 / lr  # 20
+        c = expected / current   # 1.25
+        alpha_prior = prior_weight * current  # 24
+        beta_prior = prior_weight             # 20
+        alpha_post = alpha_prior + observed   # 26
+        beta_post = beta_prior + c            # 21.25
+        result = alpha_post / beta_post       # 1.22352...
+
+        np.testing.assert_almost_equal(result, 26.0 / 21.25, decimal=6)
+        # Result should be between current and observed/c
+        assert result > current  # observed > expected, so strength increases

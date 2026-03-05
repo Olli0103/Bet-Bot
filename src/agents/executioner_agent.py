@@ -145,7 +145,7 @@ class ExecutionerAgent:
         market = str(analysis.get("market", "h2h"))
         trigger = analysis.get("trigger", "")
 
-        from src.core.risk_guards import passes_confidence_gate, apply_stake_cap
+        from src.core.risk_guards import passes_confidence_gate, apply_stake_cap, get_liquidity_cap
         passed_gate, min_conf = passes_confidence_gate(model_p, sport, market)
         if not passed_gate:
             result["reasoning"].append(
@@ -190,6 +190,10 @@ class ExecutionerAgent:
             kf = 0.0
             stake_raw = round(bankroll * 0.01, 2)  # fallback 1% of bankroll
 
+        # Apply liquidity cap (league-tier stake multiplier)
+        liq_cap = get_liquidity_cap(sport, market)
+        stake_raw = round(stake_raw * liq_cap, 2)
+
         # Apply stake cap
         stake, was_capped = apply_stake_cap(
             stake_raw, bankroll, bookmaker_odds or 2.0, market, selection,
@@ -202,9 +206,10 @@ class ExecutionerAgent:
         result["action"] = "bet"
         result["stake"] = stake
         cap_tag = " [CAPPED]" if was_capped else ""
+        liq_tag = f" [LIQ={liq_cap:.1f}]" if liq_cap < 1.0 else ""
         result["reasoning"].append(
             f"EV={ev:.4f}, Kelly frac={frac:.2f}, "
-            f"stake_raw={stake_raw:.2f}, stake={stake:.2f}{cap_tag}"
+            f"stake_raw={stake_raw:.2f}, stake={stake:.2f}{cap_tag}{liq_tag}"
         )
 
         # 4. Optionally send Telegram alert
