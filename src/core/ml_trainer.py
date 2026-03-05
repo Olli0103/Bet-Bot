@@ -500,11 +500,66 @@ class BetaCalibratedModel:
         return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
 
 
+def _compute_time_decay_weights(
+    n_samples: int,
+    half_life_days: float = 180.0,
+    timestamps: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Compute exponential time-decay sample weights.
+
+    Newer samples get weight ~1.0, older samples decay exponentially.
+    A ``half_life_days`` of 180 means a sample from 6 months ago gets
+    weight 0.5, one year ago gets 0.25, etc.
+
+    If ``timestamps`` (array of datetime64) is provided, decay is computed
+    from actual dates.  Otherwise, positional decay is used (assumes data
+    is sorted chronologically, which TimeSeriesSplit requires anyway).
+
+    Parameters
+    ----------
+    n_samples : int
+        Number of training samples.
+    half_life_days : float
+        Half-life in days for the exponential decay.
+    timestamps : np.ndarray, optional
+        Array of datetime64 values (one per sample).
+
+    Returns
+    -------
+    np.ndarray of shape (n_samples,) with values in (0, 1].
+    """
+    if timestamps is not None and len(timestamps) == n_samples:
+        try:
+            ts = pd.to_datetime(timestamps, errors="coerce", utc=True)
+            max_ts = ts.max()
+            days_ago = (max_ts - ts).dt.total_seconds() / 86400.0
+            days_ago = days_ago.fillna(days_ago.max())
+            decay_rate = np.log(2) / half_life_days
+            weights = np.exp(-decay_rate * days_ago.values)
+            return np.clip(weights, 0.01, 1.0)
+        except Exception:
+            pass  # Fall through to positional decay
+
+    # Positional fallback: assume uniform temporal spacing
+    positions = np.arange(n_samples, dtype=float)
+    # Map positions to "days ago" equivalent (newest = 0)
+    days_equiv = (n_samples - 1 - positions) * (365.0 / max(n_samples, 1))
+    decay_rate = np.log(2) / half_life_days
+    weights = np.exp(-decay_rate * days_equiv)
+    return np.clip(weights, 0.01, 1.0)
+
+
+# Default half-life: 180 days (~6 months).  Corona ghost-game data from
+# 2020-2021 gets weight ~0.06, current-season data gets ~1.0.
+TIME_DECAY_HALF_LIFE_DAYS = 180.0
+
+
 def _train_xgboost(
     X: pd.DataFrame,
     y: pd.Series,
     active_features: List[str],
     prune_features: bool = True,
+    timestamps: Optional[np.ndarray] = None,
 ) -> Tuple[BetaCalibratedModel, Dict, List[str]]:
     """Train XGBoost on 100% of data with OOF-beta calibration.
 
@@ -517,14 +572,21 @@ def _train_xgboost(
       4. Train the FINAL XGBClassifier on 100% of the data
       5. Wrap in BetaCalibratedModel for deployment
 
-    This eliminates the previous 40% data-drop where the production model
-    had never seen the most recent form/meta data, causing systematic
-    underfitting on current market conditions.
+    Time decay: when ``timestamps`` is provided, exponential sample weights
+    give recent matches ~10x the influence of 1-year-old data.  This
+    combats concept drift (e.g. VAR rule changes, added-time inflation).
 
     Returns (model, metrics, final_active_features).
     """
     X_active = X[active_features].values
     y_vals = y.values
+
+    # Compute time-decay sample weights
+    sample_weights = _compute_time_decay_weights(
+        n_samples=len(y_vals),
+        half_life_days=TIME_DECAY_HALF_LIFE_DAYS,
+        timestamps=timestamps,
+    )
 
     _XGB_PARAMS = dict(
         objective="binary:logistic",
@@ -547,9 +609,10 @@ def _train_xgboost(
     split_idx = max(1, int(len(X_active) * (1.0 - holdout_frac)))
     X_train_val, X_holdout = X_active[:split_idx], X_active[split_idx:]
     y_train_val, y_holdout = y_vals[:split_idx], y_vals[split_idx:]
+    w_train_val, _w_holdout = sample_weights[:split_idx], sample_weights[split_idx:]
 
     val_model = XGBClassifier(**_XGB_PARAMS)
-    val_model.fit(X_train_val, y_train_val)
+    val_model.fit(X_train_val, y_train_val, sample_weight=w_train_val)
 
     n_splits = min(5, max(2, len(X_active) // 200))
     gap_size = min(200, max(50, len(X_active) // 20))
@@ -564,7 +627,8 @@ def _train_xgboost(
     oof_preds_val = np.full(len(X_train_val), np.nan)
     for train_index, test_index in tscv_val.split(X_train_val):
         cv_model = XGBClassifier(**_XGB_PARAMS)
-        cv_model.fit(X_train_val[train_index], y_train_val[train_index])
+        cv_model.fit(X_train_val[train_index], y_train_val[train_index],
+                     sample_weight=w_train_val[train_index])
         oof_preds_val[test_index] = cv_model.predict_proba(X_train_val[test_index])[:, 1]
 
     oof_mask_val = ~np.isnan(oof_preds_val)
@@ -587,7 +651,8 @@ def _train_xgboost(
     oof_preds = np.full(len(X_active), np.nan)
     for train_index, test_index in tscv_prod.split(X_active):
         cv_model = XGBClassifier(**_XGB_PARAMS)
-        cv_model.fit(X_active[train_index], y_vals[train_index])
+        cv_model.fit(X_active[train_index], y_vals[train_index],
+                     sample_weight=sample_weights[train_index])
         oof_preds[test_index] = cv_model.predict_proba(X_active[test_index])[:, 1]
 
     oof_mask = ~np.isnan(oof_preds)
@@ -625,7 +690,8 @@ def _train_xgboost(
 
             # Re-evaluate pruned feature set on holdout
             val_model_2 = XGBClassifier(**_XGB_PARAMS)
-            val_model_2.fit(X_train_val[:, kept_idx], y_train_val)
+            val_model_2.fit(X_train_val[:, kept_idx], y_train_val,
+                           sample_weight=w_train_val)
             val_preds_2 = val_model_2.predict_proba(X_holdout[:, kept_idx])[:, 1]
             metrics_2 = _evaluate_holdout_raw(val_preds_2, X_holdout[:, kept_idx], y_holdout, y_train_val)
 
@@ -647,7 +713,8 @@ def _train_xgboost(
                     n_splits=n_splits, gap=gap_size
                 ).split(X_pruned):
                     cv_m = XGBClassifier(**_XGB_PARAMS)
-                    cv_m.fit(X_pruned[train_index], y_vals[train_index])
+                    cv_m.fit(X_pruned[train_index], y_vals[train_index],
+                             sample_weight=sample_weights[train_index])
                     oof_preds_pruned[test_index] = cv_m.predict_proba(X_pruned[test_index])[:, 1]
 
                 oof_mask_p = ~np.isnan(oof_preds_pruned)
@@ -667,7 +734,7 @@ def _train_xgboost(
     # --- Step 4: train FINAL model on 100% of the data ---
     X_final = X_active if final_features == active_features else X_active[:, [active_features.index(f) for f in final_features]]
     final_base_model = XGBClassifier(**_XGB_PARAMS)
-    final_base_model.fit(X_final, y_vals)
+    final_base_model.fit(X_final, y_vals, sample_weight=sample_weights)
 
     calibrated = BetaCalibratedModel(final_base_model, beta_cal)
 
@@ -1066,12 +1133,15 @@ def auto_train_model(min_samples: int = 500, include_training_data: bool = True)
     df = _clean_frame(df, FEATURES)
     X = df[FEATURES]
     y = (df["status"] == "won").astype(int)
+    timestamps = df["created_at"].values if "created_at" in df.columns else None
 
     active_features = _get_active_features(X, FEATURES)
     if not active_features:
         return "Abbruch: Keine Feature-Varianz verfügbar."
 
-    model, metrics, final_features = _train_xgboost(X, y, active_features)
+    model, metrics, final_features = _train_xgboost(
+        X, y, active_features, timestamps=timestamps,
+    )
     warnings = _validate_model(model, metrics, final_features)
 
     for w in warnings:
@@ -1354,10 +1424,13 @@ def auto_train_all_models(min_samples: int = 2000, include_training_data: bool =
     # --- Train general model ---
     X_all = df[FEATURES]
     y_all = (df["status"] == "won").astype(int)
+    ts_all = df["created_at"].values if "created_at" in df.columns else None
     active_all = _get_active_features(X_all, FEATURES)
 
     if active_all:
-        model, metrics, final_features = _train_xgboost(X_all, y_all, active_all)
+        model, metrics, final_features = _train_xgboost(
+            X_all, y_all, active_all, timestamps=ts_all,
+        )
         warnings = _validate_model(model, metrics, final_features)
         for w in warnings:
             log.warning("ML validation (general): %s", w)
@@ -1432,7 +1505,10 @@ def auto_train_all_models(min_samples: int = 2000, include_training_data: bool =
                 )
                 continue
 
-            model_sport, metrics_sport, final_sport = _train_xgboost(X_sport, y_sport, active_sport)
+            ts_sport = subset["created_at"].values if "created_at" in subset.columns else None
+            model_sport, metrics_sport, final_sport = _train_xgboost(
+                X_sport, y_sport, active_sport, timestamps=ts_sport,
+            )
             warnings_sport = _validate_model(model_sport, metrics_sport, final_sport)
             for w in warnings_sport:
                 log.warning("ML validation (%s): %s", group, w)

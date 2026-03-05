@@ -20,6 +20,7 @@ from src.core.performance_monitor import PerformanceMonitor
 from src.core.settings import settings
 from src.data.redis_cache import cache
 from src.integrations.odds_fetcher import OddsFetcher
+from src.core.execution_jitter import apply_execution_jitter
 from src.integrations.session_manager import ensure_session_fresh
 
 log = logging.getLogger(__name__)
@@ -284,6 +285,10 @@ class AgentOrchestrator:
                 continue
 
             try:
+                # Humanized jitter: randomized delay between consecutive
+                # executions to avoid WAF bot-detection (Akamai/Cloudflare).
+                await apply_execution_jitter()
+
                 exec_result = await self._process_single_alert(alert)
                 action = exec_result.get("action", "skip")
                 if action == "bet":

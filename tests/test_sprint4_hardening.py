@@ -1879,3 +1879,280 @@ class TestProactiveSessionRefresh:
         assert "ensure_session_fresh" in source, (
             "Orchestrator must call session refresh before sniper window"
         )
+
+
+# ===========================================================================
+# SPRINT 13: Portfolio Scaling & Concept Drift
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# 33. Free Margin & Exposure Tracking
+# ---------------------------------------------------------------------------
+
+
+class TestFreeMarginExposure:
+    """Verify bankroll sizing deducts pending exposure."""
+
+    def test_get_free_margin_method_exists(self):
+        """BankrollManager must expose get_free_margin()."""
+        from src.core.bankroll import BankrollManager
+        assert hasattr(BankrollManager, "get_free_margin")
+
+    def test_free_margin_deducts_pending(self):
+        """free_margin = bankroll - pending exposure."""
+        from unittest.mock import patch, MagicMock
+        from src.core.bankroll import BankrollManager
+
+        mgr = BankrollManager.__new__(BankrollManager)
+        mgr._initial = 1000.0
+        mgr._owner = ""
+
+        with patch.object(mgr, "get_current_bankroll", return_value=1000.0), \
+             patch.object(mgr, "get_pending_exposure", return_value=200.0):
+            free = mgr.get_free_margin()
+        assert free == 800.0
+
+    def test_free_margin_never_negative(self):
+        """Free margin must never go below 0."""
+        from unittest.mock import patch
+        from src.core.bankroll import BankrollManager
+
+        mgr = BankrollManager.__new__(BankrollManager)
+        mgr._initial = 1000.0
+        mgr._owner = ""
+
+        with patch.object(mgr, "get_current_bankroll", return_value=100.0), \
+             patch.object(mgr, "get_pending_exposure", return_value=500.0):
+            free = mgr.get_free_margin()
+        assert free == 0.0
+
+    def test_add_pending_exposure_accumulates(self):
+        """add_pending_exposure must increase the total."""
+        from unittest.mock import patch
+        from src.core.bankroll import BankrollManager
+
+        mgr = BankrollManager.__new__(BankrollManager)
+        mgr._initial = 1000.0
+        mgr._owner = ""
+
+        with patch("src.core.bankroll.cache") as mock_cache:
+            mock_cache.get_json.return_value = 100.0
+            new_total = mgr.add_pending_exposure(50.0)
+        assert new_total == 150.0
+
+    def test_release_pending_exposure_decreases(self):
+        """release_pending_exposure must decrease the total."""
+        from unittest.mock import patch
+        from src.core.bankroll import BankrollManager
+
+        mgr = BankrollManager.__new__(BankrollManager)
+        mgr._initial = 1000.0
+        mgr._owner = ""
+
+        with patch("src.core.bankroll.cache") as mock_cache:
+            mock_cache.get_json.return_value = 150.0
+            new_total = mgr.release_pending_exposure(50.0)
+        assert new_total == 100.0
+
+    def test_executioner_uses_free_margin(self):
+        """Executioner must call get_free_margin, not get_current_bankroll."""
+        import inspect
+        from src.agents.executioner_agent import ExecutionerAgent
+        source = inspect.getsource(ExecutionerAgent.execute)
+        assert "get_free_margin" in source, (
+            "Executioner must use free margin (bankroll minus pending exposure)"
+        )
+
+    def test_executioner_records_pending_exposure(self):
+        """After a bet, executioner must call add_pending_exposure."""
+        import inspect
+        from src.agents.executioner_agent import ExecutionerAgent
+        source = inspect.getsource(ExecutionerAgent.execute)
+        assert "add_pending_exposure" in source, (
+            "Executioner must record pending exposure after bet placement"
+        )
+
+    def test_simultaneous_kelly_scenario(self):
+        """10 simultaneous signals must not exceed bankroll capacity.
+
+        With 1000€ bankroll and 5% Kelly per bet:
+        - WITHOUT free margin: 10 × 50€ = 500€ (50% at risk!)
+        - WITH free margin: each bet sees decreasing available capital
+        """
+        bankroll = 1000.0
+        kelly_pct = 0.05
+        pending = 0.0
+
+        stakes = []
+        for _ in range(10):
+            free = max(0.0, bankroll - pending)
+            stake = round(free * kelly_pct, 2)
+            stakes.append(stake)
+            pending += stake
+
+        total_exposure = sum(stakes)
+        assert total_exposure < bankroll * 0.50, (
+            f"Total exposure {total_exposure:.2f} exceeds 50% of bankroll"
+        )
+        # Last bet should be meaningfully smaller than first
+        assert stakes[-1] < stakes[0], "Later bets should have smaller stakes"
+
+
+# ---------------------------------------------------------------------------
+# 34. Time Decay Sample Weights
+# ---------------------------------------------------------------------------
+
+
+class TestTimeDecaySampleWeights:
+    """Verify exponential time decay in ML training."""
+
+    def test_compute_time_decay_positional(self):
+        """Positional decay: last sample weight ~1.0, first much lower."""
+        from src.core.ml_trainer import _compute_time_decay_weights
+        weights = _compute_time_decay_weights(n_samples=1000, half_life_days=180.0)
+        assert len(weights) == 1000
+        assert weights[-1] > 0.9, f"Newest sample weight should be ~1.0, got {weights[-1]}"
+        assert weights[0] < weights[-1], "Oldest sample must have lower weight"
+
+    def test_half_life_decay_rate(self):
+        """A sample ~half_life old should have weight ~0.5."""
+        from src.core.ml_trainer import _compute_time_decay_weights
+        # With 365 samples spanning ~1 year, index 0 is ~1 year ago
+        weights = _compute_time_decay_weights(n_samples=365, half_life_days=180.0)
+        # Sample at ~180 days ago (index ~185 from end = index ~180)
+        mid_idx = 365 - 180  # ~185 days from start ≈ 180 days ago
+        # Allow tolerance since positional mapping is approximate
+        assert 0.3 < weights[mid_idx] < 0.7, (
+            f"Sample at ~half-life should have weight ~0.5, got {weights[mid_idx]}"
+        )
+
+    def test_weights_all_positive(self):
+        """All weights must be > 0 (clamped to 0.01 minimum)."""
+        from src.core.ml_trainer import _compute_time_decay_weights
+        weights = _compute_time_decay_weights(n_samples=5000, half_life_days=180.0)
+        assert (weights > 0).all(), "All weights must be positive"
+        assert weights.min() >= 0.01, "Minimum weight must be >= 0.01"
+
+    def test_half_life_constant(self):
+        """TIME_DECAY_HALF_LIFE_DAYS should be 180 (6 months)."""
+        from src.core.ml_trainer import TIME_DECAY_HALF_LIFE_DAYS
+        assert TIME_DECAY_HALF_LIFE_DAYS == 180.0
+
+    def test_train_xgboost_accepts_timestamps(self):
+        """_train_xgboost must accept a timestamps parameter."""
+        import inspect
+        from src.core.ml_trainer import _train_xgboost
+        sig = inspect.signature(_train_xgboost)
+        assert "timestamps" in sig.parameters, (
+            "_train_xgboost must accept timestamps for time decay"
+        )
+
+    def test_xgb_fit_uses_sample_weight(self):
+        """All XGBoost .fit() calls must pass sample_weight."""
+        import inspect, re
+        from src.core.ml_trainer import _train_xgboost
+        source = inspect.getsource(_train_xgboost)
+        # Count only XGBClassifier .fit() calls (not BetaCalibration .fit())
+        # XGB fits use array indexing like y_vals[...] or y_train_val
+        xgb_fits = len(re.findall(r'\.fit\([^)]*sample_weight=', source))
+        # Every XGBClassifier .fit should have sample_weight
+        assert xgb_fits >= 6, (
+            f"At least 6 XGB .fit() calls must pass sample_weight "
+            f"(found {xgb_fits})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 35. Humanized Execution Jitter
+# ---------------------------------------------------------------------------
+
+
+class TestExecutionJitter:
+    """Verify WAF-evasion jitter between consecutive bets."""
+
+    def test_jitter_module_exists(self):
+        """execution_jitter module must be importable."""
+        from src.core.execution_jitter import get_execution_delay, apply_execution_jitter
+        assert callable(get_execution_delay)
+        assert callable(apply_execution_jitter)
+
+    def test_normal_delay_range(self):
+        """Normal delay should be 1.5-4.0s (with jitter)."""
+        from src.core.execution_jitter import get_execution_delay, _recent_executions
+        _recent_executions.clear()
+        delays = [get_execution_delay()[0] for _ in range(100)]
+        assert all(d >= 0.3 for d in delays), "No delay should be < 0.3s"
+        assert max(delays) < 6.0, "Normal delays shouldn't exceed 6s"
+        avg = sum(delays) / len(delays)
+        assert 1.5 < avg < 4.0, f"Average normal delay should be 1.5-4.0s, got {avg:.2f}"
+
+    def test_burst_detection_increases_delay(self):
+        """After rapid-fire executions, delay should increase significantly."""
+        import time
+        from src.core.execution_jitter import (
+            get_execution_delay, record_execution, _recent_executions,
+        )
+        _recent_executions.clear()
+
+        # Simulate 3 rapid executions
+        for _ in range(3):
+            record_execution()
+
+        delay, reason = get_execution_delay()
+        assert delay >= 4.0, f"Burst cooldown should be >= 4.0s, got {delay:.2f}"
+        assert "burst" in reason.lower()
+
+    def test_orchestrator_uses_jitter(self):
+        """Worker loop must call apply_execution_jitter before processing."""
+        import inspect
+        from src.agents.orchestrator import AgentOrchestrator
+        source = inspect.getsource(AgentOrchestrator._worker_loop)
+        assert "apply_execution_jitter" in source, (
+            "Worker loop must apply humanized jitter before execution"
+        )
+
+    def test_jitter_constants(self):
+        """Verify jitter parameter bounds."""
+        from src.core.execution_jitter import (
+            MIN_DELAY_SECONDS, MAX_DELAY_SECONDS,
+            BURST_COOLDOWN_MIN, BURST_COOLDOWN_MAX,
+            BURST_THRESHOLD, BURST_WINDOW_SECONDS,
+        )
+        assert MIN_DELAY_SECONDS >= 1.0
+        assert MAX_DELAY_SECONDS <= 5.0
+        assert BURST_COOLDOWN_MIN >= 4.0
+        assert BURST_COOLDOWN_MAX <= 10.0
+        assert BURST_THRESHOLD >= 2
+        assert BURST_WINDOW_SECONDS >= 5.0
+
+
+# ---------------------------------------------------------------------------
+# 36. Pre-Kickoff CLV Snapshot (T-90s)
+# ---------------------------------------------------------------------------
+
+
+class TestPreKickoffSnapshot:
+    """Verify CLV snapshot is taken at T-90s, not T-0."""
+
+    def test_snapshot_timing_constant(self):
+        """PRE_KICKOFF_SNAPSHOT_SECONDS should be 90."""
+        from src.core.clv_logger import PRE_KICKOFF_SNAPSHOT_SECONDS
+        assert PRE_KICKOFF_SNAPSHOT_SECONDS == 90
+
+    def test_t0_docstring_mentions_pre_kickoff(self):
+        """fetch_t0_closing_line docstring must mention T-90s / pre-kickoff."""
+        from src.core.clv_logger import fetch_t0_closing_line
+        doc = fetch_t0_closing_line.__doc__ or ""
+        assert "90" in doc or "pre-kickoff" in doc.lower(), (
+            "Docstring must document T-90s snapshot timing"
+        )
+
+    def test_clv_logger_warns_about_suspended_markets(self):
+        """Module docs should explain why T-0 is dangerous."""
+        import inspect
+        import src.core.clv_logger as mod
+        source = inspect.getsource(mod)
+        assert "suspend" in source.lower() or "SUSPEND" in source, (
+            "clv_logger must document the market suspension risk"
+        )

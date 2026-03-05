@@ -162,7 +162,10 @@ class ExecutionerAgent:
         # 3. Calculate stake with performance-adjusted + calibration-adjusted Kelly
         tax_rate = settings.tipico_tax_rate if not settings.tax_free_mode else 0.0
 
-        bankroll = self.bankroll_mgr.get_current_bankroll()
+        # Free Margin: deduct pending (unsettled) exposure from bankroll
+        # before Kelly sizing.  This prevents catastrophic over-staking when
+        # multiple signals fire simultaneously (e.g. 5 Bundesliga games at 15:30).
+        bankroll = self.bankroll_mgr.get_free_margin()
         kelly_mult = adjustments.get("kelly_multiplier", 1.0)
 
         # Calibration reliability adjustment: if the model over-predicts in
@@ -235,6 +238,10 @@ class ExecutionerAgent:
             f"EV={ev:.4f}, Kelly frac={frac:.2f}, MAO={mao:.3f}, "
             f"stake_raw={stake_raw:.2f}, stake={stake:.2f}{cap_tag}{liq_tag}"
         )
+
+        # Record pending exposure so subsequent concurrent bets see
+        # reduced free margin (Simultaneous Kelly protection).
+        self.bankroll_mgr.add_pending_exposure(stake)
 
         # 4. Optionally send Telegram alert
         if bot and chat_id:
