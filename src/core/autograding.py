@@ -5,6 +5,7 @@ import re
 
 from sqlalchemy import select
 
+from src.core.betting_math import effective_tax_rate
 from src.core.elo_ratings import EloSystem
 from src.core.form_tracker import update_form
 from src.core.poisson_model import PoissonSoccerModel
@@ -178,7 +179,15 @@ async def run_auto_grading() -> int:
         is_won = normalize_team(pick) == normalize_team(winner)
         if is_won:
             status = "won"
-            pnl = round(snap["stake"] * (snap["odds"] - 1.0), 2)
+            # Apply Tipico tax to the gross payout, matching the EV math
+            # in betting_math.py.  Without this, PNL reports and ML training
+            # targets systematically overstate profits by ~5%.
+            tax = effective_tax_rate(
+                base_tax=settings.tipico_tax_rate,
+                tax_free_mode=settings.tax_free_mode,
+            )
+            net_odds = snap["odds"] * (1.0 - tax)
+            pnl = round(snap["stake"] * (net_odds - 1.0), 2)
         else:
             status = "lost"
             pnl = round(-snap["stake"], 2)
@@ -189,11 +198,21 @@ async def run_auto_grading() -> int:
         return 0
 
     # --- Phase 4: Persist results in a NEW, short-lived DB session ---
+    # Collect all IDs we need to update, then load them in a single query
+    # instead of N individual db.get() calls (avoids N+1).
+    update_ids = [u[0] for u in updates]
+    update_map = {u[0]: u for u in updates}  # bet_id -> (id, status, pnl, result, pick)
+
     with SessionLocal() as db:
-        for bet_id, status, pnl, result, pick in updates:
-            bet = db.get(PlacedBet, bet_id)
-            if bet is None or bet.status != "open":
-                continue
+        bets_to_update = db.scalars(
+            select(PlacedBet).where(
+                PlacedBet.id.in_(update_ids),
+                PlacedBet.status == "open",
+            )
+        ).all()
+
+        for bet in bets_to_update:
+            _, status, pnl, result, pick = update_map[bet.id]
 
             bet.status = status
             bet.pnl = pnl

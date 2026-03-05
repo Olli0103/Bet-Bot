@@ -449,10 +449,41 @@ def _process_inbox():
 # ── Main loop ─────────────────────────────────────────────────
 
 class Scheduler:
-    """Simple cron-like scheduler for the core worker."""
+    """Simple cron-like scheduler for the core worker.
+
+    Includes optional Redis-based distributed locking so that multiple
+    worker instances (for HA) don't execute the same job concurrently.
+    Without this, deploying two core workers causes duplicate API calls,
+    double Telegram pushes, and race conditions on DB writes.
+    """
+
+    _LOCK_PREFIX = "lock:core_worker:"
 
     def __init__(self):
         self._last_run: dict[str, float] = {}
+
+    @staticmethod
+    def _try_acquire_lock(name: str, ttl_sec: int = 300) -> bool:
+        """Acquire a Redis-based distributed lock (SET NX EX).
+
+        Returns True if this instance acquired the lock.  The TTL auto-
+        releases it if the worker crashes, preventing permanent deadlocks.
+        """
+        lock_key = f"{Scheduler._LOCK_PREFIX}{name}"
+        try:
+            acquired = cache.client.set(lock_key, str(os.getpid()), nx=True, ex=ttl_sec)
+            return bool(acquired)
+        except Exception:
+            # If Redis is down, allow execution (degrade gracefully)
+            return True
+
+    @staticmethod
+    def _release_lock(name: str) -> None:
+        lock_key = f"{Scheduler._LOCK_PREFIX}{name}"
+        try:
+            cache.client.delete(lock_key)
+        except Exception:
+            pass
 
     def should_run(self, name: str, interval_sec: float) -> bool:
         now = time.time()
@@ -491,27 +522,50 @@ async def main_loop():
 
     while _running:
         # ── Daily scheduled jobs ──
+        # All jobs that hit external APIs or modify shared state use
+        # distributed locks to prevent duplicate execution when multiple
+        # workers are deployed for HA.
 
         # 06:00 — Morning Briefing: fetch schedule + initial signals (1 broad fetch/day)
         if sched.should_run_daily("morning_briefing", 6, 0):
-            _run_morning_briefing()
+            if sched._try_acquire_lock("morning_briefing", ttl_sec=600):
+                try:
+                    _run_morning_briefing()
+                finally:
+                    sched._release_lock("morning_briefing")
 
         # 07:00 — Push daily signal summary to Telegram
         if sched.should_run_daily("daily_push", 7, 0):
-            _push_daily_signals()
+            if sched._try_acquire_lock("daily_push", ttl_sec=300):
+                try:
+                    _push_daily_signals()
+                finally:
+                    sched._release_lock("daily_push")
 
         if sched.should_run_daily("learning_daily", 20, 0):
-            _run_learning_status()
+            if sched._try_acquire_lock("learning_daily", ttl_sec=300):
+                try:
+                    _run_learning_status()
+                finally:
+                    sched._release_lock("learning_daily")
 
         if sched.should_run_daily("api_health", 20, 5):
             _run_api_health()
 
         if sched.should_run_daily("daily_report", 22, 0):
-            _run_daily_performance()
+            if sched._try_acquire_lock("daily_report", ttl_sec=300):
+                try:
+                    _run_daily_performance()
+                finally:
+                    sched._release_lock("daily_report")
 
         # Weekly retrain (Saturday = weekday 5)
         if sched.should_run_weekly("retrain_weekly", 5, 3, 15):
-            _run_weekly_retrain()
+            if sched._try_acquire_lock("retrain_weekly", ttl_sec=3600):
+                try:
+                    _run_weekly_retrain()
+                finally:
+                    sched._release_lock("retrain_weekly")
 
         # ── JIT polling (every 60s) ──
         # These are lightweight: they only check cached schedule timestamps
@@ -527,9 +581,13 @@ async def main_loop():
 
         # Auto-grading every 30 minutes
         if sched.should_run("auto_grading", 1800):
-            _run_auto_grading()
-            # Check if enough new graded bets warrant a retrain
-            _check_data_driven_retrain()
+            if sched._try_acquire_lock("auto_grading", ttl_sec=600):
+                try:
+                    _run_auto_grading()
+                    # Check if enough new graded bets warrant a retrain
+                    _check_data_driven_retrain()
+                finally:
+                    sched._release_lock("auto_grading")
 
         # Agent cycle every 5 minutes — reads from cache only, no API calls
         if sched.should_run("agent_cycle", 300):

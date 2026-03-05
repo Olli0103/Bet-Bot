@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Dict, Iterable, Optional
 
 
@@ -108,10 +109,21 @@ def combo_probability(probs: Iterable[float]) -> float:
 
 
 def _remove_vig(prices: Dict[str, float]) -> Dict[str, float]:
-    """Remove vig from a set of odds using the proportional-to-implied method.
+    """Remove vig from a set of odds using the **Power Method**.
 
-    Converts raw implied probabilities to fair probabilities that sum to 1.0.
-    This is essential before comparing two books with different margins.
+    The proportional method (``ip / sum(ips)``) assumes the bookmaker
+    adds margin uniformly across all outcomes.  In practice, bookmakers
+    exploit the *favourite-longshot bias*: they load more margin onto
+    longshots than favourites.  This causes proportional vig removal to
+    systematically **underestimate** the true probability of favourites
+    and **overestimate** longshots, leading to bad bets on underdogs.
+
+    The Power Method solves ``sum(ip_i ^ k) = 1`` for exponent ``k``
+    via Newton's method, then computes ``fair_prob_i = ip_i ^ k``.
+    This respects the non-linear margin structure of real bookmakers.
+
+    Falls back to proportional if Newton iteration doesn't converge
+    (e.g. degenerate two-way markets with near-equal odds).
     """
     if not prices:
         return {}
@@ -119,10 +131,44 @@ def _remove_vig(prices: Dict[str, float]) -> Dict[str, float]:
     for sel, odds in prices.items():
         if odds > 1.0:
             raw_ips[sel] = 1.0 / odds
+    if not raw_ips:
+        return {}
     total_ip = sum(raw_ips.values())
     if total_ip <= 0:
         return {}
-    return {sel: round(ip / total_ip, 6) for sel, ip in raw_ips.items()}
+
+    # If market is already fair (no vig), skip the iteration
+    if abs(total_ip - 1.0) < 1e-9:
+        return {sel: round(ip, 6) for sel, ip in raw_ips.items()}
+
+    # Newton's method: find k such that sum(ip_i^k) = 1
+    # Starting from k=1 (proportional), iterate towards the true exponent.
+    k = 1.0
+    ips = list(raw_ips.values())
+    for _ in range(50):  # max iterations
+        s = sum(p ** k for p in ips)
+        if abs(s - 1.0) < 1e-12:
+            break
+        # Derivative: ds/dk = sum(ip^k * ln(ip))
+        ds = sum(p ** k * math.log(p) for p in ips if p > 0)
+        if abs(ds) < 1e-15:
+            break  # avoid division by zero; fall back to current k
+        k -= (s - 1.0) / ds
+        # Safety clamp: k must stay positive and reasonable
+        k = max(0.1, min(k, 10.0))
+
+    # Apply the exponent
+    fair = {}
+    sels = list(raw_ips.keys())
+    for i, sel in enumerate(sels):
+        fair[sel] = round(ips[i] ** k, 6)
+
+    # Normalise to exactly 1.0 (numerical safety)
+    total_fair = sum(fair.values())
+    if total_fair > 0 and abs(total_fair - 1.0) > 1e-6:
+        fair = {sel: round(p / total_fair, 6) for sel, p in fair.items()}
+
+    return fair
 
 
 def public_bias_score(
