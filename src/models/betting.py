@@ -35,6 +35,8 @@ class BetSignal(BaseModel):
     model_probability_raw: float = 0.0  # raw model output before calibration
     model_probability_calibrated: float = 0.0  # calibrated probability
     calibration_source: str = ""  # "sport_market", "global", "raw_passthrough"
+    # Paper-trading isolation: True = learning/exploration signal, not real money
+    is_paper: bool = False
 
 
 class ComboLeg(BaseModel):

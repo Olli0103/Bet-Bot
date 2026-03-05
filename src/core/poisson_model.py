@@ -6,7 +6,6 @@ matrix approach to derive 1X2, over/under 0.5/1.5/2.5/3.5, and BTTS probabilitie
 from __future__ import annotations
 
 import logging
-import math
 from typing import Dict, Optional
 
 from scipy.stats import poisson
@@ -215,45 +214,56 @@ class PoissonSoccerModel:
     def update_strengths(
         self, home: str, away: str, home_goals: int, away_goals: int
     ) -> None:
-        """Nudge attack/defense strengths towards the observed result.
+        """Bayesian Gamma-Poisson conjugate update for attack/defense strengths.
 
-        The update rule compares actual goals to the model's expected goals
-        and shifts the relevant strengths proportionally via a simple
-        multiplicative adjustment:
+        Treats each team's attack and defense strength as the mean of a
+        Gamma distribution (the conjugate prior for the Poisson rate).
 
-            new_attack  = old_attack  * (1 + lr * (actual/expected - 1))
-            new_defense = old_defense * (1 + lr * (conceded/expected - 1))
+        For a Gamma prior with shape α and rate β:
+          - Prior mean = α / β
+          - After observing k goals with expected rate λ:
+            α_new = α + k
+            β_new = β + λ/μ  (where μ = current strength, λ/μ = baseline rate)
+          - Posterior mean = α_new / β_new
 
-        This keeps strengths bounded and stable while allowing the model to
-        slowly adapt to form changes.
+        The ``prior_weight`` (= 1 / learning_rate) controls how many
+        "equivalent prior observations" the current strength represents.
+        With lr=0.05, prior_weight=20, so a single match counts as ~5%
+        of the evidence.
+
+        This replaces the log-dampened heuristic which was numerically
+        unstable for low-xG matches (e.g., xG=0.2, actual=3 → the old
+        log1p approach could still produce 40%+ swings).  The Gamma
+        conjugate naturally compresses outliers because the β denominator
+        grows with the baseline rate.
         """
         home_xg, away_xg = self._expected_goals(home, away)
-        lr = self.learning_rate
 
         h = self._load_strengths(home)
         a = self._load_strengths(away)
 
-        # Use log-dampened updates to prevent outlier results from causing
-        # explosive strength swings.  A raw multiplicative update with
-        # ratio = actual/expected can produce huge jumps when xG is low
-        # (e.g. xG=0.2, actual=3 → ratio=15 → +70% attack boost).
-        # Log-dampening: sign(ratio-1) * log(1 + |ratio-1|) compresses
-        # large ratios while preserving the direction and magnitude for
-        # normal results near the expected value.
-        def _dampened_ratio(actual: float, expected: float) -> float:
-            if expected <= 0:
-                return 0.0
-            ratio = actual / expected
-            delta = ratio - 1.0
-            return math.copysign(math.log1p(abs(delta)), delta)
+        # prior_weight = equivalent number of prior observations
+        # With lr=0.05: prior_weight=20, so one match = 1/(20+1) ≈ 5% influence
+        prior_weight = 1.0 / self.learning_rate
+
+        def _gamma_update(current_strength: float, observed_goals: float, expected_goals: float) -> float:
+            """Bayesian conjugate update: Gamma(α, β) posterior mean."""
+            # α (shape) encodes prior total goals at this strength level
+            alpha = prior_weight * current_strength
+            # β (rate) encodes the number of expected-rate observations
+            # We divide by max(current_strength, 0.01) to get the baseline rate
+            baseline_rate = expected_goals / max(current_strength, 0.01)
+            beta = prior_weight + baseline_rate
+            # Posterior mean = (α + observed) / (β + 1 observation)
+            return (alpha + observed_goals) / (beta + 1.0)
 
         # --- home team ---
-        h["attack"] *= 1.0 + lr * _dampened_ratio(home_goals, home_xg)
-        h["defense"] *= 1.0 + lr * _dampened_ratio(away_goals, away_xg)
+        h["attack"] = _gamma_update(h["attack"], home_goals, home_xg)
+        h["defense"] = _gamma_update(h["defense"], away_goals, away_xg)
 
         # --- away team ---
-        a["attack"] *= 1.0 + lr * _dampened_ratio(away_goals, away_xg)
-        a["defense"] *= 1.0 + lr * _dampened_ratio(home_goals, home_xg)
+        a["attack"] = _gamma_update(a["attack"], away_goals, away_xg)
+        a["defense"] = _gamma_update(a["defense"], home_goals, home_xg)
 
         # Clamp to sensible bounds so strengths don't run away
         for s in (h, a):
@@ -264,7 +274,8 @@ class PoissonSoccerModel:
         self._save_strengths(away, a["attack"], a["defense"])
 
         log.debug(
-            "Poisson strengths updated: %s atk=%.3f def=%.3f | %s atk=%.3f def=%.3f",
+            "Poisson strengths updated (Gamma conjugate): "
+            "%s atk=%.3f def=%.3f | %s atk=%.3f def=%.3f",
             home, h["attack"], h["defense"],
             away, a["attack"], a["defense"],
         )
