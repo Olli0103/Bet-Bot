@@ -190,3 +190,49 @@ def recover_unacked() -> int:
     if recovered > 0:
         log.warning("Recovered %d unacked messages on startup", recovered)
     return recovered
+
+
+def recover_stale_processing() -> int:
+    """Periodically recover messages stuck in processing queues.
+
+    Unlike ``recover_unacked()`` (called on startup), this is safe to
+    call from a running worker on a timer.  It only recovers messages
+    older than ``_PROCESSING_TTL`` seconds, leaving recently-popped
+    messages alone (they may still be in-flight).
+
+    Without this, a worker crash between pop and ack leaves messages
+    stranded in the processing queue until the *next* full restart.
+    """
+    r = cache.client
+    recovered = 0
+    now = time.time()
+
+    for proc_key, main_key in [
+        (OUTBOX_PROCESSING_KEY, OUTBOX_KEY),
+        (INBOX_PROCESSING_KEY, INBOX_KEY),
+    ]:
+        # Peek at all messages in the processing queue
+        try:
+            items = r.lrange(proc_key, 0, -1)
+        except Exception:
+            continue
+
+        for raw in items:
+            try:
+                msg = json.loads(raw)
+                ts = float(msg.get("ts", 0))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                ts = 0  # corrupt message — recover it
+
+            if now - ts > _PROCESSING_TTL:
+                # Move back to main queue and remove from processing
+                try:
+                    r.lpush(main_key, raw)
+                    r.lrem(proc_key, 1, raw)
+                    recovered += 1
+                except Exception:
+                    pass
+
+    if recovered > 0:
+        log.warning("Recovered %d stale processing messages", recovered)
+    return recovered
