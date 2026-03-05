@@ -2,12 +2,14 @@
 import pytest
 
 from src.core.betting_math import (
+    _remove_vig,
     combo_odds,
     combo_probability,
     effective_tax_rate,
     expected_value,
     implied_probability,
     kelly_fraction,
+    kelly_fraction_uncapped,
     kelly_stake,
     public_bias_score,
 )
@@ -74,11 +76,12 @@ class TestExpectedValue:
         assert ev == pytest.approx(0.0)
 
     def test_with_tax(self):
-        # 60% chance, 2.0 odds, 5% tax
-        # net_profit = (2.0 - 1.0) * 0.95 = 0.95
-        # EV = 0.6 * 0.95 - 0.4 = 0.57 - 0.4 = 0.17
+        # 60% chance, 2.0 odds, 5% tax on gross payout (German Tipico model)
+        # net_odds = 2.0 * 0.95 = 1.90
+        # net_profit = 1.90 - 1.0 = 0.90
+        # EV = 0.6 * 0.90 - 0.4 = 0.54 - 0.4 = 0.14
         ev = expected_value(0.6, 2.0, tax_rate=0.05)
-        assert ev == pytest.approx(0.17)
+        assert ev == pytest.approx(0.14)
 
     def test_high_odds_positive(self):
         # 15% chance at 10.0 odds → EV = 0.15*9 - 0.85 = 0.5
@@ -109,12 +112,12 @@ class TestKellyFraction:
         assert kf == 0.0
 
     def test_with_tax(self):
-        # 60% prob, 2.0 odds, 5% tax
-        # net_b = 1.0 * 0.95 = 0.95
-        # raw = (0.95 * 0.6 - 0.4) / 0.95 = (0.57 - 0.4) / 0.95 = 0.1789
-        # kelly = 0.1789 * 0.2 = 0.0358
+        # 60% prob, 2.0 odds, 5% tax on gross (German model)
+        # net_b = 2.0 * 0.95 - 1.0 = 0.90
+        # raw = (0.90 * 0.6 - 0.4) / 0.90 = 0.14/0.90 = 0.1556
+        # kelly = 0.1556 * 0.2 = 0.0311
         kf = kelly_fraction(0.6, 2.0, frac=0.2, tax_rate=0.05)
-        assert kf == pytest.approx(0.0358, abs=0.001)
+        assert kf == pytest.approx(0.0311, abs=0.001)
 
     def test_net_b_zero(self):
         # If odds <= 1.0 after tax → net_b = 0 → return 0
@@ -187,3 +190,60 @@ class TestPublicBiasScore:
     def test_empty_markets(self):
         assert public_bias_score({}, {"Home": 2.0}) == {}
         assert public_bias_score({"Home": 2.0}, {}) == {}
+
+
+# ---------------------------------------------------------------------------
+# Kelly hard-cap safety
+# ---------------------------------------------------------------------------
+
+class TestKellyHardCap:
+    def test_cap_applied_at_math_layer(self):
+        """Kelly fraction is hard-capped at max_fraction (defense-in-depth)."""
+        # 95% prob at 2.0 odds → raw Kelly = 0.9, * frac=1.0 = 0.9
+        # Must be capped at 0.05 (default max_fraction)
+        kf = kelly_fraction(0.95, 2.0, frac=1.0, tax_rate=0.0)
+        assert kf <= 0.05
+
+    def test_uncapped_returns_true_value(self):
+        """kelly_fraction_uncapped returns the true value for ranking."""
+        kf_uncapped = kelly_fraction_uncapped(0.95, 2.0, frac=1.0, tax_rate=0.0)
+        kf_capped = kelly_fraction(0.95, 2.0, frac=1.0, tax_rate=0.0)
+        assert kf_uncapped > kf_capped
+        assert kf_uncapped > 0.5  # Should be around 0.9
+
+    def test_custom_max_fraction(self):
+        kf = kelly_fraction(0.95, 2.0, frac=1.0, tax_rate=0.0, max_fraction=0.10)
+        assert kf <= 0.10
+
+    def test_small_edge_not_affected(self):
+        """Cap should not affect normal small-edge bets."""
+        kf = kelly_fraction(0.55, 2.0, frac=0.2, tax_rate=0.0)
+        # raw = 0.1, * 0.2 = 0.02 → well under 0.05 cap
+        assert kf == pytest.approx(0.02)
+        assert kf < 0.05
+
+
+# ---------------------------------------------------------------------------
+# Vig removal
+# ---------------------------------------------------------------------------
+
+class TestVigRemoval:
+    def test_removes_vig_correctly(self):
+        # Pinnacle h2h: 1.91, 2.00 → IPs: 0.5236, 0.5000 → total=1.0236
+        prices = {"Home": 1.91, "Away": 2.00}
+        fair = _remove_vig(prices)
+        assert abs(fair["Home"] + fair["Away"] - 1.0) < 0.001
+        assert fair["Home"] > fair["Away"]
+
+    def test_empty_prices(self):
+        assert _remove_vig({}) == {}
+
+    def test_bias_score_uses_fair_probs(self):
+        """Bias should be near-zero when both books have same fair odds
+        but different margins."""
+        # Same fair odds, different vig
+        sharp = {"Home": 1.91, "Away": 1.91}  # ~4.7% vig
+        retail = {"Home": 1.80, "Away": 1.80}  # ~11% vig
+        bias = public_bias_score(sharp, retail)
+        # Fair probs should be identical (0.5 each) → bias ~0
+        assert abs(bias["Home"]) < 0.01

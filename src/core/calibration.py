@@ -28,10 +28,13 @@ CALIBRATION_DATA_FILE = ARTIFACTS_DIR / "calibration_data.json"
 CALIBRATION_REPORT_JSON = ARTIFACTS_DIR / "calibration_report.json"
 CALIBRATION_REPORT_MD = Path("CALIBRATION_REPORT.md")
 
-# Minimum samples required before trusting a per-sport/market calibrator
-MIN_SAMPLES_SPORT_MARKET = 30
+# Minimum samples required before trusting a per-sport/market ISOTONIC
+# calibrator.  Isotonic regression fits a step function — with < 300 samples
+# it overfits to noise.  Below this threshold, Platt scaling (logistic) is
+# used instead as it has only 2 parameters and generalizes better on small N.
+MIN_SAMPLES_SPORT_MARKET = 300
 # Minimum samples for the global fallback calibrator
-MIN_SAMPLES_GLOBAL = 50
+MIN_SAMPLES_GLOBAL = 100
 
 
 class CalibrationBin:
@@ -278,23 +281,45 @@ class CalibrationManager:
         report: Dict[str, Any] = {"sport_market_reports": {}, "global": {}}
 
         # Fit per sport/market
+        # - >= MIN_SAMPLES_SPORT_MARKET (300): use configured method (isotonic/platt)
+        # - 30-299 samples: force Platt scaling (2 params, safe on small N)
+        # - < 30 samples: insufficient, use global fallback
+        _PLATT_FALLBACK_MIN = 30
         for key, (probs, actuals) in groups.items():
-            if len(probs) >= MIN_SAMPLES_SPORT_MARKET:
+            n = len(probs)
+            if n >= MIN_SAMPLES_SPORT_MARKET:
                 cal = Calibrator(method=self.method)
                 cal.fit(np.array(probs), np.array(actuals))
                 self._calibrators[key] = cal
 
                 metrics = _compute_calibration_metrics(np.array(probs), np.array(actuals))
                 report["sport_market_reports"][key] = {
-                    "n_samples": len(probs),
+                    "n_samples": n,
                     "method": self.method,
                     **metrics,
                 }
+            elif n >= _PLATT_FALLBACK_MIN:
+                # Too few for isotonic, but Platt scaling (logistic, 2 params) is safe
+                cal = Calibrator(method="platt")
+                cal.fit(np.array(probs), np.array(actuals))
+                self._calibrators[key] = cal
+
+                metrics = _compute_calibration_metrics(np.array(probs), np.array(actuals))
+                report["sport_market_reports"][key] = {
+                    "n_samples": n,
+                    "method": "platt_fallback",
+                    "note": f"< {MIN_SAMPLES_SPORT_MARKET} samples, forced Platt scaling",
+                    **metrics,
+                }
+                log.info(
+                    "Calibration %s: %d samples < %d, using Platt fallback",
+                    key, n, MIN_SAMPLES_SPORT_MARKET,
+                )
             else:
                 report["sport_market_reports"][key] = {
-                    "n_samples": len(probs),
+                    "n_samples": n,
                     "status": "insufficient_samples",
-                    "min_required": MIN_SAMPLES_SPORT_MARKET,
+                    "min_required": _PLATT_FALLBACK_MIN,
                 }
 
         # Fit global fallback

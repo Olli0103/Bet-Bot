@@ -51,65 +51,86 @@ class Playability(str, Enum):
 # Alert Metrics (Redis-backed counters)
 # ---------------------------------------------------------------------------
 
-_METRICS_KEY = "alert_metrics:v1"
+_METRICS_HASH_KEY = "alert_metrics:v2"
+_METRICS_TS_KEY = "alert_metrics:timestamps"
+
+# Field mapping for HINCRBY (atomic increments)
+_COUNTER_FIELDS = {
+    "total": "alerts_total",
+    "sent_immediate": "alerts_sent_immediate",
+    "digested": "alerts_digested",
+    "suppressed_dedup": "alerts_suppressed_dedup",
+    "suppressed_quality": "alerts_suppressed_quality",
+}
 
 
 class AlertMetrics:
-    """Lightweight Redis-backed alert metrics tracker."""
+    """Redis-backed alert metrics using atomic HINCRBY operations.
 
-    @staticmethod
-    def _get() -> Dict[str, Any]:
-        return cache.get_json(_METRICS_KEY) or {
-            "alerts_total": 0,
-            "alerts_sent_immediate": 0,
-            "alerts_digested": 0,
-            "alerts_suppressed_dedup": 0,
-            "alerts_suppressed_quality": 0,
-            "last_alert_ts": 0.0,
-            "alert_timestamps": [],
-            "outcomes": {"CRITICAL": {"sent": 0}, "HIGH": {"sent": 0},
-                         "MEDIUM": {"sent": 0}, "LOW": {"sent": 0}},
-        }
-
-    @staticmethod
-    def _save(data: Dict[str, Any]) -> None:
-        cache.set_json(_METRICS_KEY, data, ttl_seconds=7 * 24 * 3600)
+    Avoids the GET-modify-SET race condition by using Redis hash fields
+    with atomic increments. Timestamps are stored in a separate sorted
+    list with LPUSH/LTRIM.
+    """
 
     @classmethod
     def record(cls, event: str, priority: str = "") -> None:
-        d = cls._get()
-        if event == "total":
-            d["alerts_total"] = d.get("alerts_total", 0) + 1
-        elif event == "sent_immediate":
-            d["alerts_sent_immediate"] = d.get("alerts_sent_immediate", 0) + 1
-            d["last_alert_ts"] = time.time()
-            ts_list = d.get("alert_timestamps", [])
-            ts_list.append(time.time())
-            d["alert_timestamps"] = ts_list[-200:]
-        elif event == "digested":
-            d["alerts_digested"] = d.get("alerts_digested", 0) + 1
-        elif event == "suppressed_dedup":
-            d["alerts_suppressed_dedup"] = d.get("alerts_suppressed_dedup", 0) + 1
-        elif event == "suppressed_quality":
-            d["alerts_suppressed_quality"] = d.get("alerts_suppressed_quality", 0) + 1
-        if priority and priority in d.get("outcomes", {}):
-            d["outcomes"][priority]["sent"] = d["outcomes"][priority].get("sent", 0) + 1
-        cls._save(d)
+        r = cache.client
+        field = _COUNTER_FIELDS.get(event)
+        if field:
+            r.hincrby(_METRICS_HASH_KEY, field, 1)
+        if event == "sent_immediate":
+            r.hset(_METRICS_HASH_KEY, "last_alert_ts", str(time.time()))
+            # Append timestamp to list (capped at 200)
+            r.lpush(_METRICS_TS_KEY, str(time.time()))
+            r.ltrim(_METRICS_TS_KEY, 0, 199)
+        if priority:
+            r.hincrby(_METRICS_HASH_KEY, f"prio:{priority}:sent", 1)
+        # Set TTL on the hash (refreshed on every write)
+        r.expire(_METRICS_HASH_KEY, 7 * 24 * 3600)
+        r.expire(_METRICS_TS_KEY, 7 * 24 * 3600)
 
     @classmethod
     def get_all(cls) -> Dict[str, Any]:
-        d = cls._get()
-        ts_list = d.get("alert_timestamps", [])
+        r = cache.client
+        raw = r.hgetall(_METRICS_HASH_KEY)
+        if not raw:
+            raw = {}
+        # Decode bytes if needed
+        data: Dict[str, str] = {}
+        for k, v in raw.items():
+            key = k.decode() if isinstance(k, bytes) else k
+            val = v.decode() if isinstance(v, bytes) else v
+            data[key] = val
+
+        result = {
+            "alerts_total": int(data.get("alerts_total", 0)),
+            "alerts_sent_immediate": int(data.get("alerts_sent_immediate", 0)),
+            "alerts_digested": int(data.get("alerts_digested", 0)),
+            "alerts_suppressed_dedup": int(data.get("alerts_suppressed_dedup", 0)),
+            "alerts_suppressed_quality": int(data.get("alerts_suppressed_quality", 0)),
+            "last_alert_ts": float(data.get("last_alert_ts", 0)),
+            "outcomes": {
+                prio: {"sent": int(data.get(f"prio:{prio}:sent", 0))}
+                for prio in ("CRITICAL", "HIGH", "MEDIUM", "LOW")
+            },
+        }
+
+        # Compute avg time between alerts from timestamp list
+        ts_raw = r.lrange(_METRICS_TS_KEY, 0, 199) or []
+        ts_list = sorted(float(t.decode() if isinstance(t, bytes) else t) for t in ts_raw)
         if len(ts_list) >= 2:
             deltas = [ts_list[i] - ts_list[i - 1] for i in range(1, len(ts_list))]
-            d["avg_time_between_alerts"] = round(sum(deltas) / len(deltas), 1)
+            result["avg_time_between_alerts"] = round(sum(deltas) / len(deltas), 1)
         else:
-            d["avg_time_between_alerts"] = 0.0
-        return d
+            result["avg_time_between_alerts"] = 0.0
+
+        return result
 
     @classmethod
     def reset(cls) -> None:
-        cache.delete(_METRICS_KEY)
+        r = cache.client
+        r.delete(_METRICS_HASH_KEY)
+        r.delete(_METRICS_TS_KEY)
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +415,11 @@ def is_duplicate_alert(
 ) -> bool:
     """Check if a near-identical alert was sent recently.
 
+    Uses two checks to prevent spam while catching creeping movements:
+    1. Delta vs LAST alert: suppress if change < 2% since last push
+    2. Delta vs BASELINE (first alert): allow if total movement since
+       first alert exceeds 5%, even if each step is small (creeping line)
+
     Returns True if alert should be suppressed.
     """
     key = _dedup_key(event_id, market, selection)
@@ -401,14 +427,25 @@ def is_duplicate_alert(
     if prev is None:
         return False
 
-    # Time-based debounce
     prev_ts = float(prev.get("ts", 0))
-    if time.time() - prev_ts < _DEBOUNCE_WINDOW_SECONDS:
-        # Also check if the movement delta is significant enough
-        prev_move = float(prev.get("movement_pct", 0))
-        delta = abs(movement_pct - prev_move)
-        if delta < _DELTA_THRESHOLD:
-            return True  # suppress: same alert, tiny delta
+    if time.time() - prev_ts >= _DEBOUNCE_WINDOW_SECONDS:
+        return False  # window expired, allow
+
+    # Check delta vs last sent value
+    prev_move = float(prev.get("movement_pct", 0))
+    delta_vs_last = abs(movement_pct - prev_move)
+
+    # Check delta vs baseline (first alert in this window)
+    baseline_move = float(prev.get("baseline_movement_pct", prev_move))
+    delta_vs_baseline = abs(movement_pct - baseline_move)
+
+    # Allow if total creeping movement exceeds 5% even though each step is small
+    _CREEP_THRESHOLD = 5.0
+    if delta_vs_baseline >= _CREEP_THRESHOLD:
+        return False  # significant aggregate movement, send alert
+
+    if delta_vs_last < _DELTA_THRESHOLD:
+        return True  # suppress: same alert, tiny delta
 
     return False
 
@@ -419,11 +456,25 @@ def mark_alert_sent(
     selection: str,
     movement_pct: float = 0.0,
 ) -> None:
-    """Record that an alert was sent for dedup tracking."""
+    """Record that an alert was sent for dedup tracking.
+
+    Preserves the baseline_movement_pct from the first alert in the
+    window so that creeping line movements can be detected.
+    """
     key = _dedup_key(event_id, market, selection)
+    prev = cache.get_json(key)
+
+    # Preserve baseline from first alert in window
+    baseline = movement_pct
+    if prev is not None:
+        prev_ts = float(prev.get("ts", 0))
+        if time.time() - prev_ts < _DEBOUNCE_WINDOW_SECONDS:
+            baseline = float(prev.get("baseline_movement_pct", movement_pct))
+
     cache.set_json(key, {
         "ts": time.time(),
         "movement_pct": movement_pct,
+        "baseline_movement_pct": baseline,
     }, ttl_seconds=_DEBOUNCE_WINDOW_SECONDS * 2)
 
 

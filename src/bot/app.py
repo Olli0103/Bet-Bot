@@ -179,7 +179,7 @@ async def learning_status_push(context: ContextTypes.DEFAULT_TYPE):
         await _broadcast(context.bot, (
             f"🧠 Learning Check\n"
             f"Total: {h['total']} | Settled: {h['settled']} | Open: {h['open']}\n"
-            f"W/L: {h['wins']}/{h['losses']} | Hit: {h['hit_rate_pct']}% | PnL: {h['pnl']:.2f} EUR"
+            f"W/L: {h['wins']}/{h['losses']} | Yield: {h.get('yield_pct', 0):.1f}% | PnL: {h['pnl']:.2f} EUR"
         ))
     except Exception:
         pass
