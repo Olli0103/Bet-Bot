@@ -137,8 +137,11 @@ class AlertMetrics:
 # Quality Guards
 # ---------------------------------------------------------------------------
 
-# Minimum data quality requirements for an alert to be sent
-MIN_CALIBRATED_CONFIDENCE = 0.35
+# Minimum data quality requirements for an alert to be sent.
+# 0.35 was barely above the random baseline for 3-way markets (0.33),
+# causing noisy alerts on low-confidence signals.  0.45 provides a
+# meaningful margin above random while still surfacing early signals.
+MIN_CALIBRATED_CONFIDENCE = 0.45
 ODDS_GLITCH_MIN = 1.01
 ODDS_GLITCH_MAX = 100.0
 ODDS_GLITCH_MOVE_PCT = 30.0  # >30% implied prob move = likely glitch

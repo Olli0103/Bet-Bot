@@ -31,7 +31,7 @@ from typing import Dict, List, Set, Tuple
 from zoneinfo import ZoneInfo
 
 from src.bot.chat_router import chat_router
-from src.bot.message_queue import push_outbox, pop_inbox
+from src.bot.message_queue import push_outbox, pop_inbox, recover_stale_processing
 from src.core.settings import settings
 from src.data.models import Base
 from src.data.postgres import engine
@@ -195,8 +195,14 @@ def _run_jit_signal_fetch():
     if not imminent:
         return
 
-    already_fetched: Set[str] = set(cache.get_json(JIT_FETCHED_KEY) or [])
-    new_events = [(s, e) for s, e in imminent if e["event_id"] not in already_fetched]
+    # Use Redis Sets (SISMEMBER) instead of read-modify-write JSON lists.
+    # The old pattern (get_json -> modify in Python -> set_json) caused
+    # lost updates when two workers ran concurrently: the last writer
+    # overwrote the first's additions.  SADD/SISMEMBER are atomic.
+    new_events = [
+        (s, e) for s, e in imminent
+        if not cache.sismember(JIT_FETCHED_KEY, e["event_id"])
+    ]
     if not new_events:
         return
 
@@ -225,9 +231,10 @@ def _run_jit_signal_fetch():
     except Exception as exc:
         log.error("JIT signal rebuild failed: %s", exc)
 
-    # Mark events as fetched
-    already_fetched.update(e["event_id"] for _, e in new_events)
-    cache.set_json(JIT_FETCHED_KEY, sorted(already_fetched), ttl_seconds=24 * 3600)
+    # Mark events as fetched (atomic SADD — no lost updates under concurrency)
+    event_ids = [e["event_id"] for _, e in new_events]
+    if event_ids:
+        cache.sadd(JIT_FETCHED_KEY, *event_ids, ttl_seconds=24 * 3600)
 
 
 # ── JIT: CLV Closing Line Snapshot (T-1 min) ────────────────
@@ -244,8 +251,11 @@ def _run_clv_snapshot():
     if not imminent:
         return
 
-    already_logged: Set[str] = set(cache.get_json(JIT_CLV_LOGGED_KEY) or [])
-    new_events = [(s, e) for s, e in imminent if e["event_id"] not in already_logged]
+    # Use atomic SISMEMBER instead of read-modify-write JSON lists
+    new_events = [
+        (s, e) for s, e in imminent
+        if not cache.sismember(JIT_CLV_LOGGED_KEY, e["event_id"])
+    ]
     if not new_events:
         return
 
@@ -265,8 +275,10 @@ def _run_clv_snapshot():
             "text": f"📊 CLV Snapshot: {total_logged} Closing Lines geloggt"
         }, target="primary")
 
-    already_logged.update(e["event_id"] for _, e in new_events)
-    cache.set_json(JIT_CLV_LOGGED_KEY, sorted(already_logged), ttl_seconds=24 * 3600)
+    # Atomic SADD — no lost updates under concurrency
+    event_ids = [e["event_id"] for _, e in new_events]
+    if event_ids:
+        cache.sadd(JIT_CLV_LOGGED_KEY, *event_ids, ttl_seconds=24 * 3600)
 
 
 # ── Existing scheduled tasks ─────────────────────────────────
@@ -599,6 +611,10 @@ async def main_loop():
         # Source health check every 5 min (Redis-only, no API calls)
         if sched.should_run("source_health_check", 300):
             _run_source_health_check()
+
+        # Recover messages stuck in processing queues (every 5 min)
+        if sched.should_run("recover_stale_processing", 300):
+            recover_stale_processing()
 
         # Health heartbeat
         if sched.should_run("heartbeat", 300):

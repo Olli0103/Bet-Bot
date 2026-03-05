@@ -67,6 +67,31 @@ class RedisCache:
         except redis.RedisError:
             pass
 
+    # --- Set helpers (atomic add/membership/read for event tracking) -------
+
+    def sadd(self, key: str, *members: str, ttl_seconds: int = 0) -> int:
+        """Atomically add members to a Redis set.  Returns count of new members."""
+        try:
+            added = self.client.sadd(key, *members) if members else 0
+            if ttl_seconds > 0 and added:
+                self.client.expire(key, ttl_seconds)
+            return added
+        except redis.RedisError as exc:
+            log.debug("redis sadd(%s) failed: %s", key, exc)
+            return 0
+
+    def sismember(self, key: str, member: str) -> bool:
+        try:
+            return bool(self.client.sismember(key, member))
+        except redis.RedisError:
+            return False
+
+    def smembers(self, key: str) -> set:
+        try:
+            return self.client.smembers(key)
+        except redis.RedisError:
+            return set()
+
 
 # Singleton instance used across the application
 cache = RedisCache()
