@@ -1,5 +1,97 @@
 # Changelog
 
+## [2026-03-05] CVaR Portfolio Sizing, Async Fetch, DSS Deep Link Button, Codebase Review
+
+### Status: IMPLEMENTED
+
+### A) CVaR-Constrained Portfolio Sizing
+
+**Problem:** When multiple bets fire simultaneously (e.g. 5 Bundesliga 15:30 KO),
+independent Kelly sizing ignores correlation and over-exposes the bankroll. The
+existing `portfolio_sizing.py` had mean-variance optimization and Ledoit-Wolf
+shrinkage but **no tail-risk control** — it penalized variance (symmetric) rather
+than left-tail losses (asymmetric, which is what actually matters in betting).
+
+**Fix: Monte Carlo CVaR constraint**
+- `_simulate_portfolio_returns()`: Gaussian copula draws correlated Bernoulli outcomes
+- `compute_cvar()`: Expected shortfall in worst α% of scenarios
+- `cvar_constrained_kelly_sizing()`: Runs standard Kelly, checks CVaR via MC,
+  binary-searches for largest scale factor satisfying the constraint
+- Defaults: α=5%, max_cvar_loss=8%, 5000 scenarios
+- `BettingEngine.size_portfolio()`: New method wires CVaR into the engine
+- `live_feed.py`: Calls `engine.size_portfolio(signals)` before ranking
+
+**Tests:** 10 new tests in `TestComputeCVaR` and `TestCVaRConstrainedKelly`.
+
+### B) Async Fetch Scheduler
+
+**Problem:** `fetch_scheduler.py` used `time.sleep()` (blocking) for inter-request
+delays and retry backoff. This is fine for the synchronous pipeline but blocks the
+event loop if called from an async context.
+
+**Fix:** Added `sequential_fetch_odds_async()` — identical logic but uses
+`asyncio.sleep()` and calls the fetcher's async method when available, falling back
+to `run_in_executor()` for sync fetchers.
+
+### C) _safe_sync_run Hardening
+
+- Added `loop.shutdown_asyncgens()` before close for cleaner resource cleanup
+- Explicit `TimeoutError` with descriptive message on executor timeout
+- `future.cancel()` on timeout to prevent orphaned threads
+
+### D) DSS Keyboard: Tipico Deep Link Button
+
+**Problem:** The Tipico deep link existed in the tip card body as plain text. The
+operator had to manually copy/paste or scroll to find it.
+
+**Fix:** Promoted to a clickable `InlineKeyboardButton(url=...)` at the top of the
+DSS keyboard. Tapping opens the Tipico app directly to the event search.
+
+Keyboard layout:
+```
+Row 0: [📱 Tipico öffnen (Ziel: X.XX)]  ← url= button
+Row 1: [✅ Platziert @ X.XX] [❌ Abgelehnt]
+Row 2: [📊 Mathe zeigen] [🔍 Deep Dive]
+```
+
+### E) Codebase Review: Bug Fixes
+
+- **`app.py:214`**: Fixed call to non-existent `_has_imminent_kickoffs()` → replaced
+  with `_get_adaptive_interval() <= 60`
+- **`app.py:224`**: Fixed wrong summary dict keys (`bets_placed`/`bets_skipped` →
+  `tips_published`/`tips_rejected`)
+- **`compliance.py`**: Removed redundant plain-text deep link from `format_for_telegram()`
+
+### F) Documentation Update
+
+- **README.md**: Architecture section updated (monolith as stable default, split-worker
+  as experimental). Added Portfolio Sizing and DSS Compliance sections. Updated Project
+  Structure (tip_publisher, portfolio_sizing, fetch_scheduler, tipico_deeplink,
+  compliance model). Added CVaR env vars to Configuration Reference.
+- **CHANGELOG.md**: This entry.
+
+### Changed Files
+
+| File | Change |
+|------|--------|
+| `src/core/portfolio_sizing.py` | CVaR functions: `_simulate_portfolio_returns`, `compute_cvar`, `cvar_constrained_kelly_sizing` |
+| `src/core/betting_engine.py` | `size_portfolio()` method |
+| `src/core/live_feed.py` | Call `engine.size_portfolio()` before ranking |
+| `src/core/fetch_scheduler.py` | `sequential_fetch_odds_async()` |
+| `src/integrations/base_fetcher.py` | `_safe_sync_run` hardening |
+| `src/agents/orchestrator.py` | Tipico deep link as InlineKeyboardButton |
+| `src/models/compliance.py` | Removed redundant text deeplink |
+| `src/bot/app.py` | Fixed `_has_imminent_kickoffs` and summary dict keys |
+| `tests/test_portfolio_sizing.py` | 10 new CVaR tests |
+| `README.md` | Architecture, features, project structure, config reference |
+| `CHANGELOG.md` | This entry |
+
+### Tests
+
+21 total portfolio sizing tests (11 existing + 10 new). All pass.
+
+---
+
 ## [2026-03-04] Stability & UX Update: Split-Worker Revert, Alert Quality Overhaul
 
 ### Status: IMPLEMENTED

@@ -256,7 +256,6 @@ def sequential_fetch_odds(
 
 def _extract_status_code(error_str: str) -> Optional[int]:
     """Try to extract HTTP status code from an exception message."""
-    import re
     m = re.search(r'\b(4\d{2}|5\d{2})\b', error_str)
     if m:
         return int(m.group(1))
@@ -265,11 +264,166 @@ def _extract_status_code(error_str: str) -> Optional[int]:
 
 def _extract_retry_after(error_str: str) -> Optional[float]:
     """Try to extract Retry-After seconds from an error string."""
-    import re
     m = re.search(r'retry.?after[:\s]+(\d+)', error_str, re.IGNORECASE)
     if m:
         return float(m.group(1))
     return None
+
+
+# ---------------------------------------------------------------------------
+# Async variant — non-blocking sleeps for use inside an asyncio event loop
+# ---------------------------------------------------------------------------
+
+async def sequential_fetch_odds_async(
+    sport_keys: List[str],
+    odds_fetcher: Optional[OddsFetcher] = None,
+    regions: str = "eu",
+    markets: str = "h2h,spreads,totals",
+    ttl_seconds: int = 120,
+    min_delay_ms: int = DEFAULT_MIN_DELAY_MS,
+    max_delay_ms: int = DEFAULT_MAX_DELAY_MS,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+) -> Tuple[List[Tuple[str, Dict[str, Any]]], FetchCycleStats]:
+    """Async version of ``sequential_fetch_odds``.
+
+    Identical logic but uses ``asyncio.sleep`` instead of ``time.sleep``
+    so the event loop is never blocked.  Calls the fetcher's async method
+    (``get_sport_odds_async``) when available, falling back to
+    ``get_sport_odds`` in a thread executor otherwise.
+    """
+    import asyncio
+
+    fetcher = odds_fetcher or OddsFetcher()
+    stats = FetchCycleStats()
+
+    match_keys, outright_keys = filter_match_keys(sport_keys)
+    stats.skipped_outright = outright_keys
+
+    raw_events: List[Tuple[str, Dict[str, Any]]] = []
+
+    if not is_available("odds_api"):
+        log.warning("fetch_scheduler_async: odds_api circuit breaker open, using cache fallback")
+        for sport in match_keys:
+            cached = cache.get_json(f"odds:{sport}:{regions}:{markets}")
+            if cached and isinstance(cached, list):
+                for e in cached:
+                    raw_events.append((sport, e))
+                stats.raw_events_by_sport[sport] = len(cached)
+                stats.total_raw_events += len(cached)
+        return raw_events, stats
+
+    # Determine whether fetcher supports async natively
+    has_async = hasattr(fetcher, "get_sport_odds_async") and callable(
+        getattr(fetcher, "get_sport_odds_async"),
+    )
+
+    async def _fetch_sport(sport: str) -> Optional[list]:
+        """Fetch odds for a single sport, async-first with sync fallback."""
+        if has_async:
+            return await fetcher.get_sport_odds_async(
+                sport_key=sport, regions=regions,
+                markets=markets, ttl_seconds=ttl_seconds,
+            )
+        # Sync fallback via thread executor
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, lambda: fetcher.get_sport_odds(
+                sport_key=sport, regions=regions,
+                markets=markets, ttl_seconds=ttl_seconds,
+            ),
+        )
+
+    for i, sport in enumerate(match_keys):
+        if _is_key_cooled_down(sport):
+            stats.skipped_cooldown.append(sport)
+            cached = cache.get_json(f"odds:{sport}:{regions}:{markets}")
+            if cached and isinstance(cached, list):
+                for e in cached:
+                    raw_events.append((sport, e))
+                stats.raw_events_by_sport[sport] = len(cached)
+                stats.total_raw_events += len(cached)
+            continue
+
+        # Non-blocking inter-request delay
+        if i > 0:
+            delay = random.randint(min_delay_ms, max_delay_ms) / 1000.0
+            await asyncio.sleep(delay)
+
+        success = False
+        for attempt in range(max_retries):
+            try:
+                events = await _fetch_sport(sport)
+                stats.record_status(200)
+                record_success("odds_api")
+
+                if isinstance(events, list):
+                    for e in events:
+                        raw_events.append((sport, e))
+                    stats.raw_events_by_sport[sport] = len(events)
+                    stats.total_raw_events += len(events)
+                    stats.fetched_keys.append(sport)
+
+                success = True
+                break
+
+            except Exception as exc:
+                exc_str = str(exc)
+                status_code = _extract_status_code(exc_str)
+                stats.record_status(status_code or 0)
+
+                if status_code == 429:
+                    retry_after = _extract_retry_after(exc_str)
+                    wait_time = retry_after if retry_after else (2 ** (attempt + 1)) + random.random()
+                    log.warning(
+                        "fetch_scheduler_async: 429 for %s, waiting %.1fs (attempt %d/%d)",
+                        sport, wait_time, attempt + 1, max_retries,
+                    )
+                    await asyncio.sleep(wait_time)
+                    record_failure("odds_api", f"429 rate limit: {sport}")
+                    continue
+
+                elif status_code == 422:
+                    log.warning("fetch_scheduler_async: 422 for %s, putting in cooldown", sport)
+                    _set_key_cooldown(sport, seconds=600)
+                    record_failure("odds_api", f"422 invalid: {sport}")
+                    stats.errors.append({"sport": sport, "error": "422", "detail": exc_str[:100]})
+                    break
+
+                elif status_code and status_code >= 500:
+                    wait_time = (2 ** attempt) + random.random()
+                    log.warning(
+                        "fetch_scheduler_async: %d for %s, retrying in %.1fs",
+                        status_code, sport, wait_time,
+                    )
+                    await asyncio.sleep(wait_time)
+                    record_failure("odds_api", f"{status_code}: {sport}")
+                    continue
+
+                else:
+                    log.warning("fetch_scheduler_async: error for %s: %s", sport, exc_str[:100])
+                    record_failure("odds_api", exc_str[:100])
+                    stats.errors.append({"sport": sport, "error": "unknown", "detail": exc_str[:100]})
+                    break
+
+        if not success:
+            cached = cache.get_json(f"odds:{sport}:{regions}:{markets}")
+            if cached and isinstance(cached, list):
+                for e in cached:
+                    raw_events.append((sport, e))
+                stats.raw_events_by_sport[sport] = len(cached)
+                stats.total_raw_events += len(cached)
+                log.info("fetch_scheduler_async: using cached data for %s (%d events)", sport, len(cached))
+
+    cache.set_json(FETCH_STATS_KEY, stats.to_dict(), ttl_seconds=3600)
+
+    log.info(
+        "fetch_scheduler_async: fetched %d keys, %d events, skipped %d outright + %d cooldown, status=%s",
+        len(stats.fetched_keys), stats.total_raw_events,
+        len(stats.skipped_outright), len(stats.skipped_cooldown),
+        stats.status_counts,
+    )
+
+    return raw_events, stats
 
 
 # ---------------------------------------------------------------------------
