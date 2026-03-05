@@ -204,22 +204,34 @@ def fetch_and_log_closing_lines(sport_key: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# True CLV T-0 Tracker
+# Pre-Kickoff Closing Line Snapshot (T-90s)
 # ---------------------------------------------------------------------------
 # The existing fetch_and_log_closing_lines runs ~1 minute before kickoff.
-# That's "almost closing", not the TRUE closing line. Pinnacle's sharpest
-# price is the very last one before the market suspends (T-0).
+# Fetching exactly at T-0 is dangerous: bookmakers (including Pinnacle)
+# often SUSPEND the pre-match market 30-60 seconds before kickoff or
+# switch to their in-play model (which carries a massive vig/margin).
+# Hitting suspended/live markets gives us empty or distorted odds that
+# poison the Brier score.
 #
-# This function fetches Pinnacle odds at the exact moment of kickoff,
-# giving us a ground-truth CLV measurement that's immune to the 60-second
-# drift in the standard JIT fetch.
+# Instead, we snapshot the closing line at T-90 seconds (1.5 minutes
+# before kickoff).  This captures the sharpest pre-match price while
+# the market is still liquid and un-suspended.
 
 T0_CLOSING_CACHE_PREFIX = "clv:t0_closing:"
 T0_CLOSING_TTL = 48 * 3600  # 48 hours — enough for post-match settlement
 
+# Optimal snapshot timing: 90 seconds before kickoff.
+# Earlier than 90s = not truly "closing" (significant drift possible).
+# Later than 90s = market may be suspended (empty/live prices).
+PRE_KICKOFF_SNAPSHOT_SECONDS = 90
+
 
 def fetch_t0_closing_line(sport_key: str, event_id: str) -> Optional[Dict[str, float]]:
-    """Fetch Pinnacle sharp odds at T-0 (exact kickoff) for a single event.
+    """Fetch Pinnacle sharp odds at T-90s (pre-kickoff snapshot).
+
+    Captures the closing line 90 seconds before kickoff — late enough to
+    be the sharpest pre-match price, early enough to avoid suspended or
+    live-market distortion.
 
     Returns ``{selection: closing_odds}`` or ``None`` on failure.
     The result is cached in Redis for 48 hours for CLV back-fill.
