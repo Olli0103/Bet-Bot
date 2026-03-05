@@ -205,7 +205,7 @@ _agent_cycle_counter = 0
 
 
 async def agent_cycle(context: ContextTypes.DEFAULT_TYPE):
-    """Run one Scout -> Analyst -> Executioner cycle via the AgentOrchestrator."""
+    """Run one Scout -> Analyst -> DSS Tip Publisher cycle via the AgentOrchestrator."""
     global _agent_cycle_counter
     _agent_cycle_counter += 1
 
