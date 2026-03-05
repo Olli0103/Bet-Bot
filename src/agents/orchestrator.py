@@ -1,8 +1,10 @@
 """Agent Orchestrator: Coordinates Scout -> Analyst -> Executioner pipeline.
 
-Replaces the fixed APScheduler approach with an event-driven, agent-based
-architecture. Uses adaptive polling: 60 seconds when events are starting
-within the next hour, 5 minutes otherwise.
+Uses an event-driven architecture with asyncio.Queue: the Scout pushes
+alerts the moment they are detected, and a dedicated worker loop consumes
+them with zero polling delay.  Falls back to a fast-poll loop (5s near
+kickoff, 60s otherwise) when the Scout isn't running a persistent
+websocket connection yet.
 """
 from __future__ import annotations
 
@@ -26,17 +28,21 @@ KICKOFF_TIMES_KEY = "orchestrator:kickoff_times"
 
 # Adaptive polling thresholds
 PRE_KICKOFF_WINDOW = timedelta(hours=1)  # start fast-polling 1h before kickoff
-FAST_INTERVAL_SECONDS = 60               # 60s during high-volatility window
-NORMAL_INTERVAL_SECONDS = 300            # 5min during normal periods
+FAST_INTERVAL_SECONDS = 5                # 5s during steam-move window (was 60s)
+NORMAL_INTERVAL_SECONDS = 60             # 60s during normal periods (was 300s)
 
 
 class AgentOrchestrator:
     """Coordinates all agents: Scout -> Analyst -> Executioner -> Learn.
 
-    The orchestrator uses adaptive polling intervals:
-    - **Fast mode** (60s): when any tracked event kicks off within the next hour.
-      Steam moves are most profitable in this window — 5 minutes is too slow.
-    - **Normal mode** (5min): no imminent kickoffs.
+    Architecture:
+    - **Alert queue** (asyncio.Queue): Scout pushes alerts, worker consumes them
+      with zero polling delay.  This eliminates the 60s latency gap that was
+      causing the bot to buy Tipico closing lines instead of pre-move prices.
+    - **Fast mode** (5s): when any tracked event kicks off within the next hour.
+      Pinnacle steam moves last 1-2s, Tipico adjusts in 10-15s — we need to
+      be inside that window.
+    - **Normal mode** (60s): no imminent kickoffs.
     """
 
     def __init__(self, bot=None, chat_id: str = "") -> None:
@@ -47,6 +53,7 @@ class AgentOrchestrator:
         self.bot = bot
         self.chat_id = chat_id or settings.telegram_chat_id
         self._running = False
+        self.alert_queue: asyncio.Queue = asyncio.Queue()
 
     async def run_once(self) -> Dict[str, Any]:
         """Run one full Scout -> Analyst -> Executioner cycle.
@@ -173,32 +180,130 @@ class AgentOrchestrator:
             return FAST_INTERVAL_SECONDS
         return NORMAL_INTERVAL_SECONDS
 
-    async def run_continuous(self, interval_minutes: int = 5) -> None:
-        """Run the orchestrator continuously with adaptive polling.
+    async def _process_single_alert(self, alert: Dict[str, Any]) -> Dict[str, Any]:
+        """Process a single alert through the Analyst -> Executioner pipeline.
 
-        Polls every 60 seconds when events are starting within the next
-        hour (steam move window), and every 5 minutes otherwise.
+        Returns an exec_result dict.
         """
-        self._running = True
-        log.info("Agent orchestrator starting (adaptive polling: %ds/%ds)",
-                 FAST_INTERVAL_SECONDS, NORMAL_INTERVAL_SECONDS)
+        event_id = alert.get("event_id", "")
+        sport = alert.get("sport", "")
+        home = alert.get("home", "")
+        away = alert.get("away", "")
+        selection = alert.get("selection", alert.get("team", ""))
 
+        if not event_id or not selection:
+            return {"action": "skip", "reasoning": ["missing event_id or selection"]}
+
+        target_odds = alert.get("current_odds", 2.0)
+        sharp_odds = alert.get("prev_odds", target_odds)
+
+        analysis = await self.analyst.analyze_event(
+            event_id=event_id,
+            sport=sport,
+            home=home,
+            away=away,
+            selection=selection,
+            target_odds=target_odds,
+            sharp_odds=sharp_odds,
+            sharp_market={selection: sharp_odds},
+            trigger=alert.get("type", "unknown"),
+            market_momentum=float(alert.get("market_momentum", 0)),
+        )
+        analysis["commence_time"] = alert.get("commence_time", "")
+
+        return await self.executioner.execute(
+            analysis=analysis,
+            bot=self.bot,
+            chat_id=self.chat_id,
+        )
+
+    async def _worker_loop(self) -> None:
+        """Asynchronously consume alerts the moment they arrive in the queue.
+
+        This is the core of the event-driven architecture: zero polling
+        delay between Scout detection and Executioner action.  Each alert
+        is processed independently so a slow analysis doesn't block
+        fast-moving steam moves.
+        """
         while self._running:
             try:
-                summary = await self.run_once()
-                if summary.get("scout_alerts", 0) > 0:
-                    log.info(
-                        "Orchestrator cycle: %d alerts, %d analyses, %d bets, %d skipped",
-                        summary["scout_alerts"],
-                        summary["analyses"],
-                        summary["bets_placed"],
-                        summary["bets_skipped"],
-                    )
+                alert = await asyncio.wait_for(self.alert_queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+
+            try:
+                exec_result = await self._process_single_alert(alert)
+                action = exec_result.get("action", "skip")
+                if action == "bet":
+                    log.info("Worker executed bet: %s %s",
+                             alert.get("sport", ""), alert.get("selection", ""))
+                elif action == "halt":
+                    log.warning("Circuit breaker tripped during worker processing")
             except Exception as exc:
-                log.error("Orchestrator cycle failed: %s", exc)
+                log.error("Worker alert processing failed: %s", exc)
+            finally:
+                self.alert_queue.task_done()
+
+    async def run_continuous(self, interval_minutes: int = 5) -> None:
+        """Run the orchestrator in event-driven mode with a fast-poll producer.
+
+        Architecture:
+        1. A dedicated worker task consumes alerts from the queue with 0ms delay.
+        2. The Scout produces alerts via a fast-poll loop (5s near kickoff, 60s
+           otherwise).  When the Scout is upgraded to websockets, it will push
+           directly to self.alert_queue and the poll loop becomes a no-op.
+        """
+        self._running = True
+        log.info(
+            "Agent orchestrator starting in EVENT-DRIVEN mode "
+            "(fast=%ds, normal=%ds, queue-based execution)",
+            FAST_INTERVAL_SECONDS, NORMAL_INTERVAL_SECONDS,
+        )
+
+        # Start the consumer worker
+        worker_task = asyncio.create_task(self._worker_loop())
+
+        # Producer: Scout polls and pushes alerts to the queue
+        while self._running:
+            try:
+                odds_alerts = await self.scout.monitor_odds()
+                injury_alerts = await self.scout.monitor_injuries()
+                all_alerts = odds_alerts + injury_alerts
+
+                # Deduplicate: keep only the strongest alert per event_id
+                deduped: Dict[str, Dict[str, Any]] = {}
+                for alert in all_alerts:
+                    eid = alert.get("event_id", "")
+                    if not eid:
+                        continue
+                    movement = float(alert.get("movement_pct", 0))
+                    existing = deduped.get(eid)
+                    if existing is None or movement > float(existing.get("movement_pct", 0)):
+                        deduped[eid] = alert
+
+                # Push to execution queue (non-blocking)
+                for alert in deduped.values():
+                    self.alert_queue.put_nowait(alert)
+
+                if deduped:
+                    log.info("Scout pushed %d alerts to execution queue", len(deduped))
+
+            except Exception as exc:
+                log.error("Scout producer loop failed: %s", exc)
 
             interval = self._get_adaptive_interval()
             await asyncio.sleep(interval)
+
+        # Drain remaining alerts before shutting down
+        if not self.alert_queue.empty():
+            log.info("Draining %d remaining alerts from queue", self.alert_queue.qsize())
+            await self.alert_queue.join()
+
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
 
     def stop(self) -> None:
         """Stop the continuous monitoring loop."""

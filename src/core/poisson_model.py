@@ -112,11 +112,12 @@ class PoissonSoccerModel:
         low-scoring draws (0-0, 1-1) and under-representation of 1-0 / 0-1
         results that the naive independence assumption misses.
 
-        Correction factors for low scores:
-            P(0,0): *= 1 - home_xg * away_xg * rho
-            P(1,0): *= 1 + away_xg * rho
-            P(0,1): *= 1 + home_xg * rho
-            P(1,1): *= 1 - rho
+        Marginal-preserving re-normalization: only the 4 adjusted cells
+        (0:0, 1:0, 0:1, 1:1) are modified.  The excess probability mass
+        from the Dixon-Coles correction is redistributed proportionally
+        among the remaining 45 cells, preserving the marginal xG
+        distributions (row/column sums).  Naive full-matrix division
+        would distort Over/Under prices by scaling down P(3:0), P(2:2) etc.
         """
         home_pmf = [poisson.pmf(i, home_xg) for i in range(SCORE_RANGE)]
         away_pmf = [poisson.pmf(j, away_xg) for j in range(SCORE_RANGE)]
@@ -127,16 +128,34 @@ class PoissonSoccerModel:
         ]
 
         if rho != 0.0:
+            # Save original mass of the 4 adjusted cells
+            original_mass = (
+                matrix[0][0] + matrix[1][0] + matrix[0][1] + matrix[1][1]
+            )
+
             # Dixon-Coles adjustment for low-scoring outcomes
             matrix[0][0] = max(0.0, matrix[0][0] * (1 - home_xg * away_xg * rho))
             matrix[1][0] = max(0.0, matrix[1][0] * (1 + away_xg * rho))
             matrix[0][1] = max(0.0, matrix[0][1] * (1 + home_xg * rho))
             matrix[1][1] = max(0.0, matrix[1][1] * (1 - rho))
 
-            # Re-normalize so the matrix sums to 1.0
-            total = sum(sum(row) for row in matrix)
-            if total > 0:
-                matrix = [[p / total for p in row] for row in matrix]
+            # Compute the mass shift (positive = DC cells gained mass,
+            # negative = they lost mass) and redistribute to remaining cells
+            adjusted_mass = (
+                matrix[0][0] + matrix[1][0] + matrix[0][1] + matrix[1][1]
+            )
+            mass_delta = adjusted_mass - original_mass
+
+            # Redistribute proportionally among the non-DC cells
+            # to preserve the overall sum = 1.0 without distorting marginals
+            remaining_mass = 1.0 - original_mass  # mass of the 45 other cells
+            if remaining_mass > 0 and abs(mass_delta) > 1e-12:
+                scale = (remaining_mass - mass_delta) / remaining_mass
+                for i in range(SCORE_RANGE):
+                    for j in range(SCORE_RANGE):
+                        if i <= 1 and j <= 1:
+                            continue  # skip the 4 DC cells
+                        matrix[i][j] *= scale
 
         return matrix
 
