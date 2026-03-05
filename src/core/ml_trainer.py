@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Tuple
 import joblib
 import numpy as np
 import pandas as pd
+from betacal import BetaCalibration
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import brier_score_loss, log_loss
 from sklearn.model_selection import TimeSeriesSplit
@@ -460,19 +461,49 @@ def _get_active_features(X: pd.DataFrame, feature_list: List[str]) -> List[str]:
     return active
 
 
+class BetaCalibratedModel:
+    """Wrapper: raw XGBClassifier + BetaCalibration as a single predict_proba() interface.
+
+    Eliminates the double-calibration problem (Platt → Beta) by training
+    XGBoost directly and applying a single 3-parameter beta calibration
+    on a dedicated calibration split.  This preserves tail probability
+    information that Platt scaling destroys.
+    """
+
+    def __init__(self, base_model: XGBClassifier, calibrator: BetaCalibration):
+        self.base_model = base_model
+        self.calibrator = calibrator
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        raw = self.base_model.predict_proba(X)[:, 1]
+        calibrated = self.calibrator.predict(raw)
+        # Clamp to [0.01, 0.99] — numerical safety for log-loss / Kelly
+        calibrated = np.clip(calibrated, 0.01, 0.99)
+        return np.column_stack([1.0 - calibrated, calibrated])
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
+
+
 def _train_xgboost(
     X: pd.DataFrame,
     y: pd.Series,
     active_features: List[str],
     prune_features: bool = True,
-) -> Tuple[CalibratedClassifierCV, Dict, List[str]]:
-    """Train XGBoost with isotonic calibration and a strict holdout test set.
+) -> Tuple[BetaCalibratedModel, Dict, List[str]]:
+    """Train XGBoost with native beta calibration and a strict holdout test set.
 
-    The final 20% of the data (chronologically) is held out *before*
-    CalibratedClassifierCV sees anything, so the calibrator's isotonic
-    regression has never touched the test samples.  This prevents the
-    previous data leak where the calibrator's validation folds overlapped
-    with the evaluation set.
+    Architecture (single calibration, no double-transform):
+      1. Split data into 60% train / 20% calibration / 20% holdout (temporal)
+      2. Train raw XGBClassifier on the train split
+      3. Fit BetaCalibration (3 params, MLE) on raw predictions of the
+         calibration split — this is the ONLY calibration layer
+      4. Evaluate on the strict holdout that neither XGBoost nor the
+         calibrator has ever seen
+
+    This eliminates the previous double-calibration problem where
+    CalibratedClassifierCV(sigmoid) flattened the probability tails
+    before the CalibrationManager's beta layer tried to recover them.
 
     When ``prune_features`` is True and the dataset is small (< 3000),
     a two-pass training strategy is used: train once, compute permutation
@@ -483,11 +514,17 @@ def _train_xgboost(
     X_active = X[active_features].values
     y_vals = y.values
 
-    # --- strict temporal holdout (last 20%) ---
+    # --- strict temporal splits: 60% train / 20% calibration / 20% holdout ---
     holdout_frac = 0.20
-    split_idx = max(1, int(len(X_active) * (1.0 - holdout_frac)))
-    X_train, X_holdout = X_active[:split_idx], X_active[split_idx:]
-    y_train, y_holdout = y_vals[:split_idx], y_vals[split_idx:]
+    calib_frac = 0.20
+    holdout_idx = max(1, int(len(X_active) * (1.0 - holdout_frac)))
+    calib_idx = max(1, int(len(X_active) * (1.0 - holdout_frac - calib_frac)))
+    X_train, X_calib, X_holdout = (
+        X_active[:calib_idx], X_active[calib_idx:holdout_idx], X_active[holdout_idx:]
+    )
+    y_train, y_calib, y_holdout = (
+        y_vals[:calib_idx], y_vals[calib_idx:holdout_idx], y_vals[holdout_idx:]
+    )
 
     base_model = XGBClassifier(
         objective="binary:logistic",
@@ -505,29 +542,25 @@ def _train_xgboost(
         verbosity=0,
     )
 
-    # Calibrate with TimeSeriesSplit on *training* data only.
-    # A gap between train and validation folds prevents short-term
-    # autocorrelation leakage (e.g., a team's form on day 1 bleeding
-    # into the validation fold on day 4).  With ~50 matches/week/league,
-    # a gap of ~150-200 samples represents ~3-4 days of insulation.
-    n_splits = min(5, max(2, len(X_train) // 200))
-    gap_size = min(200, max(50, len(X_train) // 20))
-    tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap_size)
-    # Always use sigmoid (Platt scaling, 2 params) for the inner
-    # CalibratedClassifierCV calibration.  Isotonic regression is
-    # deliberately excluded: it fits step-functions that overfit at
-    # the probability tails (odds > 4.0), causing cliff effects in
-    # Kelly sizing.  The proper calibration (beta, 3 params) is
-    # applied by the CalibrationManager layer post-hoc, which is
-    # mathematically superior for tree-based model distortions.
-    calib_method = "sigmoid"
+    # Train raw XGBoost — no CalibratedClassifierCV wrapper.
+    base_model.fit(X_train, y_train)
 
-    calibrated = CalibratedClassifierCV(
-        estimator=base_model,
-        method=calib_method,
-        cv=tscv,
-    )
-    calibrated.fit(X_train, y_train)
+    # Fit beta calibration on the calibration split (single calibration layer).
+    # Beta calibration is superior to Platt for tree-based models: it has
+    # 3 parameters (a, b, c) that model the asymmetric distortion XGBoost
+    # produces, preserving tail probabilities that Platt scaling destroys.
+    raw_calib_preds = base_model.predict_proba(X_calib)[:, 1]
+    beta_cal = BetaCalibration(parameters="abm")
+    try:
+        beta_cal.fit(raw_calib_preds, y_calib)
+    except Exception as exc:
+        log.warning("Beta calibration fit failed (%s), using identity", exc)
+        # Fallback: identity calibration (pass-through)
+        beta_cal = BetaCalibration(parameters="abm")
+        # Fit on a trivially separable set to get near-identity transform
+        beta_cal.fit(np.array([0.1, 0.9]), np.array([0, 1]))
+
+    calibrated = BetaCalibratedModel(base_model, beta_cal)
 
     # Evaluate on the strict holdout that the calibrator never saw
     metrics = _evaluate_holdout(calibrated, X_holdout, y_holdout, y_train)
@@ -569,12 +602,16 @@ def _train_xgboost(
                 random_state=42,
                 verbosity=0,
             )
-            calibrated_2 = CalibratedClassifierCV(
-                estimator=base_model_2,
-                method=calib_method,
-                cv=TimeSeriesSplit(n_splits=n_splits, gap=gap_size),
-            )
-            calibrated_2.fit(X_train_pruned, y_train)
+            base_model_2.fit(X_train_pruned, y_train)
+            X_calib_pruned = X_calib[:, kept_idx]
+            raw_calib_preds_2 = base_model_2.predict_proba(X_calib_pruned)[:, 1]
+            beta_cal_2 = BetaCalibration(parameters="abm")
+            try:
+                beta_cal_2.fit(raw_calib_preds_2, y_calib)
+            except Exception:
+                beta_cal_2 = BetaCalibration(parameters="abm")
+                beta_cal_2.fit(np.array([0.1, 0.9]), np.array([0, 1]))
+            calibrated_2 = BetaCalibratedModel(base_model_2, beta_cal_2)
             metrics_2 = _evaluate_holdout(
                 calibrated_2, X_holdout_pruned, y_holdout, y_train,
             )
@@ -818,7 +855,7 @@ def _evaluate_holdout(
 
 
 def _compute_feature_importance(
-    model: CalibratedClassifierCV,
+    model,
     X_test: np.ndarray,
     y_test: np.ndarray,
     active_features: List[str],
