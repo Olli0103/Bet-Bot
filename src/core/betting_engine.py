@@ -402,10 +402,16 @@ class BettingEngine:
         p_copula = self._compute_joint_probability_copula(combo_legs, corr_matrix)
 
         # TIPICO TAX-FREE RULE: Combos with 3+ legs are exempt from the
-        # 5% Wettsteuer.  Without this, the engine incorrectly deducts 5%
-        # from every combo's EV, systematically rejecting profitable 3-leg
-        # parlays that would actually be placed tax-free.
-        effective_tax = 0.0 if len(combo_legs) >= 3 else tax_rate
+        # 5% Wettsteuer, BUT only if every leg has odds >= 1.50 (Tipico AGB).
+        # Without the min-odds guard, the engine computes EV with 0% tax for
+        # combos containing a 1.20-odds leg, which Tipico will actually tax.
+        # This turns apparent +EV plays into massive -EV positions.
+        MIN_ODDS_FOR_TAX_FREE = 1.50
+        is_tax_free = (
+            len(combo_legs) >= 3
+            and all(leg.odds >= MIN_ODDS_FOR_TAX_FREE for leg in combo_legs)
+        )
+        effective_tax = 0.0 if is_tax_free else tax_rate
 
         # Dynamic Kelly for combos: use first leg's sport for model lookup
         combo_sport = combo_legs[0].sport if combo_legs else ""

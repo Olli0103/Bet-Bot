@@ -7,6 +7,7 @@ Replaces the naive parallel-burst fetch pattern with a controlled queue:
 - Outright/futures key filtering
 - Per-key cooldown on repeated failures (422/429)
 - Staleness-aware cache fallback during rate limiting
+- In-play terminator: live matches are excluded from sniper scheduling
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from src.core.settings import settings
 from src.core.source_health import record_failure, record_success, is_available
 from src.data.redis_cache import cache
-from src.integrations.odds_fetcher import OddsFetcher
+from src.integrations.odds_fetcher import OddsFetcher, get_trading_window_end
 
 log = logging.getLogger(__name__)
 
@@ -269,3 +270,59 @@ def _extract_retry_after(error_str: str) -> Optional[float]:
     if m:
         return float(m.group(1))
     return None
+
+
+# ---------------------------------------------------------------------------
+# In-Play Terminator: per-sport adaptive fetch interval
+# ---------------------------------------------------------------------------
+
+def get_sport_fetch_interval(sport_key: str) -> int:
+    """Return the optimal polling interval for a sport based on its kickoff times.
+
+    This is the "In-Play Terminator": once ALL matches of a sport have
+    kicked off (delta <= 0), the sport enters deep-sleep until the next
+    trading window.  This prevents the ghost-polling bug where negative
+    deltas (e.g. -600s for 10 min after kickoff) still satisfy
+    ``delta <= 900`` and trigger 10s sniper polling on live games.
+
+    Returns interval in seconds:
+        No future kickoffs today:   sleep until trading window end (min 3600s)
+        > 6h before nearest KO:     3600s
+        1-6h before nearest KO:      600s
+        15min - 1h before nearest:    60s
+        < 15min before nearest:       10s  (Sniper Zone — strictly future only)
+    """
+    kickoffs = cache.get_json(f"kickoffs:sport:{sport_key}") or []
+    if not kickoffs:
+        return 3600  # No data — idle
+
+    now = datetime.now(timezone.utc)
+    future_kickoffs = []
+
+    for ts in kickoffs:
+        try:
+            kt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            # CRITICAL: Only include matches that have NOT yet started.
+            # If delta <= 0, the match is LIVE or FINISHED — no pre-match edge.
+            if (kt - now).total_seconds() > 0:
+                future_kickoffs.append(kt)
+        except (ValueError, TypeError):
+            continue
+
+    # All matches already live or finished → deep sleep until next window
+    if not future_kickoffs:
+        window_end = get_trading_window_end()
+        sleep_seconds = (window_end - now).total_seconds()
+        return max(3600, int(sleep_seconds))
+
+    delta_seconds = (min(future_kickoffs) - now).total_seconds()
+
+    # HFT Sniper Matrix (only fires for strictly future matches)
+    if delta_seconds <= 900:        # < 15 min
+        return 10
+    elif delta_seconds <= 3600:     # < 1 hr
+        return 60
+    elif delta_seconds <= 21600:    # < 6 hrs
+        return 600
+    else:                           # > 6 hrs
+        return 3600
