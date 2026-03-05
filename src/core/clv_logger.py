@@ -201,3 +201,149 @@ def fetch_and_log_closing_lines(sport_key: str) -> int:
         pass
 
     return log_closing_lines(sport_key, events, model_predictions)
+
+
+# ---------------------------------------------------------------------------
+# True CLV T-0 Tracker
+# ---------------------------------------------------------------------------
+# The existing fetch_and_log_closing_lines runs ~1 minute before kickoff.
+# That's "almost closing", not the TRUE closing line. Pinnacle's sharpest
+# price is the very last one before the market suspends (T-0).
+#
+# This function fetches Pinnacle odds at the exact moment of kickoff,
+# giving us a ground-truth CLV measurement that's immune to the 60-second
+# drift in the standard JIT fetch.
+
+T0_CLOSING_CACHE_PREFIX = "clv:t0_closing:"
+T0_CLOSING_TTL = 48 * 3600  # 48 hours — enough for post-match settlement
+
+
+def fetch_t0_closing_line(sport_key: str, event_id: str) -> Optional[Dict[str, float]]:
+    """Fetch Pinnacle sharp odds at T-0 (exact kickoff) for a single event.
+
+    Returns ``{selection: closing_odds}`` or ``None`` on failure.
+    The result is cached in Redis for 48 hours for CLV back-fill.
+    """
+    cache_key = f"{T0_CLOSING_CACHE_PREFIX}{event_id}"
+    cached = cache.get_json(cache_key)
+    if cached:
+        return cached
+
+    odds_fetcher = OddsFetcher()
+    try:
+        events = odds_fetcher.get_sport_odds(
+            sport_key=sport_key,
+            regions="eu",
+            markets="h2h",
+            ttl_seconds=10,  # ultra-short cache — we want the absolute latest
+        )
+    except Exception:
+        log.warning("T-0 closing line fetch failed for %s/%s", sport_key, event_id)
+        return None
+
+    if not isinstance(events, list):
+        return None
+
+    for event in events:
+        if str(event.get("id", "")) != event_id:
+            continue
+
+        sharp_book, sharp_prices, vig = _pick_sharp(
+            event.get("bookmakers") or []
+        )
+        if not sharp_prices:
+            continue
+
+        # Cache the T-0 closing prices
+        cache.set_json(cache_key, sharp_prices, ttl_seconds=T0_CLOSING_TTL)
+        log.info(
+            "T-0 closing line captured: %s %s book=%s prices=%s",
+            sport_key, event_id, sharp_book, sharp_prices,
+        )
+
+        # Also persist to the database as the "true" closing line
+        try:
+            _persist_t0_closing(
+                event_id=event_id,
+                sport_key=sport_key,
+                event=event,
+                sharp_book=sharp_book,
+                sharp_prices=sharp_prices,
+                vig=vig,
+            )
+        except Exception:
+            log.error("Failed to persist T-0 closing line for %s", event_id, exc_info=True)
+
+        return sharp_prices
+
+    return None
+
+
+def _persist_t0_closing(
+    event_id: str,
+    sport_key: str,
+    event: Dict[str, Any],
+    sharp_book: str,
+    sharp_prices: Dict[str, float],
+    vig: float,
+) -> None:
+    """Write T-0 closing line to the database and back-fill PlacedBet rows."""
+    from src.core.feature_engineering import FeatureEngineer
+
+    overround = 1.0 + vig
+    home = event.get("home_team") or ""
+    away = event.get("away_team") or ""
+    commence = event.get("commence_time") or ""
+
+    commence_dt = None
+    try:
+        commence_dt = datetime.fromisoformat(str(commence).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        pass
+
+    with SessionLocal() as db:
+        try:
+            for selection, odds in sharp_prices.items():
+                raw_prob = 1.0 / odds
+                closing_prob = raw_prob / overround if overround > 0 else raw_prob
+
+                stmt = pg_insert(EventClosingLine).values(
+                    event_id=event_id,
+                    sport=sport_key,
+                    selection=selection,
+                    market="h2h",
+                    home_team=home,
+                    away_team=away,
+                    sharp_book=sharp_book,
+                    closing_odds=odds,
+                    closing_implied_prob=round(closing_prob, 6),
+                    closing_vig=round(vig, 4),
+                    commence_time=commence_dt,
+                ).on_conflict_do_update(
+                    constraint="uq_closing_event_sel_mkt",
+                    set_={
+                        "closing_odds": odds,
+                        "closing_implied_prob": round(closing_prob, 6),
+                        "closing_vig": round(vig, 4),
+                        "logged_at": datetime.now(timezone.utc),
+                    },
+                )
+                db.execute(stmt)
+
+                # Back-fill PlacedBet with true T-0 closing odds
+                db.execute(
+                    update(PlacedBet)
+                    .where(
+                        PlacedBet.event_id == event_id,
+                    )
+                    .values(
+                        sharp_closing_odds=odds,
+                        sharp_closing_prob=round(closing_prob, 6),
+                    )
+                )
+
+            db.commit()
+            log.info("T-0 closing line persisted for %s (%d selections)", event_id, len(sharp_prices))
+        except Exception:
+            db.rollback()
+            raise

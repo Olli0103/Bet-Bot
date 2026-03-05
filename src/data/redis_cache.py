@@ -92,6 +92,21 @@ class RedisCache:
         except redis.RedisError:
             return set()
 
+    # --- Atomic lock helpers (SETNX) -----------------------------------------
+
+    def setnx(self, key: str, value: str, ttl_seconds: int) -> bool:
+        """Atomically set *key* only if it does not already exist.
+
+        Uses Redis ``SET … NX EX`` (atomic set-if-not-exists with expiry).
+        Returns ``True`` if the lock was acquired, ``False`` if it already
+        existed (another worker holds it).
+        """
+        try:
+            return bool(self.client.set(key, value, nx=True, ex=ttl_seconds))
+        except redis.RedisError as exc:
+            log.debug("redis setnx(%s) failed: %s", key, exc)
+            return False
+
 
 # Singleton instance used across the application
 cache = RedisCache()

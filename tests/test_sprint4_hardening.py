@@ -1582,3 +1582,300 @@ class TestDelayedKickoffGuard:
         """Grace period constant should be 1200 seconds (20 minutes)."""
         from src.core.fetch_scheduler import DELAYED_KICKOFF_GRACE_SECONDS
         assert DELAYED_KICKOFF_GRACE_SECONDS == 1200
+
+
+# ---------------------------------------------------------------------------
+# 29. Atomic Redis SETNX Locks (Double-Spend Prevention)
+# ---------------------------------------------------------------------------
+
+
+class TestAtomicBetLocks:
+    """Verify SETNX-based locks prevent double-spend on rapid queue events."""
+
+    def test_setnx_method_exists(self):
+        """RedisCache must expose a setnx() method."""
+        from src.data.redis_cache import RedisCache
+        assert hasattr(RedisCache, "setnx"), "RedisCache must have setnx method"
+
+    def test_orchestrator_uses_bet_lock(self):
+        """_process_single_alert must acquire a SETNX lock before execution."""
+        import inspect
+        from src.agents.orchestrator import AgentOrchestrator
+        source = inspect.getsource(AgentOrchestrator._process_single_alert)
+        assert "bet_lock" in source.lower() or "setnx" in source.lower(), (
+            "_process_single_alert must use atomic SETNX lock"
+        )
+        assert "BET_LOCK_PREFIX" in source or "bet_lock:" in source, (
+            "Lock key must use BET_LOCK_PREFIX"
+        )
+
+    def test_lock_key_includes_event_and_market(self):
+        """Lock key must be per (event_id, market) to allow independent markets."""
+        from src.agents.orchestrator import BET_LOCK_PREFIX
+        # The lock key pattern should include both event_id and market
+        assert "bet_lock" in BET_LOCK_PREFIX.lower()
+
+    def test_lock_ttl_is_12_hours(self):
+        """Lock TTL should be 12 hours (one trading session)."""
+        from src.agents.orchestrator import BET_LOCK_TTL
+        assert BET_LOCK_TTL == 12 * 3600, f"Lock TTL should be 43200s, got {BET_LOCK_TTL}"
+
+    def test_setnx_returns_false_on_existing_key(self):
+        """SETNX must return False when the key already exists."""
+        from unittest.mock import MagicMock, patch
+        from src.data.redis_cache import RedisCache
+
+        rc = RedisCache.__new__(RedisCache)
+        mock_client = MagicMock()
+        rc._client = mock_client
+
+        # First call: key doesn't exist → True
+        mock_client.set.return_value = True
+        assert rc.setnx("test_key", "val", ttl_seconds=60) is True
+
+        # Second call: key exists → False (NX fails)
+        mock_client.set.return_value = False
+        assert rc.setnx("test_key", "val", ttl_seconds=60) is False
+
+    def test_double_spend_blocked_in_process_alert(self):
+        """Second alert for same event:market must be skipped."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from src.agents.orchestrator import AgentOrchestrator
+
+        orch = AgentOrchestrator.__new__(AgentOrchestrator)
+        orch.analyst = MagicMock()
+        orch.executioner = MagicMock()
+        orch.bot = None
+        orch.chat_id = ""
+
+        alert = {
+            "event_id": "evt123",
+            "sport": "soccer_epl",
+            "home": "A",
+            "away": "B",
+            "selection": "A",
+            "market": "h2h",
+        }
+
+        # Simulate lock already held
+        with patch("src.agents.orchestrator.cache") as mock_cache:
+            mock_cache.setnx.return_value = False
+            result = asyncio.get_event_loop().run_until_complete(
+                orch._process_single_alert(alert)
+            )
+        assert result["action"] == "skip"
+        assert "bet_lock" in result["reasoning"][0]
+
+
+# ---------------------------------------------------------------------------
+# 30. Spinning Wheel Guard (Tipico Re-Offer)
+# ---------------------------------------------------------------------------
+
+
+class TestSpinningWheelGuard:
+    """Verify Tipico spinning wheel / odds_changed handling."""
+
+    def test_no_prior_response_allows_bet(self):
+        """First attempt with no cached response → proceed."""
+        from unittest.mock import patch
+        from src.core.spinning_wheel_guard import check_spinning_wheel
+
+        with patch("src.core.spinning_wheel_guard.cache") as mock_cache:
+            mock_cache.get_json.return_value = None
+            ok, reason = check_spinning_wheel("evt1", "TeamA", mao=1.85)
+        assert ok is True
+
+    def test_accepted_response_allows_bet(self):
+        """Status=accepted → proceed."""
+        from unittest.mock import patch
+        from src.core.spinning_wheel_guard import check_spinning_wheel
+
+        with patch("src.core.spinning_wheel_guard.cache") as mock_cache:
+            mock_cache.get_json.return_value = {"status": "accepted", "new_odds": 0}
+            ok, reason = check_spinning_wheel("evt1", "TeamA", mao=1.85)
+        assert ok is True
+
+    def test_rejected_blocks_bet(self):
+        """Status=rejected → abort."""
+        from unittest.mock import patch
+        from src.core.spinning_wheel_guard import check_spinning_wheel
+
+        with patch("src.core.spinning_wheel_guard.cache") as mock_cache:
+            mock_cache.get_json.return_value = {"status": "rejected", "new_odds": 0}
+            ok, reason = check_spinning_wheel("evt1", "TeamA", mao=1.85)
+        assert ok is False
+        assert "rejected" in reason.lower()
+
+    def test_odds_changed_above_mao_allows(self):
+        """Re-offered odds above MAO → proceed at new price."""
+        from unittest.mock import patch
+        from src.core.spinning_wheel_guard import check_spinning_wheel
+
+        with patch("src.core.spinning_wheel_guard.cache") as mock_cache:
+            mock_cache.get_json.return_value = {
+                "status": "odds_changed",
+                "original_odds": 2.10,
+                "new_odds": 2.00,
+            }
+            ok, reason = check_spinning_wheel("evt1", "TeamA", mao=1.85)
+        assert ok is True
+
+    def test_odds_changed_below_mao_blocks(self):
+        """Re-offered odds below MAO → edge gone, abort."""
+        from unittest.mock import patch
+        from src.core.spinning_wheel_guard import check_spinning_wheel
+
+        with patch("src.core.spinning_wheel_guard.cache") as mock_cache:
+            mock_cache.get_json.return_value = {
+                "status": "odds_changed",
+                "original_odds": 2.10,
+                "new_odds": 1.75,
+            }
+            ok, reason = check_spinning_wheel("evt1", "TeamA", mao=1.85)
+        assert ok is False
+        assert "edge gone" in reason.lower()
+
+    def test_record_bet_response_caches(self):
+        """record_bet_response must write to cache."""
+        from unittest.mock import patch
+        from src.core.spinning_wheel_guard import record_bet_response
+
+        with patch("src.core.spinning_wheel_guard.cache") as mock_cache:
+            record_bet_response("evt1", "TeamA", "odds_changed", 2.10, 1.95)
+            mock_cache.set_json.assert_called_once()
+            key = mock_cache.set_json.call_args[0][0]
+            assert "evt1" in key and "TeamA" in key
+
+    def test_executioner_calls_spinning_wheel(self):
+        """Executioner must call check_spinning_wheel before placing bet."""
+        import inspect
+        from src.agents.executioner_agent import ExecutionerAgent
+        source = inspect.getsource(ExecutionerAgent.execute)
+        assert "check_spinning_wheel" in source, (
+            "Executioner must call spinning wheel guard"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 31. True CLV T-0 Closing Line Tracker
+# ---------------------------------------------------------------------------
+
+
+class TestTrueCLVTracker:
+    """Verify T-0 closing line fetch at exact kickoff."""
+
+    def test_fetch_t0_function_exists(self):
+        """clv_logger must expose fetch_t0_closing_line."""
+        from src.core.clv_logger import fetch_t0_closing_line
+        assert callable(fetch_t0_closing_line)
+
+    def test_t0_uses_short_ttl(self):
+        """T-0 fetch must use ultra-short TTL (<=10s) for fresh data."""
+        import inspect
+        from src.core.clv_logger import fetch_t0_closing_line
+        source = inspect.getsource(fetch_t0_closing_line)
+        assert "ttl_seconds=10" in source, "T-0 fetch must use ultra-short TTL"
+
+    def test_t0_caches_result_48h(self):
+        """T-0 closing line should be cached for 48 hours."""
+        from src.core.clv_logger import T0_CLOSING_TTL
+        assert T0_CLOSING_TTL == 48 * 3600
+
+    def test_t0_returns_cached_if_exists(self):
+        """If T-0 closing already cached, return it without API call."""
+        from unittest.mock import patch, MagicMock
+        from src.core.clv_logger import fetch_t0_closing_line
+
+        with patch("src.core.clv_logger.cache") as mock_cache, \
+             patch("src.core.clv_logger.OddsFetcher") as mock_fetcher:
+            mock_cache.get_json.return_value = {"TeamA": 2.05, "TeamB": 3.40}
+            result = fetch_t0_closing_line("soccer_epl", "evt123")
+            assert result == {"TeamA": 2.05, "TeamB": 3.40}
+            mock_fetcher.assert_not_called()  # No API call needed
+
+    def test_t0_returns_none_on_failure(self):
+        """API failure → return None gracefully."""
+        from unittest.mock import patch, MagicMock
+        from src.core.clv_logger import fetch_t0_closing_line
+
+        with patch("src.core.clv_logger.cache") as mock_cache, \
+             patch("src.core.clv_logger.OddsFetcher") as mock_fetcher:
+            mock_cache.get_json.return_value = None
+            mock_instance = MagicMock()
+            mock_instance.get_sport_odds.side_effect = Exception("API down")
+            mock_fetcher.return_value = mock_instance
+            result = fetch_t0_closing_line("soccer_epl", "evt123")
+            assert result is None
+
+
+# ---------------------------------------------------------------------------
+# 32. Proactive Session Refresh
+# ---------------------------------------------------------------------------
+
+
+class TestProactiveSessionRefresh:
+    """Verify bookie session is refreshed before sniper window."""
+
+    def test_session_manager_exists(self):
+        """session_manager module must be importable."""
+        from src.integrations.session_manager import ensure_session_fresh
+        assert callable(ensure_session_fresh)
+
+    def test_fresh_session_needs_no_refresh(self):
+        """Session refreshed <20 min ago → no action needed."""
+        import time
+        from unittest.mock import patch
+        from src.integrations.session_manager import ensure_session_fresh
+
+        with patch("src.integrations.session_manager.cache") as mock_cache:
+            mock_cache.get_json.return_value = {
+                "last_refresh_ts": time.time() - 300,  # 5 min ago
+                "source": "proactive",
+            }
+            ok, reason = ensure_session_fresh()
+        assert ok is True
+        assert reason == "session_fresh"
+
+    def test_stale_session_triggers_refresh(self):
+        """Session >20 min old → refresh triggered."""
+        import time
+        from unittest.mock import patch, MagicMock
+        from src.integrations.session_manager import ensure_session_fresh
+
+        refresh_fn = MagicMock()
+        with patch("src.integrations.session_manager.cache") as mock_cache:
+            mock_cache.get_json.return_value = {
+                "last_refresh_ts": time.time() - 1500,  # 25 min ago
+                "source": "proactive",
+            }
+            mock_cache.setnx.return_value = True
+            ok, reason = ensure_session_fresh(refresh_fn=refresh_fn)
+        assert ok is True
+        assert reason == "refreshed"
+        refresh_fn.assert_called_once()
+
+    def test_unknown_session_triggers_refresh(self):
+        """No session state in cache → refresh to be safe."""
+        from unittest.mock import patch, MagicMock
+        from src.integrations.session_manager import ensure_session_fresh
+
+        with patch("src.integrations.session_manager.cache") as mock_cache:
+            mock_cache.get_json.return_value = None
+            mock_cache.setnx.return_value = True
+            ok, reason = ensure_session_fresh()
+        assert ok is True
+
+    def test_max_session_age_is_20_minutes(self):
+        """MAX_SESSION_AGE_SECONDS should be 1200 (20 min)."""
+        from src.integrations.session_manager import MAX_SESSION_AGE_SECONDS
+        assert MAX_SESSION_AGE_SECONDS == 20 * 60
+
+    def test_orchestrator_calls_session_refresh_in_sniper_mode(self):
+        """Orchestrator must call ensure_session_fresh before sniper cycles."""
+        import inspect
+        from src.agents.orchestrator import AgentOrchestrator
+        source = inspect.getsource(AgentOrchestrator.run_continuous)
+        assert "ensure_session_fresh" in source, (
+            "Orchestrator must call session refresh before sniper window"
+        )

@@ -20,8 +20,14 @@ from src.core.performance_monitor import PerformanceMonitor
 from src.core.settings import settings
 from src.data.redis_cache import cache
 from src.integrations.odds_fetcher import OddsFetcher
+from src.integrations.session_manager import ensure_session_fresh
 
 log = logging.getLogger(__name__)
+
+# Atomic lock prefix — prevents double-spend when the same signal arrives
+# via multiple queue events within milliseconds of each other.
+BET_LOCK_PREFIX = "bet_lock:"
+BET_LOCK_TTL = 12 * 3600  # 12 hours — one lock per event:market per session
 
 ORCHESTRATOR_STATE_KEY = "orchestrator:state"
 KICKOFF_TIMES_KEY = "orchestrator:kickoff_times"
@@ -215,6 +221,11 @@ class AgentOrchestrator:
     async def _process_single_alert(self, alert: Dict[str, Any]) -> Dict[str, Any]:
         """Process a single alert through the Analyst -> Executioner pipeline.
 
+        Atomic SETNX lock prevents double-spend: if two queue events carry
+        the same (event_id, market) signal within milliseconds, only the
+        first one acquires the lock and executes.  The second sees the lock
+        and returns immediately with ``action=skip``.
+
         Returns an exec_result dict.
         """
         event_id = alert.get("event_id", "")
@@ -222,9 +233,18 @@ class AgentOrchestrator:
         home = alert.get("home", "")
         away = alert.get("away", "")
         selection = alert.get("selection", alert.get("team", ""))
+        market = alert.get("market", "h2h")
 
         if not event_id or not selection:
             return {"action": "skip", "reasoning": ["missing event_id or selection"]}
+
+        # --- Atomic Redis lock: one bet per (event_id, market) per session ---
+        lock_key = f"{BET_LOCK_PREFIX}{event_id}:{market}"
+        if not cache.setnx(lock_key, "locked", ttl_seconds=BET_LOCK_TTL):
+            log.info(
+                "Double-spend prevented: %s:%s already locked", event_id, market
+            )
+            return {"action": "skip", "reasoning": [f"bet_lock exists for {event_id}:{market}"]}
 
         target_odds = alert.get("current_odds", 2.0)
         sharp_odds = alert.get("prev_odds", target_odds)
@@ -298,6 +318,14 @@ class AgentOrchestrator:
 
         # Producer: Scout polls and pushes alerts to the queue
         while self._running:
+            # Proactive session refresh: if we're entering sniper mode
+            # (< 15 min to kickoff), ensure the bookie session is hot.
+            interval_preview = self._get_adaptive_interval()
+            if interval_preview <= SNIPER_INTERVAL_SECONDS:
+                ok, reason = ensure_session_fresh()
+                if not ok:
+                    log.warning("Session refresh failed before sniper window: %s", reason)
+
             try:
                 odds_alerts = await self.scout.monitor_odds()
                 injury_alerts = await self.scout.monitor_injuries()
