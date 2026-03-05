@@ -74,6 +74,30 @@ class ExecutionerAgent:
             "reasoning": [],
         }
 
+        # 0. Paper-trading gate: record but never alert or place real bets
+        is_paper = analysis.get("is_paper", False)
+        if is_paper:
+            result["action"] = "paper_bet"
+            result["reasoning"].append("Paper-trading mode: learning phase signal, no real execution")
+            log.info(
+                "Paper bet recorded: %s %s (model still in learning phase)",
+                analysis.get("sport", ""), analysis.get("selection", ""),
+            )
+            try:
+                from src.core.ghost_trading import place_virtual_bet
+                place_virtual_bet(
+                    event_id=str(analysis.get("event_id", "")),
+                    sport=str(analysis.get("sport", "")),
+                    market=str(analysis.get("market", "h2h")),
+                    selection=str(analysis.get("selection", "")),
+                    odds=float(analysis.get("bookmaker_odds", 2.0)),
+                    stake=0.0,  # No real stake
+                    features=analysis.get("features", {}),
+                )
+            except Exception as exc:
+                log.warning("Paper bet ghost placement failed: %s", exc)
+            return result
+
         # 1. Check circuit breakers
         breakers = self.monitor.check_circuit_breakers()
         if breakers.get("losing_streak"):

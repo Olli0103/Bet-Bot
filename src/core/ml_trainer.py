@@ -491,42 +491,27 @@ def _train_xgboost(
     active_features: List[str],
     prune_features: bool = True,
 ) -> Tuple[BetaCalibratedModel, Dict, List[str]]:
-    """Train XGBoost with native beta calibration and a strict holdout test set.
+    """Train XGBoost on 100% of data with OOF-beta calibration.
 
-    Architecture (single calibration, no double-transform):
-      1. Split data into 60% train / 20% calibration / 20% holdout (temporal)
-      2. Train raw XGBClassifier on the train split
-      3. Fit BetaCalibration (3 params, MLE) on raw predictions of the
-         calibration split — this is the ONLY calibration layer
-      4. Evaluate on the strict holdout that neither XGBoost nor the
-         calibrator has ever seen
+    Architecture (production-grade, single calibration, full data utilisation):
+      1. Evaluate on a strict 20% temporal holdout for metric reporting
+      2. Generate Out-of-Fold (OOF) predictions via TimeSeriesSplit over
+         the full dataset — these predictions are unbiased since each fold
+         is predicted by a model that never saw those samples
+      3. Fit BetaCalibration on OOF predictions vs true labels
+      4. Train the FINAL XGBClassifier on 100% of the data
+      5. Wrap in BetaCalibratedModel for deployment
 
-    This eliminates the previous double-calibration problem where
-    CalibratedClassifierCV(sigmoid) flattened the probability tails
-    before the CalibrationManager's beta layer tried to recover them.
-
-    When ``prune_features`` is True and the dataset is small (< 3000),
-    a two-pass training strategy is used: train once, compute permutation
-    importance, prune noisy features, retrain on the pruned set.
+    This eliminates the previous 40% data-drop where the production model
+    had never seen the most recent form/meta data, causing systematic
+    underfitting on current market conditions.
 
     Returns (model, metrics, final_active_features).
     """
     X_active = X[active_features].values
     y_vals = y.values
 
-    # --- strict temporal splits: 60% train / 20% calibration / 20% holdout ---
-    holdout_frac = 0.20
-    calib_frac = 0.20
-    holdout_idx = max(1, int(len(X_active) * (1.0 - holdout_frac)))
-    calib_idx = max(1, int(len(X_active) * (1.0 - holdout_frac - calib_frac)))
-    X_train, X_calib, X_holdout = (
-        X_active[:calib_idx], X_active[calib_idx:holdout_idx], X_active[holdout_idx:]
-    )
-    y_train, y_calib, y_holdout = (
-        y_vals[:calib_idx], y_vals[calib_idx:holdout_idx], y_vals[holdout_idx:]
-    )
-
-    base_model = XGBClassifier(
+    _XGB_PARAMS = dict(
         objective="binary:logistic",
         max_depth=5,
         learning_rate=0.05,
@@ -542,34 +527,49 @@ def _train_xgboost(
         verbosity=0,
     )
 
-    # Train raw XGBoost — no CalibratedClassifierCV wrapper.
-    base_model.fit(X_train, y_train)
+    # --- Step 1: strict temporal holdout (last 20%) for metric reporting ---
+    holdout_frac = 0.20
+    split_idx = max(1, int(len(X_active) * (1.0 - holdout_frac)))
+    X_train_val, X_holdout = X_active[:split_idx], X_active[split_idx:]
+    y_train_val, y_holdout = y_vals[:split_idx], y_vals[split_idx:]
 
-    # Fit beta calibration on the calibration split (single calibration layer).
-    # Beta calibration is superior to Platt for tree-based models: it has
-    # 3 parameters (a, b, c) that model the asymmetric distortion XGBoost
-    # produces, preserving tail probabilities that Platt scaling destroys.
-    raw_calib_preds = base_model.predict_proba(X_calib)[:, 1]
+    val_model = XGBClassifier(**_XGB_PARAMS)
+    val_model.fit(X_train_val, y_train_val)
+    val_preds = val_model.predict_proba(X_holdout)[:, 1]
+    metrics = _evaluate_holdout_raw(val_preds, X_holdout, y_holdout, y_train_val)
+
+    # --- Step 2: generate OOF predictions over the full dataset ---
+    n_splits = min(5, max(2, len(X_active) // 200))
+    gap_size = min(200, max(50, len(X_active) // 20))
+    tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap_size)
+
+    oof_preds = np.full(len(X_active), np.nan)
+    for train_index, test_index in tscv.split(X_active):
+        cv_model = XGBClassifier(**_XGB_PARAMS)
+        cv_model.fit(X_active[train_index], y_vals[train_index])
+        oof_preds[test_index] = cv_model.predict_proba(X_active[test_index])[:, 1]
+
+    # Only fit beta calibration on samples that have OOF predictions
+    oof_mask = ~np.isnan(oof_preds)
+    oof_valid = oof_preds[oof_mask]
+    y_oof_valid = y_vals[oof_mask]
+
+    # --- Step 3: fit BetaCalibration on OOF predictions ---
     beta_cal = BetaCalibration(parameters="abm")
     try:
-        beta_cal.fit(raw_calib_preds, y_calib)
+        beta_cal.fit(oof_valid, y_oof_valid)
     except Exception as exc:
         log.warning("Beta calibration fit failed (%s), using identity", exc)
-        # Fallback: identity calibration (pass-through)
         beta_cal = BetaCalibration(parameters="abm")
-        # Fit on a trivially separable set to get near-identity transform
         beta_cal.fit(np.array([0.1, 0.9]), np.array([0, 1]))
 
-    calibrated = BetaCalibratedModel(base_model, beta_cal)
-
-    # Evaluate on the strict holdout that the calibrator never saw
-    metrics = _evaluate_holdout(calibrated, X_holdout, y_holdout, y_train)
-
-    # --- Feature pruning pass ---
+    # --- Feature pruning pass (uses the validation model, not final) ---
     final_features = active_features
     if prune_features and len(X_active) > 50:
+        # Wrap val_model temporarily for importance computation
+        val_wrapped = BetaCalibratedModel(val_model, beta_cal)
         importance_map = _compute_feature_importance(
-            calibrated, X_holdout, y_holdout, active_features,
+            val_wrapped, X_holdout, y_holdout, active_features,
         )
         metrics["feature_importance"] = importance_map
 
@@ -581,42 +581,15 @@ def _train_xgboost(
                 "Feature pruning: dropping %d noisy features: %s",
                 len(pruned), ", ".join(pruned),
             )
-            # Retrain on pruned feature set
             final_features = kept
             kept_idx = [active_features.index(f) for f in kept]
-            X_train_pruned = X_train[:, kept_idx]
-            X_holdout_pruned = X_holdout[:, kept_idx]
 
-            base_model_2 = XGBClassifier(
-                objective="binary:logistic",
-                max_depth=5,
-                learning_rate=0.05,
-                n_estimators=300,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                min_child_weight=3,
-                reg_alpha=0.1,
-                reg_lambda=1.0,
-                use_label_encoder=False,
-                eval_metric="logloss",
-                random_state=42,
-                verbosity=0,
-            )
-            base_model_2.fit(X_train_pruned, y_train)
-            X_calib_pruned = X_calib[:, kept_idx]
-            raw_calib_preds_2 = base_model_2.predict_proba(X_calib_pruned)[:, 1]
-            beta_cal_2 = BetaCalibration(parameters="abm")
-            try:
-                beta_cal_2.fit(raw_calib_preds_2, y_calib)
-            except Exception:
-                beta_cal_2 = BetaCalibration(parameters="abm")
-                beta_cal_2.fit(np.array([0.1, 0.9]), np.array([0, 1]))
-            calibrated_2 = BetaCalibratedModel(base_model_2, beta_cal_2)
-            metrics_2 = _evaluate_holdout(
-                calibrated_2, X_holdout_pruned, y_holdout, y_train,
-            )
+            # Re-evaluate pruned feature set on holdout
+            val_model_2 = XGBClassifier(**_XGB_PARAMS)
+            val_model_2.fit(X_train_val[:, kept_idx], y_train_val)
+            val_preds_2 = val_model_2.predict_proba(X_holdout[:, kept_idx])[:, 1]
+            metrics_2 = _evaluate_holdout_raw(val_preds_2, X_holdout[:, kept_idx], y_holdout, y_train_val)
 
-            # Only use pruned model if it's at least as good
             brier_1 = metrics.get("brier_score", 1.0)
             brier_2 = metrics_2.get("brier_score", 1.0)
             if brier_2 <= brier_1 + 0.005:
@@ -624,10 +597,27 @@ def _train_xgboost(
                     "Pruned model accepted: brier %.4f -> %.4f (%d -> %d features)",
                     brier_1, brier_2, len(active_features), len(kept),
                 )
-                calibrated = calibrated_2
                 metrics = metrics_2
                 metrics["pruned_features"] = pruned
                 metrics["feature_importance"] = importance_map
+
+                # Regenerate OOF predictions on pruned features for beta recalibration
+                X_pruned = X_active[:, kept_idx]
+                oof_preds_pruned = np.full(len(X_pruned), np.nan)
+                for train_index, test_index in TimeSeriesSplit(
+                    n_splits=n_splits, gap=gap_size
+                ).split(X_pruned):
+                    cv_m = XGBClassifier(**_XGB_PARAMS)
+                    cv_m.fit(X_pruned[train_index], y_vals[train_index])
+                    oof_preds_pruned[test_index] = cv_m.predict_proba(X_pruned[test_index])[:, 1]
+
+                oof_mask_p = ~np.isnan(oof_preds_pruned)
+                beta_cal = BetaCalibration(parameters="abm")
+                try:
+                    beta_cal.fit(oof_preds_pruned[oof_mask_p], y_vals[oof_mask_p])
+                except Exception:
+                    beta_cal = BetaCalibration(parameters="abm")
+                    beta_cal.fit(np.array([0.1, 0.9]), np.array([0, 1]))
             else:
                 log.info(
                     "Pruned model rejected: brier %.4f -> %.4f (keeping all features)",
@@ -635,7 +625,14 @@ def _train_xgboost(
                 )
                 final_features = active_features
 
-    # Store holdout predictions/labels for Diebold-Mariano testing
+    # --- Step 4: train FINAL model on 100% of the data ---
+    X_final = X_active if final_features == active_features else X_active[:, [active_features.index(f) for f in final_features]]
+    final_base_model = XGBClassifier(**_XGB_PARAMS)
+    final_base_model.fit(X_final, y_vals)
+
+    calibrated = BetaCalibratedModel(final_base_model, beta_cal)
+
+    # Store holdout predictions for Diebold-Mariano testing (from val model, not final)
     if len(X_holdout) > 0:
         if final_features == active_features:
             holdout_preds = calibrated.predict_proba(X_holdout)[:, 1]
@@ -796,39 +793,31 @@ def _train_clv_regressor(
     return regressor, metrics, active_features
 
 
-def _evaluate_holdout(
-    model: CalibratedClassifierCV,
+def _evaluate_holdout_raw(
+    y_pred: np.ndarray,
     X_test: np.ndarray,
     y_test: np.ndarray,
     y_train: np.ndarray,
 ) -> Dict:
-    """Evaluate model on a strict holdout set with reliability diagram data.
+    """Evaluate pre-computed predictions on a strict holdout set.
 
-    Also computes a *dummy* Brier score (predicting the training-set
-    class average for every sample) so downstream validation can compare
-    the model against a meaningful baseline instead of the arbitrary 0.25
-    threshold.
+    Same as _evaluate_holdout but takes raw predictions directly, avoiding
+    the need to pass a specific model type.  Used by the OOF training
+    pipeline where the validation model is separate from the final model.
     """
     metrics: Dict = {"trained_at": datetime.now(timezone.utc).isoformat()}
     if len(X_test) == 0:
         return metrics
 
-    y_pred = model.predict_proba(X_test)[:, 1]
-
     metrics["brier_score"] = round(float(brier_score_loss(y_test, y_pred)), 6)
     metrics["log_loss"] = round(float(log_loss(y_test, y_pred)), 6)
     metrics["test_size"] = len(X_test)
 
-    # Dummy baseline: always predict the training-set win rate
     train_mean = float(y_train.mean()) if len(y_train) > 0 else 0.5
     dummy_pred = np.full(len(y_test), train_mean)
     metrics["brier_score_dummy"] = round(float(brier_score_loss(y_test, dummy_pred)), 6)
 
-    # Reliability diagram: bin predictions into buckets and compute
-    # actual vs predicted rates + adjustment factors for Kelly scaling.
-    # Using 10 uniform bins instead of 5 uneven bins to reduce cliff
-    # effects at bin boundaries in the Kelly adjustment.
-    bins = [i / 10 for i in range(11)]  # [0.0, 0.1, 0.2, ..., 1.0]
+    bins = [i / 10 for i in range(11)]
     reliability_bins: Dict[str, Dict] = {}
     for i in range(len(bins) - 1):
         mask = (y_pred >= bins[i]) & (y_pred < bins[i + 1])
@@ -852,6 +841,25 @@ def _evaluate_holdout(
 
     metrics["reliability_bins"] = reliability_bins
     return metrics
+
+
+def _evaluate_holdout(
+    model,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    y_train: np.ndarray,
+) -> Dict:
+    """Evaluate model on a strict holdout set with reliability diagram data.
+
+    Also computes a *dummy* Brier score (predicting the training-set
+    class average for every sample) so downstream validation can compare
+    the model against a meaningful baseline instead of the arbitrary 0.25
+    threshold.
+    """
+    if len(X_test) == 0:
+        return {"trained_at": datetime.now(timezone.utc).isoformat()}
+    y_pred = model.predict_proba(X_test)[:, 1]
+    return _evaluate_holdout_raw(y_pred, X_test, y_test, y_train)
 
 
 def _compute_feature_importance(
