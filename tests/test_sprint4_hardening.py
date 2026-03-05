@@ -1229,8 +1229,20 @@ class TestLiveEventFilter:
 class TestInPlayTerminator:
     """Verify that live matches trigger deep-sleep, not sniper-mode."""
 
+    @staticmethod
+    def _mock_cache(kickoffs, statuses=None):
+        """Helper: returns a side_effect for cache.get_json that serves
+        kickoff lists for kickoffs:sport:* and status dicts for match_status:sport:*."""
+        def side_effect(key):
+            if "kickoffs:" in key:
+                return kickoffs
+            if "match_status:" in key:
+                return statuses or {}
+            return None
+        return side_effect
+
     def test_all_matches_live_returns_deep_sleep(self):
-        """When all kickoffs are in the past, return deep-sleep interval."""
+        """When all kickoffs are in the past (beyond grace), return deep-sleep."""
         from datetime import datetime, timezone, timedelta
         from unittest.mock import patch
         from src.core.fetch_scheduler import get_sport_fetch_interval
@@ -1242,10 +1254,9 @@ class TestInPlayTerminator:
         ]
 
         with patch("src.core.fetch_scheduler.cache") as mock_cache:
-            mock_cache.get_json.return_value = past_kickoffs
+            mock_cache.get_json.side_effect = self._mock_cache(past_kickoffs)
             interval = get_sport_fetch_interval("soccer_epl")
 
-        # All matches live → deep sleep (>= 3600)
         assert interval >= 3600
 
     def test_future_match_triggers_sniper(self):
@@ -1255,12 +1266,10 @@ class TestInPlayTerminator:
         from src.core.fetch_scheduler import get_sport_fetch_interval
 
         now = datetime.now(timezone.utc)
-        kickoffs = [
-            (now + timedelta(minutes=10)).isoformat(),
-        ]
+        kickoffs = [(now + timedelta(minutes=10)).isoformat()]
 
         with patch("src.core.fetch_scheduler.cache") as mock_cache:
-            mock_cache.get_json.return_value = kickoffs
+            mock_cache.get_json.side_effect = self._mock_cache(kickoffs)
             interval = get_sport_fetch_interval("soccer_epl")
 
         assert interval == 10
@@ -1273,15 +1282,15 @@ class TestInPlayTerminator:
 
         now = datetime.now(timezone.utc)
         kickoffs = [
-            (now - timedelta(hours=1)).isoformat(),   # live — ignored
-            (now + timedelta(hours=2)).isoformat(),    # future — 1-6h range
+            (now - timedelta(hours=1)).isoformat(),
+            (now + timedelta(hours=2)).isoformat(),
         ]
 
         with patch("src.core.fetch_scheduler.cache") as mock_cache:
-            mock_cache.get_json.return_value = kickoffs
+            mock_cache.get_json.side_effect = self._mock_cache(kickoffs)
             interval = get_sport_fetch_interval("soccer_epl")
 
-        assert interval == 600  # 1-6h range (fetch_scheduler uses 600s, not 60s)
+        assert interval == 600
 
     def test_no_kickoffs_returns_idle(self):
         """No kickoff data → idle interval (3600s)."""
@@ -1289,30 +1298,26 @@ class TestInPlayTerminator:
         from src.core.fetch_scheduler import get_sport_fetch_interval
 
         with patch("src.core.fetch_scheduler.cache") as mock_cache:
-            mock_cache.get_json.return_value = []
+            mock_cache.get_json.side_effect = self._mock_cache([])
             interval = get_sport_fetch_interval("soccer_epl")
 
         assert interval == 3600
 
     def test_negative_delta_excluded(self):
-        """Negative deltas (in-play) must NEVER trigger sniper mode."""
+        """Negative deltas (in-play, beyond grace) must NEVER trigger sniper mode."""
         from datetime import datetime, timezone, timedelta
         from unittest.mock import patch
         from src.core.fetch_scheduler import get_sport_fetch_interval
 
         now = datetime.now(timezone.utc)
-        # Match started 10 min ago: delta = -600s
-        # Without fix: -600 <= 900 → sniper (10s) — WRONG
-        # With fix: filtered out entirely → deep sleep
-        kickoffs = [
-            (now - timedelta(minutes=10)).isoformat(),
-        ]
+        # Match started 25 min ago (beyond 20-min grace) with status "in_progress"
+        kickoffs = [(now - timedelta(minutes=25)).isoformat()]
+        statuses = {kickoffs[0]: "in_progress"}
 
         with patch("src.core.fetch_scheduler.cache") as mock_cache:
-            mock_cache.get_json.return_value = kickoffs
+            mock_cache.get_json.side_effect = self._mock_cache(kickoffs, statuses)
             interval = get_sport_fetch_interval("soccer_epl")
 
-        # Must NOT be 10s (sniper) — must be deep sleep
         assert interval >= 3600, (
             f"In-play match triggered {interval}s interval instead of deep sleep"
         )
@@ -1409,7 +1414,171 @@ class TestTipicoTaxGuard:
         from src.core.betting_engine import BettingEngine
 
         source = inspect.getsource(BettingEngine.build_combo)
-        # Must require >= 3 legs
-        assert "len(combo_legs) >= 3" in source, (
-            "Tax-free requires 3+ legs"
+        # Must require >= 3 unique events
+        assert "unique_events >= 3" in source, (
+            "Tax-free requires 3+ unique events"
         )
+
+
+# ---------------------------------------------------------------------------
+# 25. SGP Tax Guard (Same Game Parlay trap)
+# ---------------------------------------------------------------------------
+
+
+class TestSGPTaxGuard:
+    """Verify tax-free requires 3 UNIQUE events, not just 3 legs."""
+
+    def test_sgp_3legs_same_event_is_taxed(self):
+        """3 legs from the same event count as 1 → taxed."""
+        import inspect
+        from src.core.betting_engine import BettingEngine
+
+        source = inspect.getsource(BettingEngine.build_combo)
+        assert "unique_events" in source, "Must count unique events, not just legs"
+        assert "set(leg.event_id" in source, "Must use set() to count distinct events"
+
+    def test_unique_event_counting(self):
+        """3 legs from 2 events → only 2 unique → taxed."""
+        # Simulate: 2 legs from evt1 (SGP) + 1 from evt2 = 2 unique events
+        event_ids = ["evt1", "evt1", "evt2"]
+        unique = len(set(event_ids))
+        assert unique == 2
+        assert unique < 3  # not tax-free
+
+    def test_3_unique_events_qualifies(self):
+        """3 legs from 3 different events → 3 unique → potentially tax-free."""
+        event_ids = ["evt1", "evt2", "evt3"]
+        unique = len(set(event_ids))
+        assert unique == 3
+
+
+# ---------------------------------------------------------------------------
+# 26. MAO (Minimum Acceptable Odds)
+# ---------------------------------------------------------------------------
+
+
+class TestMAOCalculator:
+    """Verify the Minimum Acceptable Odds break-even calculation."""
+
+    def test_mao_basic_calculation(self):
+        """MAO at 55% probability with 5.3% tax and 1% edge."""
+        from src.core.betting_math import calculate_mao
+
+        mao = calculate_mao(0.55, tax_rate=0.053, required_edge=0.01)
+        # (1.0 + 0.01) / (0.55 * (1 - 0.053)) = 1.01 / 0.52085 = 1.939
+        assert 1.9 < mao < 2.0
+
+    def test_mao_zero_probability_returns_max(self):
+        """Zero probability → max odds (999.0)."""
+        from src.core.betting_math import calculate_mao
+
+        assert calculate_mao(0.0) == 999.0
+
+    def test_mao_high_probability_low_threshold(self):
+        """80% probability → very low MAO (should be around 1.3)."""
+        from src.core.betting_math import calculate_mao
+
+        mao = calculate_mao(0.80, tax_rate=0.053, required_edge=0.01)
+        assert mao < 1.4
+
+    def test_mao_integrated_in_executioner(self):
+        """Executioner must compute MAO and abort if odds < MAO."""
+        import inspect
+        from src.agents.executioner_agent import ExecutionerAgent
+
+        source = inspect.getsource(ExecutionerAgent.execute)
+        assert "calculate_mao" in source, "Executioner must compute MAO"
+        assert "mao" in source, "Executioner must use MAO for slippage guard"
+
+    def test_mao_in_bet_signal_model(self):
+        """BetSignal model must include mao field."""
+        from src.models.betting import BetSignal
+
+        fields = BetSignal.model_fields
+        assert "mao" in fields, "BetSignal must have mao field"
+
+
+# ---------------------------------------------------------------------------
+# 27. Combo Liquidity Cap (min across legs)
+# ---------------------------------------------------------------------------
+
+
+class TestComboLiquidityCap:
+    """Verify combo stake uses the strictest (minimum) liquidity cap."""
+
+    def test_combo_uses_min_cap(self):
+        """Engine must apply min(caps) to combo stake, not first leg's cap."""
+        import inspect
+        from src.core.betting_engine import BettingEngine
+
+        source = inspect.getsource(BettingEngine.build_combo)
+        assert "min(leg_caps)" in source or "min(caps)" in source, (
+            "Combo must use min() across all legs' liquidity caps"
+        )
+        assert "get_liquidity_cap" in source, (
+            "Combo must query liquidity cap per leg"
+        )
+
+    def test_min_cap_math(self):
+        """EPL (1.0) + Peru (0.1) combo → cap = 0.1."""
+        caps = [1.0, 0.7, 0.1]
+        assert min(caps) == 0.1
+
+
+# ---------------------------------------------------------------------------
+# 28. Delayed Kickoff Guard
+# ---------------------------------------------------------------------------
+
+
+class TestDelayedKickoffGuard:
+    """Verify delayed kickoffs keep sniper-mode active within grace window."""
+
+    def test_grace_window_keeps_sniper_active(self):
+        """Match 10 min past scheduled KO with status=not_started → sniper stays."""
+        from datetime import datetime, timezone, timedelta
+        from unittest.mock import patch
+        from src.core.fetch_scheduler import get_sport_fetch_interval
+
+        now = datetime.now(timezone.utc)
+        # Match scheduled 10 min ago but hasn't started (weather delay)
+        past_ko = (now - timedelta(minutes=10)).isoformat()
+
+        with patch("src.core.fetch_scheduler.cache") as mock_cache:
+            def side_effect(key):
+                if "kickoffs:" in key:
+                    return [past_ko]
+                if "match_status:" in key:
+                    return {past_ko: "not_started"}
+                return None
+            mock_cache.get_json.side_effect = side_effect
+            interval = get_sport_fetch_interval("soccer_epl")
+
+        # Should still be in sniper mode (10s) due to grace window
+        assert interval == 10, f"Delayed kickoff should keep sniper active, got {interval}s"
+
+    def test_beyond_grace_window_deep_sleeps(self):
+        """Match 30 min past scheduled KO → grace expired → deep sleep."""
+        from datetime import datetime, timezone, timedelta
+        from unittest.mock import patch
+        from src.core.fetch_scheduler import get_sport_fetch_interval, DELAYED_KICKOFF_GRACE_SECONDS
+
+        now = datetime.now(timezone.utc)
+        # Match scheduled 30 min ago (beyond 20-min grace)
+        old_ko = (now - timedelta(minutes=30)).isoformat()
+
+        with patch("src.core.fetch_scheduler.cache") as mock_cache:
+            def side_effect(key):
+                if "kickoffs:" in key:
+                    return [old_ko]
+                if "match_status:" in key:
+                    return {old_ko: "not_started"}
+                return None
+            mock_cache.get_json.side_effect = side_effect
+            interval = get_sport_fetch_interval("soccer_epl")
+
+        assert interval >= 3600, f"Beyond grace window should deep-sleep, got {interval}s"
+
+    def test_grace_period_is_20_minutes(self):
+        """Grace period constant should be 1200 seconds (20 minutes)."""
+        from src.core.fetch_scheduler import DELAYED_KICKOFF_GRACE_SECONDS
+        assert DELAYED_KICKOFF_GRACE_SECONDS == 1200

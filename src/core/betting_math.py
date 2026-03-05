@@ -94,6 +94,31 @@ def kelly_stake(bankroll: float, kelly_f: float) -> float:
     return max(0.0, bankroll * kelly_f)
 
 
+def calculate_mao(
+    probability: float,
+    tax_rate: float = 0.053,
+    required_edge: float = 0.01,
+) -> float:
+    """Calculate the Minimum Acceptable Odds (MAO) for a bet.
+
+    This is the break-even odds threshold accounting for tax and a
+    minimum required edge.  If the bookmaker's live odds at execution
+    time fall below this value, the bet must be aborted — the slippage
+    has eaten the edge.
+
+    Formula derivation:
+        EV = prob * odds * (1 - tax) - 1.0 >= required_edge
+        odds >= (1.0 + required_edge) / (prob * (1.0 - tax))
+
+    Returns the minimum decimal odds needed to maintain positive EV.
+    """
+    if probability <= 0 or (1.0 - tax_rate) <= 0:
+        return 999.0
+
+    mao = (1.0 + required_edge) / (probability * (1.0 - tax_rate))
+    return round(mao, 3)
+
+
 def combo_odds(odds: Iterable[float]) -> float:
     out = 1.0
     for o in odds:
