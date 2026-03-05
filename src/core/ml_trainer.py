@@ -338,6 +338,34 @@ def _clean_frame(df: pd.DataFrame, feature_list: List[str]) -> pd.DataFrame:
                         c, nan_rate * 100,
                     )
 
+    # --- Point-in-Time (PiT) guard for sharp_implied_prob ---
+    # sharp_implied_prob must reflect odds at signal-generation time, NOT
+    # the closing line.  If the DB has both created_at (signal time) and
+    # commence_time (kickoff), flag rows where sharp_implied_prob was
+    # potentially recorded AFTER kickoff — this indicates closing-line
+    # leakage that would give the model future information.
+    if ("sharp_implied_prob" in feature_list
+            and "created_at" in out.columns
+            and "commence_time" in out.columns):
+        pit_created = pd.to_datetime(out["created_at"], errors="coerce", utc=True)
+        pit_commence = pd.to_datetime(out["commence_time"], errors="coerce", utc=True)
+        both_valid = pit_created.notna() & pit_commence.notna()
+        if both_valid.any():
+            # Rows where the bet was placed AFTER kickoff are suspicious
+            post_kickoff = both_valid & (pit_created > pit_commence)
+            n_suspicious = int(post_kickoff.sum())
+            if n_suspicious > 0:
+                log.warning(
+                    "PiT guard: %d/%d rows have created_at > commence_time "
+                    "(sharp_implied_prob may contain closing line data). "
+                    "Nullifying sharp_implied_prob for these rows.",
+                    n_suspicious, len(out),
+                )
+                # Nullify sharp_implied_prob for post-kickoff rows so XGBoost
+                # treats them as missing (learned NaN routing), preventing
+                # the model from learning closing-line value from the future.
+                out.loc[post_kickoff, "sharp_implied_prob"] = np.nan
+
     # Derive sharp_implied_prob from odds when it has near-zero variance
     # (common for raw imported datasets that lack engineered columns).
     # Strip the vig so implied probabilities are not systematically inflated.
@@ -478,15 +506,21 @@ def _train_xgboost(
     )
 
     # Calibrate with TimeSeriesSplit on *training* data only.
-    # Isotonic regression fits a flexible step-function which requires
-    # enough data per fold to avoid overfitting to noise.  For sports
-    # betting data with high label noise, isotonic calibration needs
-    # at least ~10k samples to avoid fitting a step function to random
-    # fluctuations.  Below that threshold, Platt scaling (sigmoid) with
-    # only 2 parameters is far more stable.
+    # A gap between train and validation folds prevents short-term
+    # autocorrelation leakage (e.g., a team's form on day 1 bleeding
+    # into the validation fold on day 4).  With ~50 matches/week/league,
+    # a gap of ~150-200 samples represents ~3-4 days of insulation.
     n_splits = min(5, max(2, len(X_train) // 200))
-    tscv = TimeSeriesSplit(n_splits=n_splits)
-    calib_method = "isotonic" if len(X_train) >= 10_000 else "sigmoid"
+    gap_size = min(200, max(50, len(X_train) // 20))
+    tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap_size)
+    # Always use sigmoid (Platt scaling, 2 params) for the inner
+    # CalibratedClassifierCV calibration.  Isotonic regression is
+    # deliberately excluded: it fits step-functions that overfit at
+    # the probability tails (odds > 4.0), causing cliff effects in
+    # Kelly sizing.  The proper calibration (beta, 3 params) is
+    # applied by the CalibrationManager layer post-hoc, which is
+    # mathematically superior for tree-based model distortions.
+    calib_method = "sigmoid"
 
     calibrated = CalibratedClassifierCV(
         estimator=base_model,
@@ -538,7 +572,7 @@ def _train_xgboost(
             calibrated_2 = CalibratedClassifierCV(
                 estimator=base_model_2,
                 method=calib_method,
-                cv=TimeSeriesSplit(n_splits=n_splits),
+                cv=TimeSeriesSplit(n_splits=n_splits, gap=gap_size),
             )
             calibrated_2.fit(X_train_pruned, y_train)
             metrics_2 = _evaluate_holdout(

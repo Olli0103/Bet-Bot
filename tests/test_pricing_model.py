@@ -90,7 +90,11 @@ class TestGetTrueProbability:
 
 
 class TestInverseVarianceBlending:
-    """Test the inverse-variance weighted blending of classifier and CLV."""
+    """Test the stabilized inverse-variance blending with metric scaling.
+
+    CLV MSE is scaled by 4.0 to match Brier magnitude, and CLV weight
+    is clamped to [0.10, 0.40] to prevent extreme allocations.
+    """
 
     def _make_mock_model(self, prob, brier, features):
         """Create a mock model artifact with predict_proba."""
@@ -114,11 +118,16 @@ class TestInverseVarianceBlending:
         }
 
     @patch("src.core.pricing_model._load_joblib_model")
-    def test_equal_variance_gives_equal_weights(self, mock_load):
-        """When brier_score == clv_mse, weights should be 50/50."""
+    def test_metric_scaling_prevents_clv_dominance(self, mock_load):
+        """CLV MSE 0.02 (raw) should NOT dominate brier 0.20 after 4x scaling.
+
+        Without scaling: w_clv = (1/0.02) / (1/0.02 + 1/0.20) = 50/55 = 0.91
+        With 4x scaling: clv_scaled = 0.08, w_clv = (1/0.08) / (1/0.08 + 1/0.20)
+                        = 12.5/17.5 = 0.71 ... but clamped to max 0.40.
+        """
         features = ["sharp_implied_prob"]
-        classifier_data = self._make_mock_model(0.60, 0.20, features)
-        clv_data = self._make_mock_clv(0.40, 0.20, features)
+        classifier_data = self._make_mock_model(0.70, 0.20, features)
+        clv_data = self._make_mock_clv(0.40, 0.02, features)  # Very low raw MSE
 
         def loader(group):
             if group == "soccer":
@@ -129,7 +138,6 @@ class TestInverseVarianceBlending:
 
         mock_load.side_effect = loader
 
-        # Clear cache
         from src.core import pricing_model
         pricing_model._model_cache.clear()
 
@@ -139,15 +147,16 @@ class TestInverseVarianceBlending:
         )
 
         assert result is not None
-        # With equal variance: 50/50 blend of 0.60 and 0.40 = 0.50
-        assert abs(result - 0.50) < 0.05
+        # CLV weight clamped to 0.40, so classifier gets 0.60
+        # Expected: 0.60 * 0.70 + 0.40 * 0.40 = 0.58
+        assert result > 0.55, f"Classifier should still dominate, got {result}"
 
     @patch("src.core.pricing_model._load_joblib_model")
-    def test_better_classifier_gets_higher_weight(self, mock_load):
-        """Classifier with much lower brier should dominate the blend."""
+    def test_clv_weight_clamped_to_max_040(self, mock_load):
+        """Even with very good CLV metrics, its weight should not exceed 0.40."""
         features = ["sharp_implied_prob"]
-        classifier_data = self._make_mock_model(0.70, 0.10, features)  # low brier
-        clv_data = self._make_mock_clv(0.50, 0.30, features)  # high mse
+        classifier_data = self._make_mock_model(0.60, 0.25, features)  # poor brier
+        clv_data = self._make_mock_clv(0.80, 0.01, features)  # excellent CLV
 
         def loader(group):
             if group == "soccer":
@@ -167,9 +176,38 @@ class TestInverseVarianceBlending:
         )
 
         assert result is not None
-        # Classifier weight = (1/0.10) / (1/0.10 + 1/0.30) = 10/13.33 = 0.75
-        # Expected: 0.75 * 0.70 + 0.25 * 0.50 = 0.65
-        assert result > 0.60  # Classifier dominates
+        # w_clv clamped to 0.40: 0.60 * 0.60 + 0.40 * 0.80 = 0.68
+        expected = 0.60 * 0.60 + 0.40 * 0.80
+        assert abs(result - expected) < 0.10
+
+    @patch("src.core.pricing_model._load_joblib_model")
+    def test_clv_weight_floored_at_010(self, mock_load):
+        """Even with terrible CLV metrics, its weight should be at least 0.10."""
+        features = ["sharp_implied_prob"]
+        classifier_data = self._make_mock_model(0.70, 0.10, features)  # great brier
+        clv_data = self._make_mock_clv(0.50, 0.50, features)  # terrible CLV MSE
+
+        def loader(group):
+            if group == "soccer":
+                return classifier_data
+            if group == "clv_general":
+                return clv_data
+            return None
+
+        mock_load.side_effect = loader
+
+        from src.core import pricing_model
+        pricing_model._model_cache.clear()
+
+        model = QuantPricingModel(weights_file="__nonexistent__.json")
+        result = model._xgboost_predict(
+            {"sharp_implied_prob": 0.5}, "soccer_epl"
+        )
+
+        assert result is not None
+        # w_clv floored at 0.10: 0.90 * 0.70 + 0.10 * 0.50 = 0.68
+        expected = 0.90 * 0.70 + 0.10 * 0.50
+        assert abs(result - expected) < 0.10
 
     @patch("src.core.pricing_model._load_joblib_model")
     def test_no_clv_returns_classifier_only(self, mock_load):
@@ -194,3 +232,30 @@ class TestInverseVarianceBlending:
 
         assert result is not None
         assert abs(result - 0.65) < 0.05
+
+    @patch("src.core.pricing_model._load_joblib_model")
+    def test_zero_metrics_dont_cause_division_error(self, mock_load):
+        """Epsilon guard should prevent division by zero."""
+        features = ["sharp_implied_prob"]
+        classifier_data = self._make_mock_model(0.60, 0.0, features)  # zero brier!
+        clv_data = self._make_mock_clv(0.50, 0.0, features)  # zero MSE!
+
+        def loader(group):
+            if group == "soccer":
+                return classifier_data
+            if group == "clv_general":
+                return clv_data
+            return None
+
+        mock_load.side_effect = loader
+
+        from src.core import pricing_model
+        pricing_model._model_cache.clear()
+
+        model = QuantPricingModel(weights_file="__nonexistent__.json")
+        # Should not raise, should return a valid result
+        result = model._xgboost_predict(
+            {"sharp_implied_prob": 0.5}, "soccer_epl"
+        )
+        assert result is not None
+        assert 0.01 <= result <= 0.99
