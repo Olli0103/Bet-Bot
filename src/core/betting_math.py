@@ -3,6 +3,9 @@ from __future__ import annotations
 import math
 from typing import Dict, Iterable, Optional
 
+import numpy as np
+from scipy.optimize import root_scalar
+
 
 def implied_probability(decimal_odds: float) -> float:
     return 1.0 / decimal_odds
@@ -133,22 +136,63 @@ def combo_probability(probs: Iterable[float]) -> float:
     return out
 
 
-def _remove_vig(prices: Dict[str, float]) -> Dict[str, float]:
-    """Remove vig from a set of odds using the **Power Method**.
+def remove_vig_shin(prices: Dict[str, float]) -> Dict[str, float]:
+    """Remove vig using Shin's Method — SOTA for skewed markets.
 
-    The proportional method (``ip / sum(ips)``) assumes the bookmaker
-    adds margin uniformly across all outcomes.  In practice, bookmakers
-    exploit the *favourite-longshot bias*: they load more margin onto
-    longshots than favourites.  This causes proportional vig removal to
-    systematically **underestimate** the true probability of favourites
-    and **overestimate** longshots, leading to bad bets on underdogs.
+    Shin's method models the bookmaker's margin as arising from a fraction
+    *z* of insider/sharp money in the market.  It solves for *z* such that
+    the implied probabilities, adjusted for insider trading, sum to 1.0.
 
-    The Power Method solves ``sum(ip_i ^ k) = 1`` for exponent ``k``
-    via Newton's method, then computes ``fair_prob_i = ip_i ^ k``.
-    This respects the non-linear margin structure of real bookmakers.
+    This is strictly superior to the Power Method in markets with heavy
+    favourite-longshot bias (e.g. 1.10 vs 8.00), because it correctly
+    attributes more margin to the longshot side where insider information
+    has less impact.
 
-    Falls back to proportional if Newton iteration doesn't converge
-    (e.g. degenerate two-way markets with near-equal odds).
+    Falls back to the Power Method if the Brentq solver fails to converge.
+    """
+    if not prices:
+        return {}
+
+    raw_ips = {sel: 1.0 / odds for sel, odds in prices.items() if odds > 1.0}
+    if not raw_ips:
+        return {}
+
+    sum_pi = sum(raw_ips.values())
+    if abs(sum_pi - 1.0) < 1e-9:
+        return {sel: round(ip, 6) for sel, ip in raw_ips.items()}
+
+    ips = list(raw_ips.values())
+    sels = list(raw_ips.keys())
+
+    def objective(z: float) -> float:
+        total = 0.0
+        for pi in ips:
+            term = np.sqrt(z ** 2 + 4 * (1 - z) * (pi ** 2) / sum_pi)
+            p_i = (term - z) / (2 * (1 - z))
+            total += p_i
+        return total - 1.0
+
+    try:
+        sol = root_scalar(objective, bracket=[1e-6, 1.0 - 1e-6], method="brentq")
+        z = sol.root
+    except (ValueError, RuntimeError):
+        # Shin didn't converge — fall back to Power Method
+        return _remove_vig_power(prices)
+
+    fair = {}
+    for i, sel in enumerate(sels):
+        pi = ips[i]
+        term = np.sqrt(z ** 2 + 4 * (1 - z) * (pi ** 2) / sum_pi)
+        p_i = (term - z) / (2 * (1 - z))
+        fair[sel] = round(p_i, 6)
+
+    return fair
+
+
+def _remove_vig_power(prices: Dict[str, float]) -> Dict[str, float]:
+    """Remove vig using the Power Method (fallback for Shin).
+
+    Solves ``sum(ip_i ^ k) = 1`` for exponent ``k`` via Newton's method.
     """
     if not prices:
         return {}
@@ -162,38 +206,36 @@ def _remove_vig(prices: Dict[str, float]) -> Dict[str, float]:
     if total_ip <= 0:
         return {}
 
-    # If market is already fair (no vig), skip the iteration
     if abs(total_ip - 1.0) < 1e-9:
         return {sel: round(ip, 6) for sel, ip in raw_ips.items()}
 
-    # Newton's method: find k such that sum(ip_i^k) = 1
-    # Starting from k=1 (proportional), iterate towards the true exponent.
     k = 1.0
     ips = list(raw_ips.values())
-    for _ in range(50):  # max iterations
+    for _ in range(50):
         s = sum(p ** k for p in ips)
         if abs(s - 1.0) < 1e-12:
             break
-        # Derivative: ds/dk = sum(ip^k * ln(ip))
         ds = sum(p ** k * math.log(p) for p in ips if p > 0)
         if abs(ds) < 1e-15:
-            break  # avoid division by zero; fall back to current k
+            break
         k -= (s - 1.0) / ds
-        # Safety clamp: k must stay positive and reasonable
         k = max(0.1, min(k, 10.0))
 
-    # Apply the exponent
     fair = {}
     sels = list(raw_ips.keys())
     for i, sel in enumerate(sels):
         fair[sel] = round(ips[i] ** k, 6)
 
-    # Normalise to exactly 1.0 (numerical safety)
     total_fair = sum(fair.values())
     if total_fair > 0 and abs(total_fair - 1.0) > 1e-6:
         fair = {sel: round(p / total_fair, 6) for sel, p in fair.items()}
 
     return fair
+
+
+def _remove_vig(prices: Dict[str, float]) -> Dict[str, float]:
+    """Remove vig — dispatches to Shin's Method (primary) or Power (fallback)."""
+    return remove_vig_shin(prices)
 
 
 def public_bias_score(

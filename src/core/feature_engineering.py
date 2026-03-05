@@ -3,6 +3,71 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 
+def calculate_smoothed_feature(
+    measured_value: float,
+    sample_size: int,
+    prior_value: float,
+    prior_weight: int = 10,
+) -> float:
+    """Apply Bayesian Smoothing to a noisy small-sample statistic.
+
+    Shrinks the measured value towards a prior (e.g. league average or
+    last season's closing rating) when the sample size is small.  This
+    prevents wild early-season miscalibrations where a team that won
+    its first 2 games gets an absurd 100% win rate.
+
+    Formula (conjugate Beta-Binomial update for rates):
+        smoothed = (measured * n + prior * prior_weight) / (n + prior_weight)
+
+    Examples:
+        - 2 wins in 2 games, prior=0.5, weight=10:
+          (1.0*2 + 0.5*10) / (2+10) = 7/12 = 58.3%  (not 100%)
+        - 20 wins in 30 games, prior=0.5, weight=10:
+          (0.667*30 + 0.5*10) / (30+10) = 25/40 = 62.5%  (close to raw 66.7%)
+
+    Parameters
+    ----------
+    measured_value : float
+        Raw statistic (e.g. win rate 0.0-1.0, attack strength, etc.).
+    sample_size : int
+        Number of observations backing the measurement.
+    prior_value : float
+        Prior expectation (e.g. league average, last season's rating).
+    prior_weight : int
+        Effective number of "phantom observations" from the prior.
+        Higher = more conservative smoothing.
+    """
+    if sample_size + prior_weight == 0:
+        return prior_value
+
+    smoothed = (measured_value * sample_size + prior_value * prior_weight) / (
+        sample_size + prior_weight
+    )
+    return round(smoothed, 4)
+
+
+# Default prior weights for different feature categories
+PRIOR_WEIGHTS = {
+    "form_winrate": 5,       # 5 phantom games at league-average win rate
+    "attack_strength": 10,   # 10 phantom games at league-average attack
+    "defense_strength": 10,
+    "over25_rate": 8,
+    "btts_rate": 8,
+    "goals_avg": 10,
+}
+
+# League-average priors (neutral baselines)
+LEAGUE_PRIORS = {
+    "form_winrate": 0.33,         # ~33% win rate (3-way market)
+    "attack_strength": 1.0,       # Neutral Poisson attack
+    "defense_strength": 1.0,      # Neutral Poisson defense
+    "over25_rate": 0.50,          # 50% of matches go over 2.5
+    "btts_rate": 0.50,            # 50% BTTS
+    "goals_scored_avg": 1.35,     # ~1.35 goals per team per game
+    "goals_conceded_avg": 1.35,
+}
+
+
 class FeatureEngineer:
     @staticmethod
     def calculate_clv_proxy(
@@ -114,6 +179,47 @@ class FeatureEngineer:
         is_home = selection == home_team
         sent_delta = (sentiment_home - sentiment_away) if is_home else (sentiment_away - sentiment_home)
         inj_delta = (injuries_away - injuries_home) if is_home else (injuries_home - injuries_away)
+
+        # --- Bayesian Smoothing: shrink small-sample features to priors ---
+        # Early-season (form_games_l5 < 5), raw stats are wildly unreliable.
+        # Smoothing prevents a team with 2/2 wins from getting 100% win rate.
+        n_games = max(0, int(form_games_l5))
+        form_winrate_l5 = calculate_smoothed_feature(
+            form_winrate_l5, n_games,
+            LEAGUE_PRIORS["form_winrate"], PRIOR_WEIGHTS["form_winrate"],
+        )
+        team_attack_strength = calculate_smoothed_feature(
+            team_attack_strength, n_games,
+            LEAGUE_PRIORS["attack_strength"], PRIOR_WEIGHTS["attack_strength"],
+        )
+        team_defense_strength = calculate_smoothed_feature(
+            team_defense_strength, n_games,
+            LEAGUE_PRIORS["defense_strength"], PRIOR_WEIGHTS["defense_strength"],
+        )
+        opp_attack_strength = calculate_smoothed_feature(
+            opp_attack_strength, n_games,
+            LEAGUE_PRIORS["attack_strength"], PRIOR_WEIGHTS["attack_strength"],
+        )
+        opp_defense_strength = calculate_smoothed_feature(
+            opp_defense_strength, n_games,
+            LEAGUE_PRIORS["defense_strength"], PRIOR_WEIGHTS["defense_strength"],
+        )
+        over25_rate = calculate_smoothed_feature(
+            over25_rate, n_games,
+            LEAGUE_PRIORS["over25_rate"], PRIOR_WEIGHTS["over25_rate"],
+        )
+        btts_rate = calculate_smoothed_feature(
+            btts_rate, n_games,
+            LEAGUE_PRIORS["btts_rate"], PRIOR_WEIGHTS["btts_rate"],
+        )
+        goals_scored_avg = calculate_smoothed_feature(
+            goals_scored_avg, n_games,
+            LEAGUE_PRIORS["goals_scored_avg"], PRIOR_WEIGHTS["goals_avg"],
+        )
+        goals_conceded_avg = calculate_smoothed_feature(
+            goals_conceded_avg, n_games,
+            LEAGUE_PRIORS["goals_conceded_avg"], PRIOR_WEIGHTS["goals_avg"],
+        )
 
         # Expected total goals proxy: team_atk * opp_def * league_avg + opp_atk * team_def * league_avg
         expected_total_proxy = (team_attack_strength * opp_defense_strength * 1.35 +
