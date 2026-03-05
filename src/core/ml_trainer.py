@@ -432,13 +432,14 @@ def _train_xgboost(
 
     # Calibrate with TimeSeriesSplit on *training* data only.
     # Isotonic regression fits a flexible step-function which requires
-    # enough data per fold to avoid overfitting to noise.  For small
-    # datasets (< 2000 training samples), Platt scaling (sigmoid) is
-    # mathematically more stable — it has only two parameters and is
-    # far less prone to memorising random fluctuations.
+    # enough data per fold to avoid overfitting to noise.  For sports
+    # betting data with high label noise, isotonic calibration needs
+    # at least ~10k samples to avoid fitting a step function to random
+    # fluctuations.  Below that threshold, Platt scaling (sigmoid) with
+    # only 2 parameters is far more stable.
     n_splits = min(5, max(2, len(X_train) // 200))
     tscv = TimeSeriesSplit(n_splits=n_splits)
-    calib_method = "isotonic" if len(X_train) >= 2000 else "sigmoid"
+    calib_method = "isotonic" if len(X_train) >= 10_000 else "sigmoid"
 
     calibrated = CalibratedClassifierCV(
         estimator=base_model,
@@ -967,12 +968,16 @@ def _champion_challenger(
             champ_age = 0
 
     if champ_age >= _STALE_MODEL_DAYS:
-        # Allow promotion if challenger is within 5% relative log loss
+        # Allow promotion if challenger is within 0.5% relative log loss.
+        # The original 5% threshold was far too loose for sports betting
+        # where a drop from 0.690 → 0.724 log loss means the model is
+        # significantly worse.  0.5% keeps models fresh during off-seasons
+        # without allowing meaningful degradation.
         relative_diff = (chall_ll - champ_ll) / max(champ_ll, 0.001)
-        if relative_diff < 0.05:
+        if relative_diff < 0.005:
             return True, (
                 f"promoted (stale override, champion {champ_age}d old): "
-                f"challenger log_loss={chall_ll:.6f} within 5% of champion={champ_ll:.6f}"
+                f"challenger log_loss={chall_ll:.6f} within 0.5% of champion={champ_ll:.6f}"
             )
 
     return False, (
