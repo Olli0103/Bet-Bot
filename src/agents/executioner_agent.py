@@ -16,6 +16,7 @@ import json
 import logging
 from typing import Any, Dict, Optional
 
+from src.core.spinning_wheel_guard import check_spinning_wheel
 from src.core.alert_manager import (
     AlertMetrics,
     AlertPriority,
@@ -212,6 +213,18 @@ class ExecutionerAgent:
             result["reasoning"].append(
                 f"Slippage guard: bookmaker_odds {bookmaker_odds:.3f} < MAO {mao:.3f} — bet aborted"
             )
+            return result
+
+        # Spinning Wheel Guard: Tipico takes 5-8s to accept a bet.
+        # If the response is "odds_changed", the re-offered odds must
+        # still exceed our MAO — otherwise the edge is gone.
+        sw_ok, sw_reason = check_spinning_wheel(
+            event_id=str(analysis.get("event_id", "")),
+            selection=selection,
+            mao=mao,
+        )
+        if not sw_ok:
+            result["reasoning"].append(sw_reason)
             return result
 
         result["action"] = "bet"
