@@ -468,28 +468,43 @@ class AgentOrchestrator:
         # Build interactive DSS inline keyboard
         try:
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-            keyboard = InlineKeyboardMarkup([
-                [
+
+            rows = []
+
+            # Row 0: Tipico deep link (url= button opens the app directly)
+            if alert.tipico_deeplink:
+                rows.append([
                     InlineKeyboardButton(
-                        f"\u2705 Platziert @ {state.current_odds:.2f}",
-                        callback_data=f"dss_placed:{tip_id}",
+                        f"\U0001f4f1 Tipico \u00f6ffnen (Ziel: {state.current_odds:.2f})",
+                        url=alert.tipico_deeplink,
                     ),
-                    InlineKeyboardButton(
-                        "\u274c Abgelehnt",
-                        callback_data=f"dss_rejected:{tip_id}",
-                    ),
-                ],
-                [
-                    InlineKeyboardButton(
-                        "\U0001f4ca Mathe zeigen",
-                        callback_data=f"dss_math:{tip_id}",
-                    ),
-                    InlineKeyboardButton(
-                        "\U0001f50d Deep Dive",
-                        callback_data=f"agent_analyze:{tip_id}",
-                    ),
-                ],
+                ])
+
+            # Row 1: Audit trail — operator confirms or rejects
+            rows.append([
+                InlineKeyboardButton(
+                    f"\u2705 Platziert @ {state.current_odds:.2f}",
+                    callback_data=f"dss_placed:{tip_id}",
+                ),
+                InlineKeyboardButton(
+                    "\u274c Abgelehnt",
+                    callback_data=f"dss_rejected:{tip_id}",
+                ),
             ])
+
+            # Row 2: XAI — math transparency and deep dive
+            rows.append([
+                InlineKeyboardButton(
+                    "\U0001f4ca Mathe zeigen",
+                    callback_data=f"dss_math:{tip_id}",
+                ),
+                InlineKeyboardButton(
+                    "\U0001f50d Deep Dive",
+                    callback_data=f"agent_analyze:{tip_id}",
+                ),
+            ])
+
+            keyboard = InlineKeyboardMarkup(rows)
             await self.bot.send_message(
                 chat_id=self.chat_id,
                 text=text,
