@@ -16,7 +16,10 @@ from typing import Any, Dict, List, Optional
 from src.agents.analyst_agent import AnalystAgent
 from src.agents.executioner_agent import ExecutionerAgent
 from src.agents.scout_agent import ScoutAgent
-from src.agents.tip_publisher import TipState, TipStatus, tip_flow
+from src.agents.tip_publisher import (
+    TipState, TipStatus, tip_flow,
+    build_dss_alert, cache_stateful_tip,
+)
 from src.core.performance_monitor import PerformanceMonitor
 from src.core.settings import settings
 from src.data.redis_cache import cache
@@ -389,31 +392,68 @@ class AgentOrchestrator:
         return 0.0
 
     async def _publish_tip(self, state: TipState) -> None:
-        """Publish a validated tip via Telegram (Tippprovider output).
+        """Publish a validated tip via Telegram with interactive DSS interface.
 
-        Instead of placing a bet, formats and sends the tip as an
-        actionable recommendation to the user's Telegram channel.
+        Instead of placing a bet, formats the tip as an actionable
+        recommendation with inline keyboards:
+          [Mark as Placed at X.XX] | [Odds Dropped] | [Show Math]
+
+        Creates a ``StatefulTip`` audit record that requires human review
+        before any bankroll update occurs (GDPR Art. 22 compliance).
         """
+        # Generate LLM reasoning for the tip card
+        reasoning_text = ""
+        try:
+            reasoning_text = await self.analyst.reason_with_llm(state.analysis) or ""
+        except Exception:
+            pass
+
+        # Build validated TipAlert and cache StatefulTip for audit
+        alert = build_dss_alert(state, reasoning=reasoning_text or "Quantitatives Signal.")
+        tip_id = cache_stateful_tip(state, alert)
+
         if not self.bot or not self.chat_id:
-            log.info("Tip ready but no Telegram bot configured: %s", state.to_dict())
+            log.info("DSS tip ready (no Telegram): tip_id=%s %s", tip_id, state.to_dict())
             return
 
-        ev_pct = state.expected_value * 100
-        revals = (f" (re-validated {state.revalidation_count}x)"
-                  if state.revalidation_count > 0 else "")
-        text = (
-            f"\U0001f4ca TIPP{revals}\n"
-            f"{state.home} vs {state.away}\n"
-            f"Selection: {state.selection}\n"
-            f"Odds: {state.current_odds:.2f}\n"
-            f"Model Prob: {state.model_probability:.1%}\n"
-            f"Tax-Adj EV: {ev_pct:+.2f}%\n"
-            f"Sport: {state.sport}"
-        )
+        # Format the rich tip card
+        text = alert.format_for_telegram()
+
+        # Build interactive DSS inline keyboard
         try:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        f"\u2705 Platziert @ {state.current_odds:.2f}",
+                        callback_data=f"dss_placed:{tip_id}",
+                    ),
+                    InlineKeyboardButton(
+                        "\u274c Abgelehnt",
+                        callback_data=f"dss_rejected:{tip_id}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "\U0001f4ca Mathe zeigen",
+                        callback_data=f"dss_math:{tip_id}",
+                    ),
+                    InlineKeyboardButton(
+                        "\U0001f50d Deep Dive",
+                        callback_data=f"agent_analyze:{tip_id}",
+                    ),
+                ],
+            ])
+            await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=text,
+                reply_markup=keyboard,
+            )
+        except ImportError:
+            # Telegram not available — send plain text
             await self.bot.send_message(chat_id=self.chat_id, text=text)
         except Exception as exc:
-            log.warning("Failed to send tip to Telegram: %s", exc)
+            log.warning("Failed to send DSS tip to Telegram: %s", exc)
 
     async def run_tip_flow(self, alert: Dict[str, Any]) -> TipState:
         """Process a single alert through the stateful tip publisher.

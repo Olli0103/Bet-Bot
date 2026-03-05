@@ -2,10 +2,18 @@
 
 Uses SQL-level aggregation (func.sum) instead of loading all rows into
 Python to avoid OOM on large bet histories.
+
+LUGAS/OASIS Compliance (GlüStV 2021 §6c):
+    German online gambling regulations impose a EUR 1,000 monthly deposit
+    limit across all bookmakers.  The ``get_lugas_remaining`` method
+    simulates this constraint within the DSS's own bankroll logic so
+    the system never recommends stakes that would violate the operator's
+    actual account limits.
 """
 from __future__ import annotations
 
-from sqlalchemy import func, select
+from datetime import datetime, timezone
+from sqlalchemy import func, select, extract
 
 from src.core.settings import settings
 from src.data.models import PlacedBet
@@ -19,6 +27,9 @@ log = logging.getLogger(__name__)
 # Redis key tracking total pending (unsettled) exposure in EUR
 PENDING_EXPOSURE_KEY = "bankroll:pending_exposure"
 PENDING_EXPOSURE_TTL = 24 * 3600  # 24 hours — resets daily
+
+# GlüStV 2021 §6c: Monthly deposit limit for regulated German bookmakers
+LUGAS_MONTHLY_DEPOSIT_LIMIT = 1000.0  # EUR
 
 
 class BankrollManager:
@@ -102,3 +113,50 @@ class BankrollManager:
         new_total = max(0.0, current - stake)
         cache.set_json(PENDING_EXPOSURE_KEY, new_total, ttl_seconds=PENDING_EXPOSURE_TTL)
         return new_total
+
+    def get_monthly_staked(self) -> float:
+        """Return total EUR staked this calendar month (LUGAS simulation).
+
+        Queries the PlacedBet table for all stakes placed in the current
+        month, regardless of outcome.  This simulates the monthly deposit
+        tracking that LUGAS performs across all regulated bookmakers.
+        """
+        now = datetime.now(timezone.utc)
+        try:
+            with SessionLocal() as db:
+                query = select(func.coalesce(func.sum(PlacedBet.stake), 0.0)).where(
+                    PlacedBet.is_training_data.is_(False),
+                    extract("year", PlacedBet.created_at) == now.year,
+                    extract("month", PlacedBet.created_at) == now.month,
+                )
+                if self._owner:
+                    query = query.where(PlacedBet.owner_chat_id == self._owner)
+                return max(0.0, float(db.scalar(query) or 0.0))
+        except Exception:
+            return 0.0
+
+    def get_lugas_remaining(self) -> float:
+        """Return remaining EUR available under the LUGAS monthly limit.
+
+        The system will never recommend a stake larger than this value,
+        preventing the operator from exceeding the GlüStV §6c deposit cap.
+        """
+        staked = self.get_monthly_staked()
+        remaining = max(0.0, LUGAS_MONTHLY_DEPOSIT_LIMIT - staked)
+        if remaining < 50.0:
+            log.warning(
+                "LUGAS limit approaching: %.2f/%.2f EUR staked this month",
+                staked, LUGAS_MONTHLY_DEPOSIT_LIMIT,
+            )
+        return remaining
+
+    def get_dss_safe_margin(self) -> float:
+        """Return the bankroll available for Kelly sizing, capped by LUGAS.
+
+        This is the correct base for DSS recommendations:
+        ``min(free_margin, lugas_remaining)``  — the operator cannot
+        stake more than either their bankroll allows or LUGAS permits.
+        """
+        free = self.get_free_margin()
+        lugas = self.get_lugas_remaining()
+        return min(free, lugas)
