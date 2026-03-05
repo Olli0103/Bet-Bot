@@ -468,7 +468,7 @@ def _run_source_health_check():
 
 
 async def _run_agent_cycle():
-    """Run one Scout -> Analyst -> Executioner cycle.
+    """Run one Scout -> Analyst -> DSS Tip Publisher cycle.
 
     The Scout now reads from Redis/DB cache — NOT from live API calls.
     It only triggers the Analyst when cached data shows a steam move.

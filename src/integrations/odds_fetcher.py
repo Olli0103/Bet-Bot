@@ -1,11 +1,14 @@
+import asyncio
 import logging
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
+import httpx
+
 from src.core.settings import settings
 from src.data.redis_cache import cache
-from src.integrations.base_fetcher import AsyncBaseFetcher, _safe_sync_run
+from src.integrations.base_fetcher import APIFetchError, AsyncBaseFetcher, _safe_sync_run
 
 log = logging.getLogger(__name__)
 
@@ -125,8 +128,9 @@ class OddsFetcher(AsyncBaseFetcher):
 
         try:
             data = await self.get("sports", params={"apiKey": settings.odds_api_key})
-        except Exception as exc:
-            log.warning("Failed to fetch active sports from API: %s", exc)
+        except (httpx.HTTPError, APIFetchError, asyncio.TimeoutError) as exc:
+            log.warning("Failed to fetch active sports from API (%s): %s",
+                        type(exc).__name__, exc)
             return []
 
         if not isinstance(data, list):
@@ -277,8 +281,9 @@ class OddsFetcher(AsyncBaseFetcher):
             )
             cache.set_json(cache_key, data, ttl_seconds=86400)
             return data
-        except Exception as e:
-            print(f"Historical odds not available: {e}")
+        except (httpx.HTTPError, APIFetchError, asyncio.TimeoutError) as exc:
+            log.debug("Historical odds not available for %s (%s): %s",
+                       sport_key, type(exc).__name__, exc)
             return None
 
     async def get_odds_12h_ago_async(
@@ -338,8 +343,9 @@ class OddsFetcher(AsyncBaseFetcher):
                     break  # Take first sharp book found
 
             cache.set_json(cache_key, result, ttl_seconds=3600)
-        except Exception as exc:
-            log.debug("Historical odds 12h ago not available for %s: %s", sport_key, exc)
+        except (httpx.HTTPError, APIFetchError, asyncio.TimeoutError) as exc:
+            log.debug("Historical odds 12h ago not available for %s (%s): %s",
+                       sport_key, type(exc).__name__, exc)
 
         return result
 
@@ -386,8 +392,9 @@ class OddsFetcher(AsyncBaseFetcher):
             if result:
                 cache.set_json(cache_key, result, ttl_seconds=10)
             return result or None
-        except Exception as exc:
-            log.warning("get_event_odds failed for %s: %s", event_id, exc)
+        except (httpx.HTTPError, APIFetchError, asyncio.TimeoutError) as exc:
+            log.warning("get_event_odds failed for %s (%s): %s",
+                        event_id, type(exc).__name__, exc)
             return None
 
     # sync helpers for non-async call sites (loop-safe)

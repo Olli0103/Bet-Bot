@@ -102,7 +102,7 @@ def place_virtual_bet(
 ) -> bool:
     """Place a single virtual (ghost) bet.
 
-    Called from the Executioner agent and the Telegram "Ghost Bet" button.
+    Called from the paper-trading pipeline for tracking purposes.
     Duplicate check is scoped to owner + user bet sources only.
     """
     features = features or {}

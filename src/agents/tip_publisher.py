@@ -1,6 +1,6 @@
 """Stateful Tip Publisher: State-graph flow for Tippprovider delivery.
 
-Replaces the linear Scout -> Analyst -> Executioner pipeline with a
+Replaces the linear Scout -> Analyst pipeline with a
 state machine that **re-validates** a tip if odds move while the
 analysis is in progress.  This ensures that every published tip is
 mathematically valid at the moment of delivery — critical for a
@@ -13,7 +13,7 @@ State Flow:
                                   +-> REJECTED (EV lost)
 
 As a Tippprovider, the system never places bets directly.  The
-"Publisher" replaces the "Executioner" for the tip delivery path.
+The Publisher is the final stage in the tip delivery path.
 
 DSS Compliance:
     Every published tip is paired with a ``StatefulTip`` audit record

@@ -1,6 +1,8 @@
 """Tests for Sprint 4 hardening: Beta Calibration, Gaussian Copula, Dynamic Kelly."""
 from __future__ import annotations
 
+from collections import deque
+
 import numpy as np
 import pytest
 
@@ -716,7 +718,6 @@ class TestEventDrivenOrchestrator:
 
         with patch("src.agents.orchestrator.ScoutAgent"), \
              patch("src.agents.orchestrator.AnalystAgent"), \
-             patch("src.agents.orchestrator.ExecutionerAgent"), \
              patch("src.agents.orchestrator.PerformanceMonitor"), \
              patch("src.agents.orchestrator.settings"):
             from src.agents.orchestrator import AgentOrchestrator
@@ -821,14 +822,14 @@ class TestLiquidityCaps:
         assert get_liquidity_cap("soccer_mongolia_premier") == 0.1
         assert get_liquidity_cap("esports_csgo") == 0.1
 
-    def test_liquidity_cap_integrated_in_executioner(self):
-        """Executioner must import and use get_liquidity_cap."""
+    def test_liquidity_cap_integrated_in_tip_publisher(self):
+        """Tip publisher must use kelly_fraction for stake sizing."""
         import inspect
-        from src.agents.executioner_agent import ExecutionerAgent
+        from src.agents.tip_publisher import build_dss_alert
 
-        source = inspect.getsource(ExecutionerAgent)
-        assert "get_liquidity_cap" in source, (
-            "Executioner must apply liquidity caps before stake sizing"
+        source = inspect.getsource(build_dss_alert)
+        assert "kelly_fraction" in source, (
+            "Tip publisher must compute Kelly fraction for stake recommendation"
         )
 
 
@@ -1481,14 +1482,17 @@ class TestMAOCalculator:
         mao = calculate_mao(0.80, tax_rate=0.053, required_edge=0.01)
         assert mao < 1.4
 
-    def test_mao_integrated_in_executioner(self):
-        """Executioner must compute MAO and abort if odds < MAO."""
+    def test_mao_integrated_in_tip_publisher(self):
+        """Tip publisher must compute MAO and validate against it."""
         import inspect
-        from src.agents.executioner_agent import ExecutionerAgent
+        from src.agents.tip_publisher import validate_tip, build_dss_alert
 
-        source = inspect.getsource(ExecutionerAgent.execute)
-        assert "calculate_mao" in source, "Executioner must compute MAO"
-        assert "mao" in source, "Executioner must use MAO for slippage guard"
+        val_source = inspect.getsource(validate_tip)
+        assert "calculate_mao" in val_source, "validate_tip must compute MAO"
+        assert "mao" in val_source, "validate_tip must use MAO for slippage guard"
+
+        alert_source = inspect.getsource(build_dss_alert)
+        assert "mao" in alert_source, "build_dss_alert must include MAO"
 
     def test_mao_in_bet_signal_model(self):
         """BetSignal model must include mao field."""
@@ -1637,17 +1641,19 @@ class TestAtomicBetLocks:
         mock_client.set.return_value = False
         assert rc.setnx("test_key", "val", ttl_seconds=60) is False
 
-    def test_double_spend_blocked_in_process_alert(self):
+    @pytest.mark.asyncio
+    async def test_double_spend_blocked_in_process_alert(self):
         """Second alert for same event:market must be skipped."""
-        import asyncio
-        from unittest.mock import AsyncMock, MagicMock, patch
+        from unittest.mock import MagicMock, patch
         from src.agents.orchestrator import AgentOrchestrator
 
         orch = AgentOrchestrator.__new__(AgentOrchestrator)
         orch.analyst = MagicMock()
-        orch.executioner = MagicMock()
+        orch.monitor = MagicMock()
+        orch.monitor.check_circuit_breakers.return_value = {}
         orch.bot = None
         orch.chat_id = ""
+        orch._dead_letter_queue = deque(maxlen=100)
 
         alert = {
             "event_id": "evt123",
@@ -1661,9 +1667,7 @@ class TestAtomicBetLocks:
         # Simulate lock already held
         with patch("src.agents.orchestrator.cache") as mock_cache:
             mock_cache.setnx.return_value = False
-            result = asyncio.get_event_loop().run_until_complete(
-                orch._process_single_alert(alert)
-            )
+            result = await orch._process_single_alert(alert)
         assert result["action"] == "skip"
         assert "bet_lock" in result["reasoning"][0]
 
@@ -1747,13 +1751,16 @@ class TestSpinningWheelGuard:
             key = mock_cache.set_json.call_args[0][0]
             assert "evt1" in key and "TeamA" in key
 
-    def test_executioner_calls_spinning_wheel(self):
-        """Executioner must call check_spinning_wheel before placing bet."""
+    def test_orchestrator_checks_circuit_breakers(self):
+        """Orchestrator must check circuit breakers before processing alerts."""
         import inspect
-        from src.agents.executioner_agent import ExecutionerAgent
-        source = inspect.getsource(ExecutionerAgent.execute)
-        assert "check_spinning_wheel" in source, (
-            "Executioner must call spinning wheel guard"
+        from src.agents.orchestrator import AgentOrchestrator
+        source = inspect.getsource(AgentOrchestrator._check_circuit_breakers)
+        assert "check_circuit_breakers" in source, (
+            "Orchestrator must check circuit breakers"
+        )
+        assert "check_data_source_health" in source, (
+            "Orchestrator must check data source health"
         )
 
 
@@ -1955,22 +1962,25 @@ class TestFreeMarginExposure:
             new_total = mgr.release_pending_exposure(50.0)
         assert new_total == 100.0
 
-    def test_executioner_uses_free_margin(self):
-        """Executioner must call get_free_margin, not get_current_bankroll."""
+    def test_tip_publisher_validates_ev(self):
+        """Tip publisher must validate EV before publishing."""
         import inspect
-        from src.agents.executioner_agent import ExecutionerAgent
-        source = inspect.getsource(ExecutionerAgent.execute)
-        assert "get_free_margin" in source, (
-            "Executioner must use free margin (bankroll minus pending exposure)"
+        from src.agents.tip_publisher import validate_tip
+        source = inspect.getsource(validate_tip)
+        assert "tax_adjusted_expected_value" in source, (
+            "validate_tip must use tax-adjusted EV"
         )
 
-    def test_executioner_records_pending_exposure(self):
-        """After a bet, executioner must call add_pending_exposure."""
+    def test_orchestrator_has_dlq(self):
+        """Orchestrator must have Dead Letter Queue for transient failures."""
         import inspect
-        from src.agents.executioner_agent import ExecutionerAgent
-        source = inspect.getsource(ExecutionerAgent.execute)
-        assert "add_pending_exposure" in source, (
-            "Executioner must record pending exposure after bet placement"
+        from src.agents.orchestrator import AgentOrchestrator
+        source = inspect.getsource(AgentOrchestrator)
+        assert "_dead_letter_queue" in source, (
+            "Orchestrator must have a Dead Letter Queue"
+        )
+        assert "_enqueue_dead_letter" in source, (
+            "Orchestrator must be able to enqueue failed alerts"
         )
 
     def test_simultaneous_kelly_scenario(self):
