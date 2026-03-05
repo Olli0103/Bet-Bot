@@ -75,17 +75,25 @@ def _extract_league(sport_key: str) -> str:
     return parts[1] if len(parts) > 1 else sport_key
 
 
-def _combo_score(prob: float, odds: float, market_type: str = "h2h") -> float:
-    """Score a leg for combo selection using Expected Value.
+def _combo_score(
+    prob: float,
+    odds: float,
+    market_type: str = "h2h",
+    tax_rate: float = 0.0,
+) -> float:
+    """Score a leg for combo selection using net Expected Value (after tax).
 
-    EV = prob * (odds - 1) - (1 - prob).  Only EV-positive legs should
-    appear in a well-constructed combo.  High-probability safety markets
-    (Double Chance, DNB) receive a small boost because lotto combos
-    need hit rate to survive 10-30 legs.
+    Gross EV ignores the German betting tax, which makes legs appear
+    more profitable than they are.  For 2-leg combos Tipico's tax-free
+    promotion does NOT apply, so scoring by gross EV leads to incorrect
+    leg prioritisation.
+
+    Net EV = prob * (odds * (1 - tax) - 1) - (1 - prob).
     """
     if prob <= 0 or odds <= 1.0:
         return 0.0
-    ev = prob * (odds - 1.0) - (1.0 - prob)
+    net_odds = odds * (1.0 - tax_rate)
+    ev = prob * (net_odds - 1.0) - (1.0 - prob)
     # Small boost for safety markets in lotto combos
     if market_type in ("double_chance", "draw_no_bet"):
         ev *= 1.10
@@ -103,6 +111,7 @@ class ComboOptimizer:
         candidates: List[Dict],
         target_legs: int,
         constraints: ComboConstraints,
+        tax_rate: float = 0.0,
     ) -> List[Dict]:
         """Select legs that satisfy all constraints, ranked by combo_score."""
         # Pre-filter
@@ -116,10 +125,12 @@ class ComboOptimizer:
                 continue
             valid.append(leg)
 
-        # Score and sort (with market-type-aware scoring)
+        # Score and sort (with market-type-aware scoring, net of tax)
         scored = sorted(
             valid,
-            key=lambda l: _combo_score(l["probability"], l["odds"], l.get("market_type", "h2h")),
+            key=lambda l: _combo_score(
+                l["probability"], l["odds"], l.get("market_type", "h2h"), tax_rate,
+            ),
             reverse=True,
         )
 
@@ -184,7 +195,15 @@ class ComboOptimizer:
         if constraints is None:
             constraints = COMBO_PROFILES.get(target_legs, COMBO_PROFILES[10])
 
-        legs = self._select_legs(candidates, target_legs, constraints)
+        # Compute tax rate up-front so leg scoring uses net EV
+        tax = effective_tax_rate(
+            base_tax=settings.tipico_tax_rate,
+            tax_free_mode=settings.tax_free_mode,
+            is_combo=True,
+            combo_legs=target_legs,
+        )
+
+        legs = self._select_legs(candidates, target_legs, constraints, tax_rate=tax)
         if len(legs) < min(target_legs, 3):
             return None
 
@@ -195,7 +214,7 @@ class ComboOptimizer:
         stake = COMBO_STAKES.get(target_legs, 1.00)
         kelly_frac = stake / max(1.0, self.engine.bankroll)
 
-        # Tax-free for 3+ leg combos (Tipico promotion)
+        # Recompute tax with actual leg count (may differ from target)
         tax = effective_tax_rate(
             base_tax=settings.tipico_tax_rate,
             tax_free_mode=settings.tax_free_mode,
@@ -221,7 +240,15 @@ class ComboOptimizer:
             min_prob_per_leg=0.55, odds_range=(1.30, 3.00),
         )
 
-        # For EV combos, sort by EV contribution instead of combo_score
+        # Compute tax for EV scoring
+        ev_tax = effective_tax_rate(
+            base_tax=settings.tipico_tax_rate,
+            tax_free_mode=settings.tax_free_mode,
+            is_combo=True,
+            combo_legs=target_legs,
+        )
+
+        # For EV combos, sort by net EV contribution instead of combo_score
         valid = []
         for leg in candidates:
             odds = float(leg.get("odds", 0))
@@ -230,7 +257,8 @@ class ComboOptimizer:
                 continue
             if odds < constraints.odds_range[0] or odds > constraints.odds_range[1]:
                 continue
-            ev = prob * (odds - 1.0) - (1.0 - prob)
+            net_odds = odds * (1.0 - ev_tax)
+            ev = prob * (net_odds - 1.0) - (1.0 - prob)
             if ev > 0:
                 leg["_ev"] = ev
                 valid.append(leg)
@@ -241,7 +269,7 @@ class ComboOptimizer:
         # Sort by EV descending
         valid.sort(key=lambda l: l.get("_ev", 0), reverse=True)
 
-        legs = self._select_legs(valid, target_legs, constraints)
+        legs = self._select_legs(valid, target_legs, constraints, tax_rate=ev_tax)
         if len(legs) < min(target_legs, 3):
             return None
 

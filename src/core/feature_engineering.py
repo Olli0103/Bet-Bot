@@ -5,14 +5,36 @@ from typing import Dict, List, Optional
 
 class FeatureEngineer:
     @staticmethod
-    def calculate_clv_proxy(target_odds: float, sharp_odds: float) -> float:
-        """
-        Relative edge proxy vs sharp odds.
-        0.05 => target price is 5% better than sharp.
+    def calculate_clv_proxy(
+        target_odds: float,
+        sharp_odds: float,
+        sharp_vig: float = 0.0,
+    ) -> float:
+        """Relative edge proxy vs the *fair* sharp price (vig removed).
+
+        Raw sharp odds contain the bookmaker's margin (vig).  Comparing
+        target_odds against vigged sharp odds systematically overstates
+        the edge, which inflates Kelly stakes.
+
+        Example: fair prob 50% → fair odds 2.00, Pinnacle 1.95 (2.6% vig).
+        Tipico 2.05.  Without vig removal: 2.05/1.95-1 = +5.1%.
+        With vig removal: 2.05/2.00-1 = +2.5% (correct).
         """
         if sharp_odds <= 1.0 or target_odds <= 1.0:
             return 0.0
-        return round((target_odds / sharp_odds) - 1.0, 4)
+        # Remove vig: convert sharp odds to fair odds.
+        # Only apply correction when vig > 0 (valid multi-outcome market).
+        # Negative or zero vig indicates incomplete market data — fall back
+        # to raw sharp odds to avoid nonsensical corrections.
+        raw_sharp_prob = 1.0 / sharp_odds
+        if sharp_vig > 0:
+            overround = 1.0 + sharp_vig  # e.g. 1.052 for 5.2% overround
+            fair_sharp_prob = raw_sharp_prob / overround
+        else:
+            fair_sharp_prob = raw_sharp_prob
+        fair_sharp_prob = max(fair_sharp_prob, 1e-9)  # avoid div-by-zero
+        fair_sharp_odds = 1.0 / fair_sharp_prob
+        return round((target_odds / fair_sharp_odds) - 1.0, 4)
 
     @staticmethod
     def calculate_vig(outcomes: Dict[str, float]) -> float:
@@ -78,8 +100,8 @@ class FeatureEngineer:
         goals_scored_avg: float = 0.0,
         goals_conceded_avg: float = 0.0,
     ) -> Dict[str, float]:
-        clv_proxy = FeatureEngineer.calculate_clv_proxy(target_odds, sharp_odds)
         sharp_vig = FeatureEngineer.calculate_vig(sharp_market)
+        clv_proxy = FeatureEngineer.calculate_clv_proxy(target_odds, sharp_odds, sharp_vig)
 
         # Strip vig (overround) from the sharp implied probability.
         # Raw 1/odds systematically overestimates the true probability by
@@ -163,8 +185,12 @@ class FeatureEngineer:
         """Features for over/under totals markets."""
         over_prob = 1.0 / sharp_over_odds if sharp_over_odds > 1.0 else 0.5
         under_prob = 1.0 / sharp_under_odds if sharp_under_odds > 1.0 else 0.5
-        clv_over = FeatureEngineer.calculate_clv_proxy(over_odds, sharp_over_odds)
-        clv_under = FeatureEngineer.calculate_clv_proxy(under_odds, sharp_under_odds)
+        # Compute vig from the two-way market for vig-corrected CLV
+        totals_vig = FeatureEngineer.calculate_vig(
+            {"over": sharp_over_odds, "under": sharp_under_odds}
+        )
+        clv_over = FeatureEngineer.calculate_clv_proxy(over_odds, sharp_over_odds, totals_vig)
+        clv_under = FeatureEngineer.calculate_clv_proxy(under_odds, sharp_under_odds, totals_vig)
         features = {
             "totals_point": float(point),
             "sharp_over_prob": round(over_prob, 4),
@@ -184,7 +210,7 @@ class FeatureEngineer:
     ) -> Dict[str, float]:
         """Features for spread/handicap markets."""
         sharp_prob = 1.0 / sharp_spread_odds if sharp_spread_odds > 1.0 else 0.5
-        clv = FeatureEngineer.calculate_clv_proxy(spread_odds, sharp_spread_odds)
+        clv = FeatureEngineer.calculate_clv_proxy(spread_odds, sharp_spread_odds, 0.0)
         return {
             "spread_point": float(point),
             "sharp_spread_prob": round(sharp_prob, 4),

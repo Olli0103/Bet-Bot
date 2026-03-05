@@ -6,6 +6,7 @@ matrix approach to derive 1X2, over/under 0.5/1.5/2.5/3.5, and BTTS probabilitie
 from __future__ import annotations
 
 import logging
+import math
 from typing import Dict, Optional
 
 from scipy.stats import poisson
@@ -200,21 +201,27 @@ class PoissonSoccerModel:
         h = self._load_strengths(home)
         a = self._load_strengths(away)
 
+        # Use log-dampened updates to prevent outlier results from causing
+        # explosive strength swings.  A raw multiplicative update with
+        # ratio = actual/expected can produce huge jumps when xG is low
+        # (e.g. xG=0.2, actual=3 → ratio=15 → +70% attack boost).
+        # Log-dampening: sign(ratio-1) * log(1 + |ratio-1|) compresses
+        # large ratios while preserving the direction and magnitude for
+        # normal results near the expected value.
+        def _dampened_ratio(actual: float, expected: float) -> float:
+            if expected <= 0:
+                return 0.0
+            ratio = actual / expected
+            delta = ratio - 1.0
+            return math.copysign(math.log1p(abs(delta)), delta)
+
         # --- home team ---
-        if home_xg > 0:
-            ratio_home_scored = home_goals / home_xg
-            h["attack"] *= 1.0 + lr * (ratio_home_scored - 1.0)
-        if away_xg > 0:
-            ratio_home_conceded = away_goals / away_xg
-            h["defense"] *= 1.0 + lr * (ratio_home_conceded - 1.0)
+        h["attack"] *= 1.0 + lr * _dampened_ratio(home_goals, home_xg)
+        h["defense"] *= 1.0 + lr * _dampened_ratio(away_goals, away_xg)
 
         # --- away team ---
-        if away_xg > 0:
-            ratio_away_scored = away_goals / away_xg
-            a["attack"] *= 1.0 + lr * (ratio_away_scored - 1.0)
-        if home_xg > 0:
-            ratio_away_conceded = home_goals / home_xg
-            a["defense"] *= 1.0 + lr * (ratio_away_conceded - 1.0)
+        a["attack"] *= 1.0 + lr * _dampened_ratio(away_goals, away_xg)
+        a["defense"] *= 1.0 + lr * _dampened_ratio(home_goals, home_xg)
 
         # Clamp to sensible bounds so strengths don't run away
         for s in (h, a):
