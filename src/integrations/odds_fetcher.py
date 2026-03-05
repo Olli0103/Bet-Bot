@@ -190,7 +190,19 @@ class OddsFetcher(AsyncBaseFetcher):
             f"sports/{sport_key}/odds",
             params=params,
         )
-        cache.set_json(cache_key, data, ttl_seconds)
+
+        # Empty Window Cache: if the API returns an empty list ([]),
+        # cache it until the trading window ends to prevent the fetcher
+        # from hammering the API in an endless loop for cold sports.
+        if isinstance(data, list) and len(data) == 0:
+            window_end = get_trading_window_end()
+            now = datetime.now(timezone.utc)
+            ttl_to_window_end = max(3600, int((window_end - now).total_seconds()))
+            cache.set_json(cache_key, data, ttl_seconds=ttl_to_window_end)
+            log.info("Empty window cached for %s (TTL=%ds until next session)", sport_key, ttl_to_window_end)
+        else:
+            cache.set_json(cache_key, data, ttl_seconds)
+
         return data
 
     def is_sport_deep_sleeping(self, sport_key: str) -> bool:

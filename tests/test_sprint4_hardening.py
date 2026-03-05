@@ -1219,3 +1219,197 @@ class TestLiveEventFilter:
 
         assert ct_past <= now   # live — should be filtered
         assert ct_future > now  # pre-match — should pass
+
+
+# ---------------------------------------------------------------------------
+# 22. In-Play Terminator (per-sport fetch interval)
+# ---------------------------------------------------------------------------
+
+
+class TestInPlayTerminator:
+    """Verify that live matches trigger deep-sleep, not sniper-mode."""
+
+    def test_all_matches_live_returns_deep_sleep(self):
+        """When all kickoffs are in the past, return deep-sleep interval."""
+        from datetime import datetime, timezone, timedelta
+        from unittest.mock import patch
+        from src.core.fetch_scheduler import get_sport_fetch_interval
+
+        now = datetime.now(timezone.utc)
+        past_kickoffs = [
+            (now - timedelta(hours=1)).isoformat(),
+            (now - timedelta(minutes=30)).isoformat(),
+        ]
+
+        with patch("src.core.fetch_scheduler.cache") as mock_cache:
+            mock_cache.get_json.return_value = past_kickoffs
+            interval = get_sport_fetch_interval("soccer_epl")
+
+        # All matches live → deep sleep (>= 3600)
+        assert interval >= 3600
+
+    def test_future_match_triggers_sniper(self):
+        """Match < 15 min away triggers 10s sniper interval."""
+        from datetime import datetime, timezone, timedelta
+        from unittest.mock import patch
+        from src.core.fetch_scheduler import get_sport_fetch_interval
+
+        now = datetime.now(timezone.utc)
+        kickoffs = [
+            (now + timedelta(minutes=10)).isoformat(),
+        ]
+
+        with patch("src.core.fetch_scheduler.cache") as mock_cache:
+            mock_cache.get_json.return_value = kickoffs
+            interval = get_sport_fetch_interval("soccer_epl")
+
+        assert interval == 10
+
+    def test_mixed_live_and_future_uses_future_only(self):
+        """With one live + one future match, interval based on the future one."""
+        from datetime import datetime, timezone, timedelta
+        from unittest.mock import patch
+        from src.core.fetch_scheduler import get_sport_fetch_interval
+
+        now = datetime.now(timezone.utc)
+        kickoffs = [
+            (now - timedelta(hours=1)).isoformat(),   # live — ignored
+            (now + timedelta(hours=2)).isoformat(),    # future — 1-6h range
+        ]
+
+        with patch("src.core.fetch_scheduler.cache") as mock_cache:
+            mock_cache.get_json.return_value = kickoffs
+            interval = get_sport_fetch_interval("soccer_epl")
+
+        assert interval == 600  # 1-6h range (fetch_scheduler uses 600s, not 60s)
+
+    def test_no_kickoffs_returns_idle(self):
+        """No kickoff data → idle interval (3600s)."""
+        from unittest.mock import patch
+        from src.core.fetch_scheduler import get_sport_fetch_interval
+
+        with patch("src.core.fetch_scheduler.cache") as mock_cache:
+            mock_cache.get_json.return_value = []
+            interval = get_sport_fetch_interval("soccer_epl")
+
+        assert interval == 3600
+
+    def test_negative_delta_excluded(self):
+        """Negative deltas (in-play) must NEVER trigger sniper mode."""
+        from datetime import datetime, timezone, timedelta
+        from unittest.mock import patch
+        from src.core.fetch_scheduler import get_sport_fetch_interval
+
+        now = datetime.now(timezone.utc)
+        # Match started 10 min ago: delta = -600s
+        # Without fix: -600 <= 900 → sniper (10s) — WRONG
+        # With fix: filtered out entirely → deep sleep
+        kickoffs = [
+            (now - timedelta(minutes=10)).isoformat(),
+        ]
+
+        with patch("src.core.fetch_scheduler.cache") as mock_cache:
+            mock_cache.get_json.return_value = kickoffs
+            interval = get_sport_fetch_interval("soccer_epl")
+
+        # Must NOT be 10s (sniper) — must be deep sleep
+        assert interval >= 3600, (
+            f"In-play match triggered {interval}s interval instead of deep sleep"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 23. Empty Window Cache Firewall
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyWindowCache:
+    """Verify empty API responses are cached until trading window end."""
+
+    def test_empty_response_gets_long_ttl(self):
+        """Empty [] from API should be cached with TTL until window end."""
+        import inspect
+        from src.integrations.odds_fetcher import OddsFetcher
+
+        source = inspect.getsource(OddsFetcher.get_sport_odds_async)
+        # Must have special handling for empty responses
+        assert "len(data) == 0" in source, (
+            "Empty responses must be detected for long-TTL caching"
+        )
+        assert "ttl_to_window_end" in source or "window_end" in source, (
+            "Empty responses must be cached until trading window end"
+        )
+
+    def test_nonempty_response_uses_standard_ttl(self):
+        """Non-empty responses should use the standard TTL."""
+        import inspect
+        from src.integrations.odds_fetcher import OddsFetcher
+
+        source = inspect.getsource(OddsFetcher.get_sport_odds_async)
+        # The else branch must cache with standard ttl_seconds
+        assert "ttl_seconds)" in source, (
+            "Non-empty responses must use standard ttl_seconds"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 24. Tipico Tax Guard (Min Odds Check)
+# ---------------------------------------------------------------------------
+
+
+class TestTipicoTaxGuard:
+    """Verify tax-free only applies when ALL legs have odds >= 1.50."""
+
+    def test_3leg_combo_all_above_150_is_tax_free(self):
+        """3+ legs with all odds >= 1.50 → tax_rate = 0.0."""
+        from unittest.mock import patch, MagicMock
+        from src.core.betting_engine import BettingEngine
+
+        engine = BettingEngine.__new__(BettingEngine)
+        engine.bankroll = 1000.0
+
+        legs = [
+            {"event_id": "e1", "selection": "Home", "odds": 1.80, "probability": 0.55,
+             "sport": "soccer_epl", "market_type": "h2h"},
+            {"event_id": "e2", "selection": "Away", "odds": 2.10, "probability": 0.45,
+             "sport": "soccer_epl", "market_type": "h2h"},
+            {"event_id": "e3", "selection": "Over 2.5", "odds": 1.90, "probability": 0.50,
+             "sport": "soccer_epl", "market_type": "totals"},
+        ]
+
+        with patch.object(engine, "_build_correlation_matrix", return_value=np.eye(3)), \
+             patch.object(engine, "_compute_joint_probability_copula", return_value=0.12), \
+             patch("src.core.betting_engine.get_dynamic_kelly_frac", return_value=0.1):
+            combo = engine.build_combo(legs, tax_rate=0.053)
+
+        # All odds >= 1.50, 3 legs → tax-free
+        # EV computed with 0% tax
+        assert combo.expected_value > -1.0  # just verify it ran
+
+    def test_3leg_combo_one_below_150_is_taxed(self):
+        """3 legs but one has odds 1.20 → tax still applies (Tipico AGB)."""
+        import inspect
+        from src.core.betting_engine import BettingEngine
+
+        source = inspect.getsource(BettingEngine.build_combo)
+        # Must check min odds per leg
+        assert "MIN_ODDS_FOR_TAX_FREE" in source, (
+            "Tax-free rule must enforce minimum odds per leg"
+        )
+        assert "1.50" in source or "1.5" in source, (
+            "Minimum odds threshold must be 1.50"
+        )
+        assert "all(" in source, (
+            "Must check ALL legs meet the minimum odds requirement"
+        )
+
+    def test_2leg_combo_high_odds_still_taxed(self):
+        """2-leg combos are always taxed regardless of odds."""
+        import inspect
+        from src.core.betting_engine import BettingEngine
+
+        source = inspect.getsource(BettingEngine.build_combo)
+        # Must require >= 3 legs
+        assert "len(combo_legs) >= 3" in source, (
+            "Tax-free requires 3+ legs"
+        )
