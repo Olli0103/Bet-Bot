@@ -1038,33 +1038,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text(f"Deep Dive fehlgeschlagen: {type(exc).__name__}")
         return
 
-    # --- Agent alert: Ghost Bet ---
-    if data.startswith("agent_ghost:"):
-        alert_id = data.split(":", 1)[1]
-        alert_data = cache.get_json(f"agent_alert:{alert_id}")
-        if not alert_data:
-            await q.edit_message_text("Alert abgelaufen.")
-            return
-        try:
-            from src.core.ghost_trading import place_virtual_bet
-            await asyncio.to_thread(
-                place_virtual_bet,
-                event_id=str(alert_data.get("event_id", "")),
-                sport=str(alert_data.get("sport", "")),
-                market="h2h",
-                selection=str(alert_data.get("selection", "")),
-                odds=float(alert_data.get("target_odds", 2.0)),
-                stake=float(alert_data.get("stake", 1.0)),
-                features={},
-            )
-            await q.edit_message_text("💰 Ghost Bet platziert ✅")
-        except Exception:
-            await q.edit_message_text("Ghost Bet fehlgeschlagen.")
-        return
-
     # --- Agent alert: Ignore ---
     if data.startswith("agent_ignore:"):
-        await q.edit_message_text("🛑 Alert ignoriert.")
+        await q.edit_message_text("Alert ignoriert.")
         return
 
     # --- DSS: Mark as Placed (Meaningful Human Intervention) ---
@@ -1625,10 +1601,11 @@ async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '  "Zeig mir 10er Kombis"\n'
         '  "Erklaere mir den Lakers Tipp"\n'
         '  "Zeig mir die besten 3 Fussball Wetten"\n\n'
-        "🤖 Agent Alerts:\n"
-        "  🔍 Deep Dive — Analyst-Analyse\n"
-        "  💰 Ghost Bet — Virtuelle Wette\n"
-        "  🛑 Ignorieren — Alert verwerfen\n\n"
+        "🤖 DSS Tipps:\n"
+        "  ✅ Platziert — Tip bestätigen\n"
+        "  ❌ Abgelehnt — Tip ablehnen\n"
+        "  📊 Mathe zeigen — Quantitative Analyse\n"
+        "  🔍 Deep Dive — KI-Begründung\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "📊 So liest du die Signale:\n\n"
         "Modell: 62% — Wahrscheinlichkeit laut ML-Modell, dass\n"
