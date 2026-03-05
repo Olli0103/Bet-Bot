@@ -77,6 +77,59 @@ def _platt_scaling(raw_probs: np.ndarray, actuals: np.ndarray) -> Tuple[float, f
     return float(a), float(b)
 
 
+def _beta_calibration_fit(
+    raw_probs: np.ndarray, actuals: np.ndarray
+) -> Tuple[float, float, float]:
+    """Fit 3-parameter beta calibration (Kull et al., 2017).
+
+    Maps raw probability p to calibrated probability via:
+        calibrated = 1 / (1 + 1 / (exp(c) * (p/(1-p))^a))
+
+    In log-odds space this becomes:
+        log_odds_cal = a * log(p/(1-p)) + c
+
+    The full 3-parameter form with separate a and b is:
+        calibrated = 1 / (1 + exp(-(a*log(p/(1-p)) + b*log((1-p)/p) + c)))
+              which simplifies to a*(1+1)*log(p/(1-p)) if a==b, plus intercept c.
+
+    Beta calibration is mathematically superior to Platt scaling for
+    tree-based models because it can handle the non-sigmoidal distortions
+    that boosted trees produce.
+
+    Falls back to Platt scaling if optimization fails.
+    """
+    from scipy.optimize import minimize
+
+    eps = 1e-6
+    p = np.clip(raw_probs, eps, 1.0 - eps)
+    log_odds = np.log(p / (1.0 - p))
+    rev_log_odds = np.log((1.0 - p) / p)  # = -log_odds
+
+    def neg_log_likelihood(params):
+        a, b, c = params
+        z = a * log_odds + b * rev_log_odds + c
+        pred = 1.0 / (1.0 + np.exp(-z))
+        pred = np.clip(pred, eps, 1.0 - eps)
+        ll = -(actuals * np.log(pred) + (1.0 - actuals) * np.log(1.0 - pred))
+        return float(np.mean(ll))
+
+    try:
+        result = minimize(
+            neg_log_likelihood,
+            x0=[1.0, 0.0, 0.0],  # Start: identity mapping
+            method="Nelder-Mead",
+            options={"maxiter": 2000, "xatol": 1e-6, "fatol": 1e-8},
+        )
+        if result.success or result.fun < neg_log_likelihood([1.0, 0.0, 0.0]):
+            return float(result.x[0]), float(result.x[1]), float(result.x[2])
+    except Exception as exc:
+        log.warning("Beta calibration optimization failed: %s, falling back to Platt", exc)
+
+    # Fallback: fit Platt scaling and convert to beta params (a=A, b=0, c=B)
+    a_platt, b_platt = _platt_scaling(raw_probs, actuals)
+    return a_platt, 0.0, b_platt
+
+
 def _isotonic_fit(raw_probs: np.ndarray, actuals: np.ndarray, n_bins: int = 10) -> List[Dict[str, float]]:
     """Fit isotonic regression via binned averaging with monotonicity enforcement.
 
@@ -143,6 +196,10 @@ class Calibrator:
         # Platt parameters
         self._platt_a: float = 1.0
         self._platt_b: float = 0.0
+        # Beta calibration parameters
+        self._beta_a: float = 1.0
+        self._beta_b: float = 0.0
+        self._beta_c: float = 0.0
 
     def fit(self, raw_probs: np.ndarray, actuals: np.ndarray) -> None:
         """Fit the calibrator on historical data."""
@@ -154,6 +211,8 @@ class Calibrator:
 
         if self.method == "platt":
             self._platt_a, self._platt_b = _platt_scaling(raw_probs, actuals)
+        elif self.method == "beta":
+            self._beta_a, self._beta_b, self._beta_c = _beta_calibration_fit(raw_probs, actuals)
         else:
             self._iso_bins = _isotonic_fit(raw_probs, actuals)
 
@@ -172,6 +231,14 @@ class Calibrator:
             p = max(eps, min(1.0 - eps, raw_prob))
             log_odds = math.log(p / (1.0 - p))
             z = self._platt_a * log_odds + self._platt_b
+            return max(0.01, min(0.99, 1.0 / (1.0 + math.exp(-z))))
+
+        if self.method == "beta":
+            eps = 1e-6
+            p = max(eps, min(1.0 - eps, raw_prob))
+            log_odds = math.log(p / (1.0 - p))
+            rev_log_odds = -log_odds
+            z = self._beta_a * log_odds + self._beta_b * rev_log_odds + self._beta_c
             return max(0.01, min(0.99, 1.0 / (1.0 + math.exp(-z))))
 
         # Isotonic: interpolate between bins
@@ -209,6 +276,9 @@ class Calibrator:
             "iso_bins": self._iso_bins,
             "platt_a": self._platt_a,
             "platt_b": self._platt_b,
+            "beta_a": self._beta_a,
+            "beta_b": self._beta_b,
+            "beta_c": self._beta_c,
         }
 
     @classmethod
@@ -220,6 +290,9 @@ class Calibrator:
         cal._iso_bins = data.get("iso_bins", [])
         cal._platt_a = data.get("platt_a", 1.0)
         cal._platt_b = data.get("platt_b", 0.0)
+        cal._beta_a = data.get("beta_a", 1.0)
+        cal._beta_b = data.get("beta_b", 0.0)
+        cal._beta_c = data.get("beta_c", 0.0)
         return cal
 
 

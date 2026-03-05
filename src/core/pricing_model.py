@@ -247,11 +247,28 @@ class QuantPricingModel:
         # Blend with CLV regressor if available
         clv_prob = self._clv_predict(features)
         if clv_prob is not None:
-            # 70% classifier (calibrated on outcomes) + 30% CLV regressor
-            # (trained on sharp closing lines — faster convergence).
-            # The blend gives credit to the CLV signal without letting
-            # it dominate the calibrated win-probability.
-            blended = 0.70 * classifier_prob + 0.30 * clv_prob
+            # Inverse-variance weighting: models with lower historical
+            # error (Brier/MSE) get exponentially more weight.  This
+            # replaces the previous hardcoded 70/30 split which ignored
+            # model confidence entirely.
+            var_classifier = model_data.get("metrics", {}).get("brier_score", 0.25)
+            clv_model_data = _load_joblib_model("clv_general")
+            var_clv = (
+                clv_model_data.get("metrics", {}).get("clv_mse", 0.25)
+                if clv_model_data else 0.25
+            )
+
+            if var_classifier > 0 and var_clv > 0:
+                w_classifier = (1.0 / var_classifier) / (1.0 / var_classifier + 1.0 / var_clv)
+            else:
+                # Fallback to 70/30 if metrics are missing or zero
+                w_classifier = 0.70
+
+            blended = w_classifier * classifier_prob + (1.0 - w_classifier) * clv_prob
+            log.debug(
+                "Blending: w_classifier=%.2f (brier=%.4f) w_clv=%.2f (mse=%.4f) -> %.4f",
+                w_classifier, var_classifier, 1.0 - w_classifier, var_clv, blended,
+            )
             return max(0.01, min(0.99, blended))
 
         return classifier_prob

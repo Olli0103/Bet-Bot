@@ -183,6 +183,53 @@ def _get_historical_accuracy(
 
 
 # ---------------------------------------------------------------------------
+# Dynamic Margin of Safety (EV threshold)
+# ---------------------------------------------------------------------------
+
+def get_dynamic_min_ev(sport: str, market: str = "h2h") -> float:
+    """Return a Brier-score-dependent EV threshold for the given sport.
+
+    Better-calibrated models (lower Brier) can tolerate smaller edges,
+    while poorly calibrated models need a larger safety margin.
+
+    Formula: min_ev = clamp(brier_score * 0.15, 0.005, 0.05)
+        Brier 0.18 -> min_ev 0.027 (2.7%)
+        Brier 0.22 -> min_ev 0.033 (3.3%)
+        Brier 0.25 -> min_ev 0.038 (3.8%)
+
+    Falls back to ``settings.min_ev_default`` when no model metrics exist.
+    """
+    from src.core.ml_trainer import load_model
+
+    s = sport.lower()
+    if s.startswith(("soccer", "football")):
+        group = "soccer"
+    elif s.startswith("basketball"):
+        group = "basketball"
+    elif s.startswith("tennis"):
+        group = "tennis"
+    elif s.startswith("icehockey"):
+        group = "icehockey"
+    elif s.startswith("americanfootball"):
+        group = "americanfootball"
+    else:
+        group = "general"
+
+    model_data = load_model(group)
+    if model_data is None:
+        model_data = load_model("general")
+    if model_data is None:
+        return settings.min_ev_default
+
+    brier = model_data.get("metrics", {}).get("brier_score")
+    if brier is None or brier <= 0:
+        return settings.min_ev_default
+
+    dynamic_ev = max(0.005, min(0.05, brier * 0.15))
+    return dynamic_ev
+
+
+# ---------------------------------------------------------------------------
 # Data source health gate
 # ---------------------------------------------------------------------------
 

@@ -103,12 +103,13 @@ class ExecutionerAgent:
             log.warning("Data source gate: %s", source_reason)
             return result
 
-        # 2. Check EV threshold
+        # 2. Check EV threshold (dynamic: Brier-based per sport)
         ev = float(analysis.get("expected_value", 0))
         model_p = float(analysis.get("model_probability", 0))
         recommendation = analysis.get("recommendation", "SKIP")
 
-        adjustments = self.monitor.get_adjustment_factors()
+        bet_sport = str(analysis.get("sport", ""))
+        adjustments = self.monitor.get_adjustment_factors(sport=bet_sport)
         min_ev = adjustments.get("min_ev", settings.min_ev_default)
 
         if ev < min_ev or recommendation == "SKIP":

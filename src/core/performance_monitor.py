@@ -76,8 +76,13 @@ class PerformanceMonitor:
             "drawdown": self._check_drawdown(max_pct=settings.drawdown_max_pct, lookback_days=settings.drawdown_lookback_days),
         }
 
-    def get_adjustment_factors(self) -> Dict[str, float]:
-        """Return stake/threshold adjustments based on recent performance."""
+    def get_adjustment_factors(self, sport: str = "") -> Dict[str, float]:
+        """Return stake/threshold adjustments based on recent performance.
+
+        When *sport* is provided and no circuit breaker is active, the EV
+        threshold is dynamically computed from the sport model's Brier
+        score — better-calibrated models can accept smaller edges.
+        """
         perf = self.get_recent_performance(days=7)
         breakers = self.check_circuit_breakers()
 
@@ -96,7 +101,12 @@ class PerformanceMonitor:
             # Good run: slightly more aggressive
             return {"kelly_multiplier": 1.2, "min_ev": settings.min_ev_good_run, "active": False}
 
-        # Normal
+        # Normal: use dynamic Brier-based EV threshold when sport is known
+        if sport:
+            from src.core.risk_guards import get_dynamic_min_ev
+            dynamic_ev = get_dynamic_min_ev(sport)
+            return {"kelly_multiplier": 1.0, "min_ev": dynamic_ev, "active": False}
+
         return {"kelly_multiplier": 1.0, "min_ev": settings.min_ev_default, "active": False}
 
     def _check_losing_streak(self, threshold: int = 7) -> bool:
