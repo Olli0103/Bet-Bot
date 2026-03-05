@@ -3,6 +3,9 @@ from __future__ import annotations
 import logging
 from typing import Dict, List
 
+import numpy as np
+from scipy.stats import multivariate_normal, norm
+
 from src.core.betting_math import (
     combo_odds,
     combo_probability,
@@ -10,7 +13,7 @@ from src.core.betting_math import (
     kelly_fraction,
     kelly_stake,
 )
-from src.core.risk_guards import apply_stake_cap, check_data_source_health, explain_signal, passes_confidence_gate
+from src.core.risk_guards import apply_stake_cap, check_data_source_health, explain_signal, get_dynamic_kelly_frac, passes_confidence_gate
 from src.core.settings import settings
 from src.models.betting import BetSignal, ComboBet, ComboLeg
 
@@ -40,8 +43,10 @@ class BettingEngine:
         sharp_odds: float = 0.0,
         vig: float = 0.0,
     ) -> BetSignal:
+        # Dynamic Kelly: shrink fraction based on model confidence (Brier score)
+        effective_kelly_frac = get_dynamic_kelly_frac(sport, base_frac=kelly_frac)
         ev = expected_value(model_probability, bookmaker_odds, tax_rate=tax_rate)
-        kf_raw = kelly_fraction(model_probability, bookmaker_odds, frac=kelly_frac, tax_rate=tax_rate)
+        kf_raw = kelly_fraction(model_probability, bookmaker_odds, frac=effective_kelly_frac, tax_rate=tax_rate)
         stake_raw = round(kelly_stake(self.bankroll, kf_raw), 2)
 
         # --- Data source health gate ---
@@ -136,19 +141,24 @@ class BettingEngine:
         )
 
     @staticmethod
-    def _compute_correlation_penalty(combo_legs: List[ComboLeg]) -> float:
-        """Compute directional correlation multiplier for combo legs.
+    def _build_correlation_matrix(combo_legs: List[ComboLeg]) -> np.ndarray:
+        """Build a pairwise correlation matrix from the CorrelationEngine.
 
-        Uses the CorrelationEngine for directional SGP handling:
-        - Positively correlated pairs (e.g., Fav Win + Over 2.5) get a
-          multiplier > 1.0, *boosting* the joint probability.
-        - Negatively correlated pairs (e.g., Fav Win + Under 0.5) get a
-          multiplier < 1.0, *penalizing* the joint probability.
-        - Cross-event pairs use league/sport correlation penalties.
+        Converts the pairwise multipliers from CorrelationEngine into
+        Pearson correlation coefficients for use in the Gaussian copula.
 
-        Returns a multiplier in [0.50, 2.50].
+        Multiplier → correlation mapping (empirical):
+          multiplier 1.0  → rho 0.0  (independent)
+          multiplier 1.15 → rho +0.25 (positive correlation)
+          multiplier 0.70 → rho -0.40 (negative correlation)
+          multiplier 0.92 → rho -0.10 (mild negative)
+
+        Linear transform: rho ≈ clamp((mult - 1.0) * 1.5, -0.60, +0.60)
         """
         from src.core.correlation import CorrelationEngine
+
+        n = len(combo_legs)
+        corr = np.eye(n)
 
         legs_as_dicts = [
             {
@@ -164,7 +174,54 @@ class BettingEngine:
             }
             for leg in combo_legs
         ]
-        return CorrelationEngine.compute_combo_correlation(legs_as_dicts)
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                mult = CorrelationEngine._pair_penalty(legs_as_dicts[i], legs_as_dicts[j])
+                # Convert multiplier to correlation coefficient
+                rho = max(-0.60, min(0.60, (mult - 1.0) * 1.5))
+                corr[i, j] = rho
+                corr[j, i] = rho
+
+        return corr
+
+    @staticmethod
+    def _compute_joint_probability_copula(
+        combo_legs: List[ComboLeg],
+        correlation_matrix: np.ndarray,
+    ) -> float:
+        """Compute joint probability using a Gaussian copula.
+
+        Maps each leg's marginal probability through the inverse normal
+        CDF (quantile function) to get the copula space, then computes
+        the joint CDF of the multivariate normal distribution.
+
+        This properly handles correlated outcomes without breaking
+        probability bounds — unlike the linear scalar multiplication
+        which can produce p > 1.0.
+        """
+        n = len(combo_legs)
+        if n == 1:
+            return combo_legs[0].probability
+
+        # Map marginal probabilities to normal quantiles
+        quantiles = []
+        for leg in combo_legs:
+            p = max(1e-5, min(1.0 - 1e-5, leg.probability))
+            quantiles.append(norm.ppf(p))
+
+        try:
+            joint_prob = multivariate_normal.cdf(
+                quantiles,
+                mean=np.zeros(n),
+                cov=correlation_matrix,
+            )
+            result = float(max(1e-6, min(1.0 - 1e-6, joint_prob)))
+        except Exception as exc:
+            log.warning("Gaussian copula failed (%s), falling back to independent", exc)
+            result = float(np.prod([leg.probability for leg in combo_legs]))
+
+        return result
 
     def build_combo(
         self,
@@ -189,20 +246,26 @@ class BettingEngine:
         ]
 
         odds = combo_odds(l.odds for l in combo_legs)
-        p_independent = combo_probability(l.probability for l in combo_legs)
-        # Use event-aware correlation instead of flat penalty
-        effective_penalty = self._compute_correlation_penalty(combo_legs)
-        p_adjusted = p_independent * effective_penalty
+        # Gaussian copula: proper joint probability that respects [0, 1] bounds
+        corr_matrix = self._build_correlation_matrix(combo_legs)
+        p_copula = self._compute_joint_probability_copula(combo_legs, corr_matrix)
 
-        ev = expected_value(p_adjusted, odds, tax_rate=tax_rate)
-        kf = kelly_fraction(p_adjusted, odds, frac=kelly_frac, tax_rate=tax_rate)
+        # Dynamic Kelly for combos: use first leg's sport for model lookup
+        combo_sport = combo_legs[0].sport if combo_legs else ""
+        effective_kelly_frac = get_dynamic_kelly_frac(combo_sport, base_frac=kelly_frac)
+        ev = expected_value(p_copula, odds, tax_rate=tax_rate)
+        kf = kelly_fraction(p_copula, odds, frac=effective_kelly_frac, tax_rate=tax_rate)
         stake = round(kelly_stake(self.bankroll, kf), 2)
+
+        # For backward compatibility, store the ratio vs independent as "correlation_penalty"
+        p_independent = combo_probability(l.probability for l in combo_legs)
+        effective_penalty = p_copula / max(1e-9, p_independent)
 
         return ComboBet(
             legs=combo_legs,
             combined_odds=odds,
-            combined_probability=p_adjusted,
-            correlation_penalty=effective_penalty,
+            combined_probability=p_copula,
+            correlation_penalty=round(effective_penalty, 4),
             expected_value=ev,
             kelly_fraction=kf,
             recommended_stake=stake,

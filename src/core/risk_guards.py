@@ -229,6 +229,52 @@ def get_dynamic_min_ev(sport: str, market: str = "h2h") -> float:
     return dynamic_ev
 
 
+def get_dynamic_kelly_frac(sport: str, base_frac: float = 0.20) -> float:
+    """Return a Brier-score-dependent Kelly fraction for the given sport.
+
+    Better-calibrated models deserve higher Kelly sizing; uncertain
+    models should be shrunk aggressively.
+
+    Mapping:
+        Brier < 0.18:  full base_frac (model is well-calibrated)
+        Brier 0.18-0.22: 75% of base_frac
+        Brier >= 0.22: 40% of base_frac
+        No model:      50% of base_frac (maximum caution)
+    """
+    from src.core.ml_trainer import load_model
+
+    s = sport.lower()
+    if s.startswith(("soccer", "football")):
+        group = "soccer"
+    elif s.startswith("basketball"):
+        group = "basketball"
+    elif s.startswith("tennis"):
+        group = "tennis"
+    elif s.startswith("icehockey"):
+        group = "icehockey"
+    elif s.startswith("americanfootball"):
+        group = "americanfootball"
+    else:
+        group = "general"
+
+    model_data = load_model(group)
+    if model_data is None:
+        model_data = load_model("general")
+    if model_data is None:
+        return base_frac * 0.50
+
+    brier = model_data.get("metrics", {}).get("brier_score")
+    if brier is None or brier <= 0:
+        return base_frac * 0.50
+
+    if brier < 0.18:
+        return base_frac
+    elif brier < 0.22:
+        return base_frac * 0.75
+    else:
+        return base_frac * 0.40
+
+
 # ---------------------------------------------------------------------------
 # Data source health gate
 # ---------------------------------------------------------------------------
