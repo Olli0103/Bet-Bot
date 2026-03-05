@@ -30,7 +30,6 @@ from src.agents.tip_publisher import (
 from src.core.performance_monitor import PerformanceMonitor
 from src.core.settings import settings
 from src.data.redis_cache import cache
-from src.integrations.odds_fetcher import OddsFetcher
 from src.core.execution_jitter import apply_execution_jitter
 from src.integrations.session_manager import ensure_session_fresh
 
@@ -421,17 +420,21 @@ class AgentOrchestrator:
             pass
 
     async def _get_current_odds(self, event_id: str, selection: str) -> float:
-        """Fetch the latest odds for a selection from the odds API.
+        """Cache-first odds lookup — preserves API quota.
 
-        Used by the tip publisher to refresh odds before validation.
+        Reads Redis first (populated by background fetch_scheduler).
+        Only spends 1 targeted API call if the cache is stale (>30 s).
         """
         try:
-            fetcher = OddsFetcher()
-            odds_data = await fetcher.get_event_odds(event_id)
-            if odds_data and selection in odds_data:
-                return float(odds_data[selection])
+            from src.agents.validator_node import get_validated_odds
+
+            odds, used_api = await get_validated_odds(event_id, selection)
+            if used_api:
+                log.info("_get_current_odds spent 1 API call for %s/%s", event_id, selection)
+            if odds is not None:
+                return odds
         except Exception as exc:
-            log.warning("Failed to fetch current odds for %s: %s", event_id, exc)
+            log.warning("Cache-first lookup failed for %s: %s", event_id, exc)
         return 0.0
 
     async def _publish_tip(self, state: TipState) -> None:
@@ -465,28 +468,43 @@ class AgentOrchestrator:
         # Build interactive DSS inline keyboard
         try:
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-            keyboard = InlineKeyboardMarkup([
-                [
+
+            rows = []
+
+            # Row 0: Tipico deep link (url= button opens the app directly)
+            if alert.tipico_deeplink:
+                rows.append([
                     InlineKeyboardButton(
-                        f"\u2705 Platziert @ {state.current_odds:.2f}",
-                        callback_data=f"dss_placed:{tip_id}",
+                        f"\U0001f4f1 Tipico \u00f6ffnen (Ziel: {state.current_odds:.2f})",
+                        url=alert.tipico_deeplink,
                     ),
-                    InlineKeyboardButton(
-                        "\u274c Abgelehnt",
-                        callback_data=f"dss_rejected:{tip_id}",
-                    ),
-                ],
-                [
-                    InlineKeyboardButton(
-                        "\U0001f4ca Mathe zeigen",
-                        callback_data=f"dss_math:{tip_id}",
-                    ),
-                    InlineKeyboardButton(
-                        "\U0001f50d Deep Dive",
-                        callback_data=f"agent_analyze:{tip_id}",
-                    ),
-                ],
+                ])
+
+            # Row 1: Audit trail — operator confirms or rejects
+            rows.append([
+                InlineKeyboardButton(
+                    f"\u2705 Platziert @ {state.current_odds:.2f}",
+                    callback_data=f"dss_placed:{tip_id}",
+                ),
+                InlineKeyboardButton(
+                    "\u274c Abgelehnt",
+                    callback_data=f"dss_rejected:{tip_id}",
+                ),
             ])
+
+            # Row 2: XAI — math transparency and deep dive
+            rows.append([
+                InlineKeyboardButton(
+                    "\U0001f4ca Mathe zeigen",
+                    callback_data=f"dss_math:{tip_id}",
+                ),
+                InlineKeyboardButton(
+                    "\U0001f50d Deep Dive",
+                    callback_data=f"agent_analyze:{tip_id}",
+                ),
+            ])
+
+            keyboard = InlineKeyboardMarkup(rows)
             await self.bot.send_message(
                 chat_id=self.chat_id,
                 text=text,

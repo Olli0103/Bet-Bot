@@ -1052,21 +1052,53 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         try:
+            from src.agents.validator_node import validate_before_placement
             from src.models.compliance import HumanReviewData, StatefulTip
+
             stateful = StatefulTip.model_validate(tip_data)
+            rec = stateful.ai_recommendation
             user_id = str(q.from_user.id) if q.from_user else "unknown"
+
+            # Re-validate odds at confirmation time (cache-first, ≤1 API call)
+            check = await validate_before_placement(
+                tip_id=tip_id,
+                event_id=rec.event_id,
+                selection=rec.recommended_selection,
+                target_odds=rec.target_odds,
+                model_probability=rec.model_probability,
+            )
+
+            if not check["valid"]:
+                # Math veto — odds drifted during human review
+                review = HumanReviewData(
+                    operator_id=user_id,
+                    confirmed_odds=check["live_odds"],
+                    confirmed_stake=0.0,
+                    action="rejected",
+                    reason_for_override=f"Auto-rejected: {check['reason']}",
+                )
+                stateful.finalize(review)
+                cache.set_json(f"dss_tip:{tip_id}", stateful.model_dump(), ttl_seconds=12 * 3600)
+                await q.edit_message_text(
+                    f"⚠️ Tipp automatisch abgelehnt — Odds Slippage\n"
+                    f"{check['reason']}\n"
+                    f"Audit-ID: {tip_id}"
+                )
+                return
+
+            live_odds = check["live_odds"]
             review = HumanReviewData(
                 operator_id=user_id,
-                confirmed_odds=stateful.ai_recommendation.target_odds,
-                confirmed_stake=stateful.ai_recommendation.recommended_stake,
+                confirmed_odds=live_odds,
+                confirmed_stake=rec.recommended_stake,
                 action="placed",
             )
-            stateful.finalize(review)
+            stateful.finalize(review, live_odds=live_odds)
             cache.set_json(f"dss_tip:{tip_id}", stateful.model_dump(), ttl_seconds=12 * 3600)
 
             await q.edit_message_text(
-                f"✅ Platziert bestätigt @ {review.confirmed_odds:.2f}\n"
-                f"Stake: {review.confirmed_stake:.2f} EUR\n"
+                f"✅ Platziert bestätigt @ {live_odds:.2f}\n"
+                f"Stake: {rec.recommended_stake:.2f} EUR\n"
                 f"Operator: {user_id}\n"
                 f"Audit-ID: {tip_id}"
             )

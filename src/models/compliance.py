@@ -183,8 +183,8 @@ class TipAlert(BaseModel):
         lines.append(f"{'━' * 24}")
         lines.append(f"\U0001f4a1 {self.ai_reasoning}")
 
-        if self.tipico_deeplink:
-            lines.append(f"\n\U0001f517 Tipico: {self.tipico_deeplink}")
+        # Tipico deep link is rendered as an InlineKeyboardButton (url=)
+        # in the DSS keyboard, so we omit the raw URL from the message body.
 
         return "\n".join(lines)
 
