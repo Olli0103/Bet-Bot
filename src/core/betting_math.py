@@ -7,6 +7,12 @@ import numpy as np
 from scipy.optimize import root_scalar
 
 
+DEFAULT_GERMAN_TAX_RATE = 0.05
+"""German Wettsteuer: 5% levied on gross payout (stake * odds) by regulated
+bookmakers like Tipico.  This is the standard rate under the German Interstate
+Treaty on Gambling (GlüStV 2021)."""
+
+
 def implied_probability(decimal_odds: float) -> float:
     return 1.0 / decimal_odds
 
@@ -36,6 +42,15 @@ def effective_tax_rate(
     return base_tax
 
 
+def get_net_payout(decimal_odds: float, tax_rate: float = DEFAULT_GERMAN_TAX_RATE) -> float:
+    """Net payout per 1 unit stake after German gross-payout tax.
+
+    The Wettsteuer is levied on (stake * odds), not on profit.
+    Example: odds 2.0, tax 5% → payout = 2.0 * 0.95 = 1.90.
+    """
+    return decimal_odds * (1.0 - tax_rate)
+
+
 def expected_value(
     model_probability: float,
     decimal_odds: float,
@@ -50,6 +65,67 @@ def expected_value(
     net_odds = decimal_odds * (1.0 - tax_rate)
     net_profit = net_odds - 1.0
     return model_probability * net_profit - (1.0 - model_probability)
+
+
+def tax_adjusted_expected_value(
+    model_probability: float,
+    decimal_odds: float,
+    tax_rate: float = DEFAULT_GERMAN_TAX_RATE,
+) -> float:
+    """EV calculation with German gross tax applied by default.
+
+    Unlike ``expected_value`` which defaults to tax_rate=0.0 (requiring
+    callers to remember the tax), this function defaults to the standard
+    5% Wettsteuer.  Use this for Tippprovider-facing calculations where
+    the tip accuracy must reflect what the end-user actually receives.
+    """
+    net_payout = get_net_payout(decimal_odds, tax_rate)
+    return model_probability * (net_payout - 1.0) - (1.0 - model_probability)
+
+
+def tax_adjusted_kelly_growth(
+    model_probability: float,
+    decimal_odds: float,
+    fraction: float,
+    tax_rate: float = DEFAULT_GERMAN_TAX_RATE,
+) -> float:
+    """Expected log-growth rate with German tax integrated into the utility.
+
+    Standard Kelly maximises E[log(1 + f * net_profit)] which assumes
+    zero transaction costs.  For German-regulated markets the 5% gross
+    tax changes the payoff structure:
+
+        G(f) = p * log(1 + f * (odds*(1-t) - 1)) + (1-p) * log(1 - f)
+
+    This function returns G(f) so the caller can optimise *f* with the
+    tax baked in, rather than applying tax as a post-hoc haircut.
+
+    Parameters
+    ----------
+    model_probability : float
+        Estimated true win probability.
+    decimal_odds : float
+        Bookmaker decimal odds (pre-tax).
+    fraction : float
+        Kelly fraction of bankroll to wager.
+    tax_rate : float
+        Gross-payout tax rate (default 5% German Wettsteuer).
+
+    Returns
+    -------
+    float
+        Expected log-growth rate.  Negative means the bet shrinks the
+        bankroll in expectation.
+    """
+    if fraction <= 0.0 or fraction >= 1.0:
+        return 0.0
+    net_profit = get_net_payout(decimal_odds, tax_rate) - 1.0
+    if net_profit <= 0.0:
+        return -math.inf
+    p = model_probability
+    win_term = p * math.log(1.0 + fraction * net_profit)
+    lose_term = (1.0 - p) * math.log(1.0 - fraction)
+    return win_term + lose_term
 
 
 def kelly_fraction(

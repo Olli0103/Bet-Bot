@@ -25,6 +25,11 @@ from sklearn.model_selection import TimeSeriesSplit
 from sqlalchemy import select
 from xgboost import XGBClassifier, XGBRegressor
 
+from src.core.feature_engineering import (
+    LEAGUE_PRIORS,
+    PRIOR_WEIGHTS,
+    calculate_smoothed_feature,
+)
 from src.data.models import EventClosingLine, PlacedBet
 from src.data.postgres import SessionLocal
 
@@ -429,6 +434,39 @@ def _clean_frame(df: pd.DataFrame, feature_list: List[str]) -> pd.DataFrame:
         out["goals_scored_avg"] = out["goals_scored_avg"].clip(0.0, 5.0)
     if "goals_conceded_avg" in out.columns:
         out["goals_conceded_avg"] = out["goals_conceded_avg"].clip(0.0, 5.0)
+
+    # --- Bayesian Smoothing (Stein's Paradox) for small-sample features ---
+    # Raw early-season stats (e.g. 1 win in 1 game = 100% win rate) inject
+    # noise into training that the model memorises as spurious signal.
+    # Regressing toward the league mean stabilises both training and tips.
+    # This mirrors the smoothing applied at inference time in
+    # FeatureEngineer.build_core_features so training ↔ inference are aligned.
+    _SMOOTHABLE_FEATURES: Dict[str, Tuple[str, str]] = {
+        # feature_col: (league_prior_key, prior_weight_key)
+        "form_winrate_l5": ("form_winrate", "form_winrate"),
+        "team_attack_strength": ("attack_strength", "attack_strength"),
+        "team_defense_strength": ("defense_strength", "defense_strength"),
+        "opp_attack_strength": ("attack_strength", "attack_strength"),
+        "opp_defense_strength": ("defense_strength", "defense_strength"),
+        "over25_rate": ("over25_rate", "over25_rate"),
+        "btts_rate": ("btts_rate", "btts_rate"),
+        "goals_scored_avg": ("goals_scored_avg", "goals_avg"),
+        "goals_conceded_avg": ("goals_conceded_avg", "goals_avg"),
+    }
+    if "form_games_l5" in out.columns:
+        n_games = out["form_games_l5"].fillna(0).clip(lower=0).astype(int)
+        for feat_col, (prior_key, weight_key) in _SMOOTHABLE_FEATURES.items():
+            if feat_col not in out.columns or feat_col not in feature_list:
+                continue
+            prior_val = LEAGUE_PRIORS.get(prior_key, 0.5)
+            prior_w = PRIOR_WEIGHTS.get(weight_key, 10)
+            raw_vals = out[feat_col]
+            # Vectorised smoothing: (raw * n + prior * weight) / (n + weight)
+            numerator = raw_vals * n_games + prior_val * prior_w
+            denominator = n_games + prior_w
+            out[feat_col] = (numerator / denominator).round(4)
+        log.debug("Bayesian smoothing applied to %d features in training data",
+                  len(_SMOOTHABLE_FEATURES))
 
     # Conditional defaults: no games played → fully rested (start of season)
     if "rest_fatigue_score" in out.columns and "form_games_l5" in out.columns:
