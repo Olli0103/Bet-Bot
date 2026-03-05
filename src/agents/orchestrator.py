@@ -26,10 +26,20 @@ log = logging.getLogger(__name__)
 ORCHESTRATOR_STATE_KEY = "orchestrator:state"
 KICKOFF_TIMES_KEY = "orchestrator:kickoff_times"
 
-# Adaptive polling thresholds
-PRE_KICKOFF_WINDOW = timedelta(hours=1)  # start fast-polling 1h before kickoff
-FAST_INTERVAL_SECONDS = 5                # 5s during steam-move window (was 60s)
-NORMAL_INTERVAL_SECONDS = 60             # 60s during normal periods (was 300s)
+# Adaptive polling thresholds (Sniper Scheduler)
+# Time-to-kickoff → polling interval mapping:
+#   > 6h:   3600s (1 hour)   — markets barely move, conserve API quota
+#   1-6h:     60s (1 minute) — lines firming, watch for sharp moves
+#   15min-1h: 15s            — lineup drops, steam moves starting
+#   < 15min:  10s            — maximum fire, Tipico lags Pinnacle by 10-15s
+PRE_KICKOFF_WINDOW = timedelta(hours=6)  # earliest window to track
+SNIPER_WINDOW = timedelta(minutes=15)    # maximum fire mode
+FAST_WINDOW = timedelta(hours=1)         # fast polling mode
+
+SNIPER_INTERVAL_SECONDS = 10             # < 15 min before kickoff
+FAST_INTERVAL_SECONDS = 15               # 15 min - 1h before kickoff
+NORMAL_INTERVAL_SECONDS = 60             # 1-6h before kickoff
+IDLE_INTERVAL_SECONDS = 3600             # > 6h or no events tracked
 
 
 class AgentOrchestrator:
@@ -82,21 +92,24 @@ class AgentOrchestrator:
         if not all_alerts:
             return summary
 
-        # Deduplicate: keep only the strongest alert per event_id.
-        # Without this, the Scout can emit contradictory 1X2 picks for the
-        # same match (e.g. Home win + Away win + Draw), all as separate alerts.
-        # We pick the one with the largest odds movement per event.
+        # Deduplicate: keep only the strongest alert per (event_id, market).
+        # Using event_id alone would discard independent market signals — e.g.
+        # a H2H steam move and a Totals edge on the same match are uncorrelated
+        # and must both be evaluated.  Within the same market, we pick the
+        # alert with the largest odds movement.
         deduped: Dict[str, Dict[str, Any]] = {}
         for alert in all_alerts:
             eid = alert.get("event_id", "")
             if not eid:
                 continue
+            market = alert.get("market", "h2h")
+            dedup_key = f"{eid}:{market}"
             movement = float(alert.get("movement_pct", 0))
-            existing = deduped.get(eid)
+            existing = deduped.get(dedup_key)
             if existing is None or movement > float(existing.get("movement_pct", 0)):
-                deduped[eid] = alert
+                deduped[dedup_key] = alert
         all_alerts = list(deduped.values())
-        log.info("Deduped alerts: %d events (from %d raw alerts)", len(all_alerts), summary["scout_alerts"])
+        log.info("Deduped alerts: %d event:market pairs (from %d raw alerts)", len(all_alerts), summary["scout_alerts"])
 
         # 2. Analyst: deep analysis for each alert
         odds_fetcher = OddsFetcher()
@@ -156,29 +169,48 @@ class AgentOrchestrator:
         cache.set_json(ORCHESTRATOR_STATE_KEY, summary, ttl_seconds=6 * 3600)
         return summary
 
-    def _has_imminent_kickoffs(self) -> bool:
-        """Check if any tracked event kicks off within PRE_KICKOFF_WINDOW.
+    def _nearest_kickoff_delta(self) -> Optional[timedelta]:
+        """Return time until the nearest future kickoff, or None if no events.
 
         Uses cached kickoff times from the Scout's last odds poll to
         avoid an extra API call.
         """
         cached_times = cache.get_json(KICKOFF_TIMES_KEY) or []
         now = datetime.now(timezone.utc)
-        cutoff = now + PRE_KICKOFF_WINDOW
+        nearest: Optional[timedelta] = None
         for ts_str in cached_times:
             try:
                 ct = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
-                if now < ct <= cutoff:
-                    return True
+                if ct > now:
+                    delta = ct - now
+                    if nearest is None or delta < nearest:
+                        nearest = delta
             except (ValueError, TypeError):
                 continue
-        return False
+        return nearest
 
     def _get_adaptive_interval(self) -> int:
-        """Return the polling interval in seconds based on kickoff proximity."""
-        if self._has_imminent_kickoffs():
+        """Sniper Scheduler: return polling interval based on time-to-kickoff.
+
+        Granular schedule (conserves 95%+ of API quota while being HFT-ready):
+            > 6h before kickoff:      3600s  (idle — markets barely move)
+            1h - 6h before kickoff:     60s  (lines firming)
+            15min - 1h before kickoff:  15s  (lineup drops, steam moves)
+            < 15min before kickoff:     10s  (maximum fire — inside Tipico lag window)
+            No events tracked:        3600s  (idle)
+        """
+        delta = self._nearest_kickoff_delta()
+        if delta is None:
+            return IDLE_INTERVAL_SECONDS
+
+        if delta <= SNIPER_WINDOW:
+            return SNIPER_INTERVAL_SECONDS
+        elif delta <= FAST_WINDOW:
             return FAST_INTERVAL_SECONDS
-        return NORMAL_INTERVAL_SECONDS
+        elif delta <= PRE_KICKOFF_WINDOW:
+            return NORMAL_INTERVAL_SECONDS
+        else:
+            return IDLE_INTERVAL_SECONDS
 
     async def _process_single_alert(self, alert: Dict[str, Any]) -> Dict[str, Any]:
         """Process a single alert through the Analyst -> Executioner pipeline.
@@ -256,8 +288,9 @@ class AgentOrchestrator:
         self._running = True
         log.info(
             "Agent orchestrator starting in EVENT-DRIVEN mode "
-            "(fast=%ds, normal=%ds, queue-based execution)",
-            FAST_INTERVAL_SECONDS, NORMAL_INTERVAL_SECONDS,
+            "(sniper=%ds, fast=%ds, normal=%ds, idle=%ds, queue-based execution)",
+            SNIPER_INTERVAL_SECONDS, FAST_INTERVAL_SECONDS,
+            NORMAL_INTERVAL_SECONDS, IDLE_INTERVAL_SECONDS,
         )
 
         # Start the consumer worker
@@ -270,16 +303,18 @@ class AgentOrchestrator:
                 injury_alerts = await self.scout.monitor_injuries()
                 all_alerts = odds_alerts + injury_alerts
 
-                # Deduplicate: keep only the strongest alert per event_id
+                # Deduplicate: keep only the strongest alert per (event_id, market)
                 deduped: Dict[str, Dict[str, Any]] = {}
                 for alert in all_alerts:
                     eid = alert.get("event_id", "")
                     if not eid:
                         continue
+                    market = alert.get("market", "h2h")
+                    dedup_key = f"{eid}:{market}"
                     movement = float(alert.get("movement_pct", 0))
-                    existing = deduped.get(eid)
+                    existing = deduped.get(dedup_key)
                     if existing is None or movement > float(existing.get("movement_pct", 0)):
-                        deduped[eid] = alert
+                        deduped[dedup_key] = alert
 
                 # Push to execution queue (non-blocking)
                 for alert in deduped.values():

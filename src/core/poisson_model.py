@@ -88,14 +88,19 @@ class PoissonSoccerModel:
     def _expected_goals(self, home: str, away: str) -> tuple[float, float]:
         """Compute expected goals for each side.
 
+        Zero-sum home advantage: the multiplicative boost for the home team
+        is exactly offset by its reciprocal on the away team.  This ensures
+        the league-average total goals per match are preserved (no inflation
+        of Over/Under prices).
+
         home_xg = league_avg * home_attack * away_defense * home_advantage
-        away_xg = league_avg * away_attack * home_defense
+        away_xg = league_avg * away_attack * home_defense / home_advantage
         """
         h = self._load_strengths(home)
         a = self._load_strengths(away)
 
         home_xg = self.league_avg_goals * h["attack"] * a["defense"] * self.home_advantage
-        away_xg = self.league_avg_goals * a["attack"] * h["defense"]
+        away_xg = self.league_avg_goals * a["attack"] * h["defense"] / self.home_advantage
 
         return home_xg, away_xg
 

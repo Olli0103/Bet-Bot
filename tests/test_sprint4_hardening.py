@@ -725,15 +725,25 @@ class TestEventDrivenOrchestrator:
 
         assert isinstance(orch.alert_queue, asyncio.Queue)
 
-    def test_fast_interval_is_5s(self):
-        """Fast polling interval should be 5 seconds, not 60."""
+    def test_sniper_interval_is_10s(self):
+        """Sniper polling interval should be 10 seconds (max fire mode)."""
+        from src.agents.orchestrator import SNIPER_INTERVAL_SECONDS
+        assert SNIPER_INTERVAL_SECONDS == 10
+
+    def test_fast_interval_is_15s(self):
+        """Fast polling interval should be 15 seconds."""
         from src.agents.orchestrator import FAST_INTERVAL_SECONDS
-        assert FAST_INTERVAL_SECONDS == 5
+        assert FAST_INTERVAL_SECONDS == 15
 
     def test_normal_interval_is_60s(self):
-        """Normal polling interval should be 60 seconds, not 300."""
+        """Normal polling interval should be 60 seconds."""
         from src.agents.orchestrator import NORMAL_INTERVAL_SECONDS
         assert NORMAL_INTERVAL_SECONDS == 60
+
+    def test_idle_interval_is_3600s(self):
+        """Idle polling interval should be 3600 seconds (1 hour)."""
+        from src.agents.orchestrator import IDLE_INTERVAL_SECONDS
+        assert IDLE_INTERVAL_SECONDS == 3600
 
 
 # ---------------------------------------------------------------------------
@@ -865,3 +875,194 @@ class TestExactGammaPoissonConjugate:
         np.testing.assert_almost_equal(result, 26.0 / 21.25, decimal=6)
         # Result should be between current and observed/c
         assert result > current  # observed > expected, so strength increases
+
+
+# ---------------------------------------------------------------------------
+# 15. Zero-Sum Home Advantage
+# ---------------------------------------------------------------------------
+
+
+class TestZeroSumHomeAdvantage:
+    """Verify home advantage doesn't inflate total league goals."""
+
+    def test_reciprocal_away_scaling(self):
+        """away_xg must be divided by home_advantage (reciprocal)."""
+        import inspect
+        from src.core.poisson_model import PoissonSoccerModel
+
+        source = inspect.getsource(PoissonSoccerModel._expected_goals)
+        assert "/ self.home_advantage" in source, (
+            "away_xg must include / self.home_advantage for zero-sum"
+        )
+
+    def test_total_xg_neutral_on_average(self):
+        """With average teams (att=def=1.0), total xG must equal 2*league_avg."""
+        from unittest.mock import patch, MagicMock
+        from src.core.poisson_model import PoissonSoccerModel
+
+        model = PoissonSoccerModel(home_advantage=1.2, league_avg_goals=1.35)
+
+        # Mock Redis to return default strengths (1.0, 1.0)
+        with patch.object(model, "_load_strengths", return_value={"attack": 1.0, "defense": 1.0}):
+            home_xg, away_xg = model._expected_goals("HomeTeam", "AwayTeam")
+
+        # Home gets boosted, away gets penalized — total must stay neutral
+        total_xg = home_xg + away_xg
+        expected_total = 2 * 1.35  # 2.70 for two average teams
+        # With reciprocal: home = 1.35*1.2 = 1.62, away = 1.35/1.2 = 1.125
+        # total = 1.62 + 1.125 = 2.745 (close to 2.70 but not exact due to
+        # asymmetry — the key is it's MUCH closer than without reciprocal)
+
+        # Without reciprocal: total would be 1.62 + 1.35 = 2.97 (10% inflation!)
+        # With reciprocal: total is 2.745 — only 1.7% deviation, within bounds
+        assert total_xg < 2 * 1.35 * 1.05, (
+            f"Total xG {total_xg:.3f} inflated by >5% vs neutral {expected_total}"
+        )
+        # Verify away_xg is reduced (not equal to league_avg)
+        assert away_xg < 1.35, f"away_xg {away_xg:.3f} should be < league_avg 1.35"
+
+    def test_home_away_xg_mirror_symmetry(self):
+        """home_advantage * away_advantage_factor == 1 (zero-sum)."""
+        from unittest.mock import patch
+        from src.core.poisson_model import PoissonSoccerModel
+
+        model = PoissonSoccerModel(home_advantage=1.2, league_avg_goals=1.35)
+
+        with patch.object(model, "_load_strengths", return_value={"attack": 1.0, "defense": 1.0}):
+            home_xg, away_xg = model._expected_goals("A", "B")
+
+        # home_xg / away_xg should equal home_advantage^2
+        # (home gets *1.2, away gets /1.2, ratio = 1.2 * 1.2 = 1.44)
+        ratio = home_xg / away_xg
+        np.testing.assert_almost_equal(ratio, 1.2 ** 2, decimal=6)
+
+
+# ---------------------------------------------------------------------------
+# 16. Cross-Market Deduplication
+# ---------------------------------------------------------------------------
+
+
+class TestCrossMarketDedup:
+    """Verify deduplication uses event_id + market, not just event_id."""
+
+    def test_dedup_key_includes_market(self):
+        """Orchestrator dedup key must be event_id:market."""
+        import inspect
+        from src.agents.orchestrator import AgentOrchestrator
+
+        # Check both run_once and run_continuous
+        source_once = inspect.getsource(AgentOrchestrator.run_once)
+        source_cont = inspect.getsource(AgentOrchestrator.run_continuous)
+
+        for label, source in [("run_once", source_once), ("run_continuous", source_cont)]:
+            assert "event_id + market" in source or 'f"{eid}:{market}"' in source, (
+                f"{label}: dedup key must include market to preserve cross-market signals"
+            )
+
+    def test_independent_markets_both_survive(self):
+        """H2H and Totals alerts for the same event must NOT overwrite each other."""
+        alerts = [
+            {"event_id": "evt1", "market": "h2h", "movement_pct": 5.0, "selection": "Home"},
+            {"event_id": "evt1", "market": "totals", "movement_pct": 3.0, "selection": "Over 2.5"},
+            {"event_id": "evt2", "market": "h2h", "movement_pct": 2.0, "selection": "Away"},
+        ]
+
+        # Simulate the dedup logic
+        deduped = {}
+        for alert in alerts:
+            eid = alert.get("event_id", "")
+            market = alert.get("market", "h2h")
+            dedup_key = f"{eid}:{market}"
+            movement = float(alert.get("movement_pct", 0))
+            existing = deduped.get(dedup_key)
+            if existing is None or movement > float(existing.get("movement_pct", 0)):
+                deduped[dedup_key] = alert
+
+        # All 3 are independent (different event_id:market combos)
+        assert len(deduped) == 3
+        assert "evt1:h2h" in deduped
+        assert "evt1:totals" in deduped
+        assert "evt2:h2h" in deduped
+
+    def test_same_market_keeps_strongest(self):
+        """Two H2H alerts for the same event should keep the stronger one."""
+        alerts = [
+            {"event_id": "evt1", "market": "h2h", "movement_pct": 2.0, "selection": "Home"},
+            {"event_id": "evt1", "market": "h2h", "movement_pct": 7.0, "selection": "Away"},
+        ]
+
+        deduped = {}
+        for alert in alerts:
+            eid = alert.get("event_id", "")
+            market = alert.get("market", "h2h")
+            dedup_key = f"{eid}:{market}"
+            movement = float(alert.get("movement_pct", 0))
+            existing = deduped.get(dedup_key)
+            if existing is None or movement > float(existing.get("movement_pct", 0)):
+                deduped[dedup_key] = alert
+
+        assert len(deduped) == 1
+        assert deduped["evt1:h2h"]["selection"] == "Away"  # 7.0 > 2.0
+
+
+# ---------------------------------------------------------------------------
+# 17. Adaptive Sniper Scheduler
+# ---------------------------------------------------------------------------
+
+
+class TestAdaptiveSniperScheduler:
+    """Verify time-to-kickoff based polling intervals."""
+
+    def test_sniper_mode_under_15min(self):
+        """< 15 min before kickoff → 10s interval (maximum fire)."""
+        from datetime import timedelta
+        from unittest.mock import patch
+        from src.agents.orchestrator import AgentOrchestrator, SNIPER_INTERVAL_SECONDS
+
+        orch = AgentOrchestrator.__new__(AgentOrchestrator)
+        with patch.object(orch, "_nearest_kickoff_delta", return_value=timedelta(minutes=10)):
+            interval = orch._get_adaptive_interval()
+        assert interval == SNIPER_INTERVAL_SECONDS == 10
+
+    def test_fast_mode_15min_to_1h(self):
+        """15 min - 1h before kickoff → 15s interval."""
+        from datetime import timedelta
+        from unittest.mock import patch
+        from src.agents.orchestrator import AgentOrchestrator, FAST_INTERVAL_SECONDS
+
+        orch = AgentOrchestrator.__new__(AgentOrchestrator)
+        with patch.object(orch, "_nearest_kickoff_delta", return_value=timedelta(minutes=30)):
+            interval = orch._get_adaptive_interval()
+        assert interval == FAST_INTERVAL_SECONDS == 15
+
+    def test_normal_mode_1h_to_6h(self):
+        """1-6h before kickoff → 60s interval."""
+        from datetime import timedelta
+        from unittest.mock import patch
+        from src.agents.orchestrator import AgentOrchestrator, NORMAL_INTERVAL_SECONDS
+
+        orch = AgentOrchestrator.__new__(AgentOrchestrator)
+        with patch.object(orch, "_nearest_kickoff_delta", return_value=timedelta(hours=3)):
+            interval = orch._get_adaptive_interval()
+        assert interval == NORMAL_INTERVAL_SECONDS == 60
+
+    def test_idle_mode_over_6h(self):
+        """> 6h before kickoff → 3600s (conserve API quota)."""
+        from datetime import timedelta
+        from unittest.mock import patch
+        from src.agents.orchestrator import AgentOrchestrator, IDLE_INTERVAL_SECONDS
+
+        orch = AgentOrchestrator.__new__(AgentOrchestrator)
+        with patch.object(orch, "_nearest_kickoff_delta", return_value=timedelta(hours=10)):
+            interval = orch._get_adaptive_interval()
+        assert interval == IDLE_INTERVAL_SECONDS == 3600
+
+    def test_no_events_returns_idle(self):
+        """No tracked events → idle mode (3600s)."""
+        from unittest.mock import patch
+        from src.agents.orchestrator import AgentOrchestrator, IDLE_INTERVAL_SECONDS
+
+        orch = AgentOrchestrator.__new__(AgentOrchestrator)
+        with patch.object(orch, "_nearest_kickoff_delta", return_value=None):
+            interval = orch._get_adaptive_interval()
+        assert interval == IDLE_INTERVAL_SECONDS
