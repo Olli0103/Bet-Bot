@@ -21,6 +21,7 @@ from src.core.betting_math import expected_value, implied_probability
 from src.core.calibration import (
     Calibrator,
     CalibrationManager,
+    _beta_calibration_fit,
     _compute_calibration_metrics,
     _isotonic_fit,
     _platt_scaling,
@@ -588,3 +589,96 @@ class TestBetSignalCalibrationFields:
         assert sig.model_probability_raw == 0.0
         assert sig.model_probability_calibrated == 0.0
         assert sig.calibration_source == ""
+
+
+# ---------------------------------------------------------------------------
+# 7) Beta Calibration
+# ---------------------------------------------------------------------------
+
+class TestBetaCalibration:
+    """Tests for the beta calibration method."""
+
+    def test_beta_calibration_produces_valid_outputs(self):
+        """Beta calibration should produce probabilities in [0.01, 0.99]."""
+        np.random.seed(42)
+        n = 200
+        raw_probs = np.random.uniform(0.2, 0.8, n)
+        actuals = (np.random.random(n) < raw_probs).astype(float)
+
+        cal = Calibrator(method="beta")
+        cal.fit(raw_probs, actuals)
+        assert cal.fitted
+
+        for p in [0.1, 0.3, 0.5, 0.7, 0.9]:
+            result = cal.calibrate(p)
+            assert 0.01 <= result <= 0.99, f"Beta calibration out of bounds for p={p}: {result}"
+
+    def test_beta_calibration_monotonic(self):
+        """Beta calibration should be approximately monotonic."""
+        np.random.seed(42)
+        n = 500
+        raw_probs = np.random.uniform(0.1, 0.9, n)
+        actuals = (np.random.random(n) < raw_probs).astype(float)
+
+        cal = Calibrator(method="beta")
+        cal.fit(raw_probs, actuals)
+
+        test_points = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+        calibrated = [cal.calibrate(p) for p in test_points]
+
+        # Check monotonicity (allow small tolerance for numerical issues)
+        for i in range(len(calibrated) - 1):
+            assert calibrated[i] <= calibrated[i + 1] + 0.01, (
+                f"Not monotonic: cal({test_points[i]})={calibrated[i]:.4f} > "
+                f"cal({test_points[i+1]})={calibrated[i+1]:.4f}"
+            )
+
+    def test_beta_calibration_serialization(self):
+        """Beta calibrator should survive serialization round-trip."""
+        np.random.seed(42)
+        n = 100
+        raw_probs = np.random.uniform(0.2, 0.8, n)
+        actuals = (np.random.random(n) < raw_probs).astype(float)
+
+        cal = Calibrator(method="beta")
+        cal.fit(raw_probs, actuals)
+
+        # Round-trip
+        data = cal.to_dict()
+        cal2 = Calibrator.from_dict(data)
+
+        assert cal2.method == "beta"
+        assert cal2.fitted
+        assert abs(cal.calibrate(0.5) - cal2.calibrate(0.5)) < 1e-10
+
+    def test_beta_fit_returns_three_params(self):
+        """_beta_calibration_fit should return 3 floats."""
+        np.random.seed(42)
+        n = 100
+        raw_probs = np.random.uniform(0.2, 0.8, n)
+        actuals = (np.random.random(n) < raw_probs).astype(float)
+
+        a, b, c = _beta_calibration_fit(raw_probs, actuals)
+        assert isinstance(a, float)
+        assert isinstance(b, float)
+        assert isinstance(c, float)
+
+    def test_beta_in_calibration_manager(self):
+        """CalibrationManager with method='beta' should work end-to-end."""
+        np.random.seed(42)
+        n = 400
+        raw_probs = np.random.uniform(0.2, 0.8, n)
+        actuals = (np.random.random(n) < raw_probs).astype(float)
+
+        records = [
+            {"sport": "soccer_epl", "market": "h2h",
+             "model_probability_raw": float(p), "actual_outcome": float(a)}
+            for p, a in zip(raw_probs, actuals)
+        ]
+
+        mgr = CalibrationManager(method="beta")
+        report = mgr.fit_from_history(records)
+
+        cal_prob, source = mgr.calibrate(0.6, "soccer_epl", "h2h")
+        assert 0.01 <= cal_prob <= 0.99
+        assert source in ("sport_market", "global")

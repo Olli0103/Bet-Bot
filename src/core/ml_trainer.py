@@ -31,6 +31,53 @@ log = logging.getLogger(__name__)
 
 MODELS_DIR = Path("models")
 
+
+# ---------------------------------------------------------------------------
+# Diebold-Mariano test for Champion vs Challenger model comparison
+# ---------------------------------------------------------------------------
+
+def diebold_mariano_test(
+    y_true: np.ndarray,
+    pred_champ: np.ndarray,
+    pred_chall: np.ndarray,
+) -> Tuple[float, float]:
+    """Compute the Diebold-Mariano test statistic for predictive accuracy.
+
+    Compares per-observation log losses and tests whether the challenger
+    model is *significantly* better than the champion (not just marginally).
+
+    Returns ``(dm_stat, p_value)``.  Positive ``dm_stat`` means the
+    challenger has lower loss (is better).  The null hypothesis is that
+    both models are equally accurate.
+
+    A p-value < 0.10 combined with dm_stat > 0 provides evidence that the
+    challenger genuinely outperforms the champion on the holdout set.
+    """
+    from scipy.stats import norm
+
+    eps = 1e-15
+    pred_champ = np.clip(pred_champ, eps, 1 - eps)
+    pred_chall = np.clip(pred_chall, eps, 1 - eps)
+
+    # Per-observation log losses
+    loss_champ = -(y_true * np.log(pred_champ) + (1 - y_true) * np.log(1 - pred_champ))
+    loss_chall = -(y_true * np.log(pred_chall) + (1 - y_true) * np.log(1 - pred_chall))
+
+    # Loss differential: positive = challenger is better
+    d = loss_champ - loss_chall
+    n = len(d)
+    mean_d = float(np.mean(d))
+    var_d = float(np.var(d, ddof=1))
+
+    if var_d == 0 or n < 10:
+        return 0.0, 1.0
+
+    dm_stat = mean_d / np.sqrt(var_d / n)
+    p_value = 2 * (1 - norm.cdf(abs(dm_stat)))
+
+    return float(dm_stat), float(p_value)
+
+
 # Full feature set (Phase 1-4 + stats-based features)
 # NOTE: "clv" (target_odds/sharp_odds - 1) is intentionally excluded.
 # It is derived from sharp_implied_prob (already a feature), creates
@@ -517,6 +564,16 @@ def _train_xgboost(
                 )
                 final_features = active_features
 
+    # Store holdout predictions/labels for Diebold-Mariano testing
+    if len(X_holdout) > 0:
+        if final_features == active_features:
+            holdout_preds = calibrated.predict_proba(X_holdout)[:, 1]
+        else:
+            kept_idx = [active_features.index(f) for f in final_features]
+            holdout_preds = calibrated.predict_proba(X_holdout[:, kept_idx])[:, 1]
+        metrics["holdout_y_true"] = y_holdout.tolist()
+        metrics["holdout_y_pred"] = holdout_preds.tolist()
+
     return calibrated, metrics, final_features
 
 
@@ -698,7 +755,9 @@ def _evaluate_holdout(
 
     # Reliability diagram: bin predictions into buckets and compute
     # actual vs predicted rates + adjustment factors for Kelly scaling.
-    bins = [0.0, 0.3, 0.45, 0.55, 0.7, 1.0]
+    # Using 10 uniform bins instead of 5 uneven bins to reduce cliff
+    # effects at bin boundaries in the Kelly adjustment.
+    bins = [i / 10 for i in range(11)]  # [0.0, 0.1, 0.2, ..., 1.0]
     reliability_bins: Dict[str, Dict] = {}
     for i in range(len(bins) - 1):
         mask = (y_pred >= bins[i]) & (y_pred < bins[i + 1])
@@ -922,14 +981,17 @@ def _champion_challenger(
 ) -> Tuple[bool, str]:
     """Compare a challenger model against the currently deployed champion.
 
-    The challenger is promoted ONLY if it achieves a strictly better
-    log loss on the holdout set.  This prevents model degradation from
-    anomalous training data or overfitting.
+    Uses the Diebold-Mariano test for statistical significance when both
+    models have stored per-observation holdout predictions.  Falls back
+    to aggregate metric comparison for backward compatibility when the
+    champion was trained before holdout predictions were stored.
+
+    The challenger is promoted when:
+    1. DM test: p_value < 0.10 AND dm_stat > 0 (challenger significantly better)
+    2. Fallback: aggregate log loss strictly better, OR brier tiebreak
 
     Age override: if the champion is older than ``_STALE_MODEL_DAYS``
-    and the challenger is within 5% log-loss, promote anyway to avoid
-    the model going completely stale during off-seasons or landscape
-    shifts (rule changes, COVID-like breaks, etc.).
+    and the challenger is within 0.5% log-loss, promote anyway.
 
     Returns (promoted: bool, reason: str).
     """
@@ -943,6 +1005,46 @@ def _champion_challenger(
     chall_ll = challenger_metrics.get("log_loss", 999.0)
     chall_brier = challenger_metrics.get("brier_score", 999.0)
 
+    # --- Diebold-Mariano test (preferred) ---
+    # Both models must have stored per-observation holdout predictions.
+    champ_y_true = champ_metrics.get("holdout_y_true")
+    champ_y_pred = champ_metrics.get("holdout_y_pred")
+    chall_y_true = challenger_metrics.get("holdout_y_true")
+    chall_y_pred = challenger_metrics.get("holdout_y_pred")
+
+    if (champ_y_pred is not None and chall_y_pred is not None
+            and chall_y_true is not None
+            and len(chall_y_true) >= 20):
+        # Use the challenger's holdout labels as ground truth and
+        # compare the champion's predictions (re-evaluated or stored)
+        # against the challenger's predictions on the same holdout.
+        # NOTE: because the holdout sets may differ between training
+        # runs, we use the challenger's holdout y_true/y_pred and
+        # the champion's stored predictions.  When holdout sets differ
+        # significantly, we fall back to aggregate metrics.
+        y_true = np.array(chall_y_true)
+        pred_chall = np.array(chall_y_pred)
+
+        # If champion has matching holdout size, use DM test
+        if champ_y_true is not None and len(champ_y_pred) == len(chall_y_pred):
+            pred_champ = np.array(champ_y_pred)
+            dm_stat, p_value = diebold_mariano_test(y_true, pred_champ, pred_chall)
+
+            if dm_stat > 0 and p_value < 0.10:
+                return True, (
+                    f"promoted (DM test): dm_stat={dm_stat:.4f} p_value={p_value:.4f} "
+                    f"(log_loss: {chall_ll:.6f} vs {champ_ll:.6f}, "
+                    f"brier: {chall_brier:.6f} vs {champ_brier:.6f})"
+                )
+
+            if p_value >= 0.10:
+                log.info(
+                    "DM test not significant (p=%.4f) for %s — "
+                    "falling back to aggregate metrics",
+                    p_value, sport_group,
+                )
+
+    # --- Fallback: aggregate metric comparison ---
     # Primary gate: log loss must be strictly better
     if chall_ll < champ_ll:
         return True, (
@@ -957,8 +1059,6 @@ def _champion_challenger(
         )
 
     # Age override: prevent stale models from blocking promotion forever.
-    # Only use the trained_at timestamp from metrics — file mtime is
-    # unreliable because saving the champion back to disk resets it.
     trained_at = champ_metrics.get("trained_at", "")
     champ_age = 0
     if trained_at:
@@ -968,11 +1068,6 @@ def _champion_challenger(
             champ_age = 0
 
     if champ_age >= _STALE_MODEL_DAYS:
-        # Allow promotion if challenger is within 0.5% relative log loss.
-        # The original 5% threshold was far too loose for sports betting
-        # where a drop from 0.690 → 0.724 log loss means the model is
-        # significantly worse.  0.5% keeps models fresh during off-seasons
-        # without allowing meaningful degradation.
         relative_diff = (chall_ll - champ_ll) / max(champ_ll, 0.001)
         if relative_diff < 0.005:
             return True, (

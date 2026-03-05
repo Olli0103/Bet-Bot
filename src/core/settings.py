@@ -111,9 +111,12 @@ class Settings(BaseModel):
     combo_correlation_floor: float = float(os.getenv("COMBO_CORRELATION_FLOOR", "0.20"))
 
     # Calibration
-    calibration_method: str = os.getenv("CALIBRATION_METHOD", "isotonic")  # "isotonic" or "platt"
+    calibration_method: str = os.getenv("CALIBRATION_METHOD", "beta")  # "isotonic", "platt", or "beta"
     calibration_enabled: bool = os.getenv("CALIBRATION_ENABLED", "true").lower() == "true"
     ev_diagnostics_enabled: bool = os.getenv("EV_DIAGNOSTICS_ENABLED", "true").lower() == "true"
+
+    # Poisson model
+    poisson_rho: float = float(os.getenv("POISSON_RHO", "-0.13"))
 
 
 settings = Settings()

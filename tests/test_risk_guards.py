@@ -6,11 +6,14 @@ Mandatory test cases:
 3) top10_per_sport_sorted_by_confidence_desc
 4) top10_item_1_is_best_confidence
 5) no_global_top10_leak_into_sport_filter
+6) dynamic_min_ev_scales_with_brier
 """
 import pytest
+from unittest.mock import patch
 
 from src.core.risk_guards import (
     apply_stake_cap,
+    get_dynamic_min_ev,
     get_min_confidence,
     passes_confidence_gate,
 )
@@ -286,3 +289,49 @@ class TestNoGlobalLeak:
         # View all -- still has all 3
         all_items = _filter_items_by_sport(pool, "all")
         assert len(all_items) == 3
+
+
+# ---------------------------------------------------------------------------
+# 6) dynamic_min_ev_scales_with_brier
+# ---------------------------------------------------------------------------
+
+class TestDynamicMinEv:
+
+    def _mock_load(self, brier_value):
+        """Patch load_model inside get_dynamic_min_ev."""
+        if brier_value is None:
+            return patch("src.core.ml_trainer.load_model", return_value=None)
+        return patch(
+            "src.core.ml_trainer.load_model",
+            return_value={"metrics": {"brier_score": brier_value}},
+        )
+
+    def test_brier_018_gives_lower_threshold(self):
+        """Brier 0.18 -> min_ev = 0.18 * 0.15 = 0.027."""
+        with self._mock_load(0.18):
+            ev = get_dynamic_min_ev("soccer_epl")
+        assert abs(ev - 0.027) < 0.001
+
+    def test_brier_025_gives_higher_threshold(self):
+        """Brier 0.25 -> min_ev = 0.25 * 0.15 = 0.0375."""
+        with self._mock_load(0.25):
+            ev = get_dynamic_min_ev("soccer_epl")
+        assert abs(ev - 0.0375) < 0.001
+
+    def test_floor_at_005(self):
+        """Very good Brier (0.01) should still have at least 0.005 min_ev."""
+        with self._mock_load(0.01):
+            ev = get_dynamic_min_ev("soccer_epl")
+        assert ev >= 0.005
+
+    def test_cap_at_005(self):
+        """Very bad Brier (0.5) should be capped at 0.05."""
+        with self._mock_load(0.50):
+            ev = get_dynamic_min_ev("soccer_epl")
+        assert ev == 0.05
+
+    def test_fallback_when_no_model(self):
+        """Without any model, falls back to settings.min_ev_default."""
+        with self._mock_load(None):
+            ev = get_dynamic_min_ev("cricket_ipl")
+        assert ev == 0.01  # settings.min_ev_default

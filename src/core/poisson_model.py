@@ -25,6 +25,7 @@ DEFAULT_DEFENSE: float = 1.0            # league-average defense strength
 SCORE_RANGE: int = 7                    # compute P(goals=0..6) per side
 STRENGTH_TTL: int = 180 * 24 * 3600    # 180 days — survives the ~80-day summer break
 LEARNING_RATE: float = 0.05            # how fast strengths move per result
+DEFAULT_RHO: float = -0.13             # Dixon-Coles low-score dependence parameter
 
 
 def _cache_key(team: str) -> str:
@@ -55,10 +56,16 @@ class PoissonSoccerModel:
         home_advantage: float = HOME_ADVANTAGE,
         league_avg_goals: float = LEAGUE_AVG_GOALS,
         learning_rate: float = LEARNING_RATE,
+        rho: Optional[float] = None,
     ) -> None:
         self.home_advantage = home_advantage
         self.league_avg_goals = league_avg_goals
         self.learning_rate = learning_rate
+        if rho is None:
+            from src.core.settings import settings
+            self.rho = settings.poisson_rho
+        else:
+            self.rho = rho
 
     # ----- strength persistence --------------------------------------------
 
@@ -96,18 +103,43 @@ class PoissonSoccerModel:
     # ----- score matrix ----------------------------------------------------
 
     @staticmethod
-    def _score_matrix(home_xg: float, away_xg: float) -> list[list[float]]:
+    def _score_matrix(home_xg: float, away_xg: float, rho: float = 0.0) -> list[list[float]]:
         """Build a SCORE_RANGE x SCORE_RANGE matrix of P(home=i, away=j).
 
-        Uses scipy Poisson PMF; goals for each team are assumed independent.
+        Uses the Dixon-Coles (1997) adjustment for low-scoring dependence.
+        When ``rho`` is 0, this reduces to the standard independent Poisson.
+
+        The adjustment corrects for the empirical over-representation of
+        low-scoring draws (0-0, 1-1) and under-representation of 1-0 / 0-1
+        results that the naive independence assumption misses.
+
+        Correction factors for low scores:
+            P(0,0): *= 1 - home_xg * away_xg * rho
+            P(1,0): *= 1 + away_xg * rho
+            P(0,1): *= 1 + home_xg * rho
+            P(1,1): *= 1 - rho
         """
         home_pmf = [poisson.pmf(i, home_xg) for i in range(SCORE_RANGE)]
         away_pmf = [poisson.pmf(j, away_xg) for j in range(SCORE_RANGE)]
 
-        return [
+        matrix = [
             [home_pmf[i] * away_pmf[j] for j in range(SCORE_RANGE)]
             for i in range(SCORE_RANGE)
         ]
+
+        if rho != 0.0:
+            # Dixon-Coles adjustment for low-scoring outcomes
+            matrix[0][0] = max(0.0, matrix[0][0] * (1 - home_xg * away_xg * rho))
+            matrix[1][0] = max(0.0, matrix[1][0] * (1 + away_xg * rho))
+            matrix[0][1] = max(0.0, matrix[0][1] * (1 + home_xg * rho))
+            matrix[1][1] = max(0.0, matrix[1][1] * (1 - rho))
+
+            # Re-normalize so the matrix sums to 1.0
+            total = sum(sum(row) for row in matrix)
+            if total > 0:
+                matrix = [[p / total for p in row] for row in matrix]
+
+        return matrix
 
     # ----- public prediction -----------------------------------------------
 
@@ -126,7 +158,7 @@ class PoissonSoccerModel:
             Poisson-expected goals for each side.
         """
         home_xg, away_xg = self._expected_goals(home, away)
-        matrix = self._score_matrix(home_xg, away_xg)
+        matrix = self._score_matrix(home_xg, away_xg, rho=self.rho)
 
         p_home = 0.0
         p_draw = 0.0
