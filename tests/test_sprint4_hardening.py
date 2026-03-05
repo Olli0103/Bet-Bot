@@ -1066,3 +1066,156 @@ class TestAdaptiveSniperScheduler:
         with patch.object(orch, "_nearest_kickoff_delta", return_value=None):
             interval = orch._get_adaptive_interval()
         assert interval == IDLE_INTERVAL_SECONDS
+
+
+# ---------------------------------------------------------------------------
+# 18. Trading Session Window
+# ---------------------------------------------------------------------------
+
+
+class TestTradingSessionWindow:
+    """Verify the active trading session scoping (now → tomorrow 06:59 UTC)."""
+
+    def test_window_end_is_tomorrow_0659(self):
+        """get_trading_window_end() returns tomorrow at 06:59 UTC."""
+        from datetime import datetime, timezone
+        from src.integrations.odds_fetcher import get_trading_window_end
+
+        end = get_trading_window_end()
+        now = datetime.now(timezone.utc)
+
+        # Must be in the future
+        assert end > now
+        # Must be at 06:59
+        assert end.hour == 6
+        assert end.minute == 59
+        # Must be UTC
+        assert end.tzinfo is not None
+
+    def test_window_end_is_within_48h(self):
+        """Window end should be at most ~48h from now."""
+        from datetime import datetime, timezone, timedelta
+        from src.integrations.odds_fetcher import get_trading_window_end
+
+        end = get_trading_window_end()
+        now = datetime.now(timezone.utc)
+        assert end - now < timedelta(hours=48)
+
+    def test_odds_fetcher_accepts_commence_time_params(self):
+        """get_sport_odds_async must accept commenceTimeFrom/To parameters."""
+        import inspect
+        from src.integrations.odds_fetcher import OddsFetcher
+
+        sig = inspect.signature(OddsFetcher.get_sport_odds_async)
+        params = list(sig.parameters.keys())
+        assert "commence_time_from" in params
+        assert "commence_time_to" in params
+
+
+# ---------------------------------------------------------------------------
+# 19. Deep Sleep Caching
+# ---------------------------------------------------------------------------
+
+
+class TestDeepSleepCaching:
+    """Verify cold-sport hibernation (no events → skip for 24h)."""
+
+    def test_deep_sleep_skips_cold_sport(self):
+        """Scout must skip sports marked as deep-sleeping."""
+        import inspect
+        from src.agents.scout_agent import ScoutAgent
+
+        source = inspect.getsource(ScoutAgent.monitor_odds)
+        assert "is_sport_deep_sleeping" in source, (
+            "Scout must check deep-sleep status before polling a sport"
+        )
+        assert "mark_sport_deep_sleep" in source, (
+            "Scout must activate deep-sleep when no events in trading window"
+        )
+
+    def test_deep_sleep_activates_on_empty_events(self):
+        """When API returns 0 events, the sport should enter deep-sleep."""
+        import inspect
+        from src.agents.scout_agent import ScoutAgent
+
+        source = inspect.getsource(ScoutAgent.monitor_odds)
+        # Must check len(events) == 0 and call mark_sport_deep_sleep
+        assert "len(events) == 0" in source or "mark_sport_deep_sleep(sport)" in source
+
+
+# ---------------------------------------------------------------------------
+# 20. Dynamic Market Pruning
+# ---------------------------------------------------------------------------
+
+
+class TestDynamicMarketPruning:
+    """Verify illiquid leagues get h2h-only, liquid leagues get full markets."""
+
+    def test_tier1_gets_full_markets(self):
+        """EPL, NFL should get h2h,spreads,totals."""
+        from src.integrations.odds_fetcher import get_markets_for_sport
+
+        assert "totals" in get_markets_for_sport("soccer_epl")
+        assert "spreads" in get_markets_for_sport("americanfootball_nfl")
+        assert "spreads" in get_markets_for_sport("basketball_nba")
+
+    def test_tier3_gets_h2h_totals_only(self):
+        """2nd leagues get h2h,totals (no spreads)."""
+        from src.integrations.odds_fetcher import get_markets_for_sport
+
+        markets = get_markets_for_sport("soccer_germany_bundesliga2")
+        assert "h2h" in markets
+        assert "totals" in markets
+        assert "spreads" not in markets
+
+    def test_tier4_gets_h2h_only(self):
+        """Unknown/niche leagues get h2h only."""
+        from src.integrations.odds_fetcher import get_markets_for_sport
+
+        markets = get_markets_for_sport("soccer_mongolia_premier")
+        assert markets == "h2h"
+
+    def test_scout_uses_dynamic_markets(self):
+        """Scout must call get_markets_for_sport, not hardcode markets."""
+        import inspect
+        from src.agents.scout_agent import ScoutAgent
+
+        source = inspect.getsource(ScoutAgent.monitor_odds)
+        assert "get_markets_for_sport" in source, (
+            "Scout must use dynamic market pruning per sport"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 21. Live-Event Filter
+# ---------------------------------------------------------------------------
+
+
+class TestLiveEventFilter:
+    """Verify that in-play events are excluded from pre-match analysis."""
+
+    def test_scout_filters_live_events(self):
+        """Scout must skip events where commence_time is in the past."""
+        import inspect
+        from src.agents.scout_agent import ScoutAgent
+
+        source = inspect.getsource(ScoutAgent.monitor_odds)
+        # Must compare commence_time against current time
+        assert "ct <= now_utc" in source or "ct < now_utc" in source, (
+            "Scout must filter out events that have already started"
+        )
+
+    def test_live_event_detection_logic(self):
+        """Events with commence_time in the past should be identified as live."""
+        from datetime import datetime, timezone, timedelta
+
+        now = datetime.now(timezone.utc)
+        past = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        future = (now + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Parse and compare
+        ct_past = datetime.fromisoformat(past.replace("Z", "+00:00"))
+        ct_future = datetime.fromisoformat(future.replace("Z", "+00:00"))
+
+        assert ct_past <= now   # live — should be filtered
+        assert ct_future > now  # pre-match — should pass

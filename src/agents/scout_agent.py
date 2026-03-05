@@ -7,6 +7,7 @@ then triggers the Analyst for deeper investigation.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from src.core.dynamic_settings import dynamic_settings
@@ -17,7 +18,11 @@ from src.core.volatility_tracker import (
     record_odds_snapshot,
 )
 from src.data.redis_cache import cache
-from src.integrations.odds_fetcher import OddsFetcher
+from src.integrations.odds_fetcher import (
+    OddsFetcher,
+    get_markets_for_sport,
+    get_trading_window_end,
+)
 
 log = logging.getLogger(__name__)
 
@@ -56,9 +61,18 @@ class ScoutAgent:
         current_snapshot: Dict[str, Dict[str, float]] = {}
         kickoff_times: List[str] = []
 
+        # Trading Session Window: scope API to "now → tomorrow 06:59 UTC"
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        window_end = get_trading_window_end()
+        window_end_iso = window_end.strftime("%Y-%m-%dT%H:%M:%SZ")
+
         # Fetch 12h-ago momentum data per sport
         momentum_data: Dict[str, Dict[str, float]] = {}
         for sport in active_sports:
+            # Deep Sleep: skip sports with no events in today's window
+            if self.odds_fetcher.is_sport_deep_sleeping(sport):
+                log.debug("Skipping %s (deep-sleep, no events in trading window)", sport)
+                continue
             try:
                 sport_momentum = self.odds_fetcher.get_odds_12h_ago(sport)
                 if sport_momentum:
@@ -68,14 +82,31 @@ class ScoutAgent:
             except Exception:
                 pass
 
+        now_utc = datetime.now(timezone.utc)
+
         for sport in active_sports:
+            # Deep Sleep check
+            if self.odds_fetcher.is_sport_deep_sleeping(sport):
+                continue
+
+            # Dynamic Market Pruning: only request markets with sharp-book value
+            sport_markets = get_markets_for_sport(sport)
+
             try:
                 events = await self.odds_fetcher.get_sport_odds_async(
-                    sport_key=sport, regions="eu", markets="h2h,totals", ttl_seconds=60,
+                    sport_key=sport, regions="eu", markets=sport_markets,
+                    ttl_seconds=60,
+                    commence_time_from=now_iso,
+                    commence_time_to=window_end_iso,
                 )
             except Exception:
                 continue
             if not isinstance(events, list):
+                continue
+
+            # Deep Sleep: if no events in the trading window, hibernate this sport
+            if len(events) == 0:
+                self.odds_fetcher.mark_sport_deep_sleep(sport)
                 continue
 
             for event in events:
@@ -86,6 +117,15 @@ class ScoutAgent:
                 commence = event.get("commence_time")
                 if commence:
                     kickoff_times.append(str(commence))
+                    # Live-event filter: skip events that have already kicked off.
+                    # In-play odds have fundamentally different dynamics — our
+                    # pre-match model has zero edge on live markets.
+                    try:
+                        ct = datetime.fromisoformat(str(commence).replace("Z", "+00:00"))
+                        if ct <= now_utc:
+                            continue
+                    except (ValueError, TypeError):
+                        pass
                 if not event_id or not home:
                     continue
 

@@ -11,6 +11,61 @@ log = logging.getLogger(__name__)
 # How long to cache the /v4/sports list (avoids redundant API calls)
 _ACTIVE_SPORTS_TTL = 2 * 3600  # 2 hours
 
+# Deep-Sleep: sports with zero events in today's trading window
+_DEEP_SLEEP_KEY = "odds:deep_sleep_sports"
+_DEEP_SLEEP_TTL = 24 * 3600  # 24 hours — re-check once per day
+
+
+def get_trading_window_end() -> datetime:
+    """Return the end of the current trading session (tomorrow 06:59 UTC).
+
+    The bot scopes all API requests to "now → tomorrow 06:59 UTC".
+    Events beyond this window are illiquid noise with no sharp-money
+    signal — polling them wastes API credits without generating edge.
+    """
+    now = datetime.now(timezone.utc)
+    # Next day at 07:00 UTC is the session boundary
+    tomorrow_7am = (now + timedelta(days=1)).replace(
+        hour=6, minute=59, second=59, microsecond=0
+    )
+    return tomorrow_7am
+
+
+def get_markets_for_sport(sport_key: str) -> str:
+    """Return the markets parameter based on league liquidity.
+
+    Illiquid leagues (Tier 3/4) only get h2h — requesting spreads/totals
+    for niche markets wastes API credits on data with no sharp-book pricing.
+    """
+    s = sport_key.lower()
+
+    # Check most specific (semi-liquid) before broader (liquid) to avoid
+    # "bundesliga" matching before "bundesliga2"
+    _SEMI_LIQUID = (
+        "soccer_germany_bundesliga2", "soccer_efl_champ",
+        "soccer_usa_mls", "soccer_england_league1",
+        "soccer_england_league2",
+    )
+    for key in _SEMI_LIQUID:
+        if key in s:
+            return "h2h,totals"
+
+    # Tier 1+2: full market coverage
+    _LIQUID = (
+        "soccer_epl", "soccer_spain_la_liga", "soccer_uefa_champs_league",
+        "americanfootball_nfl", "basketball_nba", "soccer_uefa_europa_league",
+        "soccer_germany_bundesliga", "soccer_italy_serie_a",
+        "soccer_france_ligue_one", "icehockey_nhl", "basketball_euroleague",
+        "soccer_brazil_serie_a", "soccer_portugal_primeira_liga",
+        "soccer_netherlands_eredivisie",
+    )
+    for key in _LIQUID:
+        if key in s:
+            return "h2h,spreads,totals"
+
+    # Tier 4 / unknown: h2h only
+    return "h2h"
+
 
 class OddsFetcher(AsyncBaseFetcher):
     def __init__(self):
@@ -103,23 +158,53 @@ class OddsFetcher(AsyncBaseFetcher):
         regions: str = "eu",
         markets: str = "h2h,spreads,totals",
         ttl_seconds: int = 600,
+        commence_time_from: Optional[str] = None,
+        commence_time_to: Optional[str] = None,
     ):
-        """Fetch odds for multiple markets with longer cache (10 min default)."""
+        """Fetch odds scoped to the active trading window.
+
+        Parameters
+        ----------
+        commence_time_from, commence_time_to : str, optional
+            ISO-8601 timestamps to scope the API response to a time window.
+            When provided, only events within this window are returned,
+            saving API credits by excluding far-future illiquid markets.
+        """
         cache_key = f"odds:{sport_key}:{regions}:{markets}"
         cached = cache.get_json(cache_key)
         if cached:
             return cached
+
+        params = {
+            "apiKey": settings.odds_api_key,
+            "regions": regions,
+            "markets": markets,
+            "bookmakers": "tipico_de,pinnacle,bet365,betfair_ex_uk,betsson,unibet",
+        }
+        if commence_time_from:
+            params["commenceTimeFrom"] = commence_time_from
+        if commence_time_to:
+            params["commenceTimeTo"] = commence_time_to
+
         data = await self.get(
             f"sports/{sport_key}/odds",
-            params={
-                "apiKey": settings.odds_api_key,
-                "regions": regions,
-                "markets": markets,
-                "bookmakers": "tipico_de,pinnacle,bet365,betfair_ex_uk,betsson,unibet",
-            },
+            params=params,
         )
         cache.set_json(cache_key, data, ttl_seconds)
         return data
+
+    def is_sport_deep_sleeping(self, sport_key: str) -> bool:
+        """Check if a sport is in deep-sleep (no events in today's window)."""
+        sleeping = cache.get_json(_DEEP_SLEEP_KEY) or []
+        return sport_key in sleeping
+
+    def mark_sport_deep_sleep(self, sport_key: str) -> None:
+        """Put a sport into deep-sleep for 24 hours (no events today)."""
+        sleeping = cache.get_json(_DEEP_SLEEP_KEY) or []
+        if sport_key not in sleeping:
+            sleeping.append(sport_key)
+            cache.set_json(_DEEP_SLEEP_KEY, sleeping, ttl_seconds=_DEEP_SLEEP_TTL)
+            log.info("Deep-sleep activated for %s (no events in trading window)", sport_key)
 
     async def get_historical_odds_async(self, sport_key: str, regions: str = "eu", markets: str = "h2h", days_history: int = 7):
         """Fetch historical odds for backtesting/training."""
