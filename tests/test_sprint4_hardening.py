@@ -2415,3 +2415,288 @@ class TestCPUOffloading:
         assert "run_in_executor" in source, (
             "Must use loop.run_in_executor for async integration"
         )
+
+
+# ---------------------------------------------------------------------------
+# Sprint 15: SOTA Institutional Upgrades
+# ---------------------------------------------------------------------------
+
+# --- 41. Gaussian Copula for SGP Joint Probabilities ----------------------
+
+class TestGaussianCopulaCorrelation:
+    """Verify correlation.py uses Gaussian copula instead of scalar multipliers."""
+
+    def test_bivariate_copula_independent(self):
+        """With rho=0, copula joint prob = p1 * p2 (independent)."""
+        from src.core.correlation import bivariate_copula_probability
+
+        p1, p2 = 0.6, 0.5
+        result = bivariate_copula_probability(p1, p2, rho=0.0)
+        expected = p1 * p2
+        assert abs(result - expected) < 0.005, (
+            f"Independent copula {result:.4f} should match p1*p2={expected:.4f}"
+        )
+
+    def test_bivariate_copula_positive_rho(self):
+        """Positive rho increases joint probability above independent."""
+        from src.core.correlation import bivariate_copula_probability
+
+        p1, p2 = 0.6, 0.5
+        p_independent = p1 * p2
+        p_correlated = bivariate_copula_probability(p1, p2, rho=0.25)
+        assert p_correlated > p_independent, (
+            f"Positive rho: {p_correlated:.4f} should > {p_independent:.4f}"
+        )
+
+    def test_bivariate_copula_negative_rho(self):
+        """Negative rho decreases joint probability below independent."""
+        from src.core.correlation import bivariate_copula_probability
+
+        p1, p2 = 0.6, 0.5
+        p_independent = p1 * p2
+        p_correlated = bivariate_copula_probability(p1, p2, rho=-0.30)
+        assert p_correlated < p_independent, (
+            f"Negative rho: {p_correlated:.4f} should < {p_independent:.4f}"
+        )
+
+    def test_copula_always_in_bounds(self):
+        """Joint probability must always be in (0, 1)."""
+        from src.core.correlation import bivariate_copula_probability
+
+        for rho in [-0.9, -0.5, 0.0, 0.3, 0.9]:
+            for p1, p2 in [(0.1, 0.1), (0.5, 0.5), (0.9, 0.9), (0.01, 0.99)]:
+                result = bivariate_copula_probability(p1, p2, rho)
+                assert 0.0 < result < 1.0, (
+                    f"Copula out of bounds: p1={p1}, p2={p2}, rho={rho}, result={result}"
+                )
+
+    def test_compute_joint_probability_exists(self):
+        """CorrelationEngine.compute_joint_probability must be importable."""
+        from src.core.correlation import CorrelationEngine
+        assert hasattr(CorrelationEngine, "compute_joint_probability")
+        assert callable(CorrelationEngine.compute_joint_probability)
+
+    def test_compute_joint_probability_uses_copula(self):
+        """compute_joint_probability must use scipy multivariate_normal."""
+        import inspect
+        from src.core.correlation import CorrelationEngine
+        source = inspect.getsource(CorrelationEngine.compute_joint_probability)
+        assert "multivariate_normal" in source, (
+            "Must use multivariate_normal CDF, not scalar multipliers"
+        )
+        assert "norm.ppf" in source or "quantiles" in source, (
+            "Must map marginals through inverse normal CDF"
+        )
+
+    def test_backward_compat_compute_combo_correlation(self):
+        """compute_combo_correlation still returns a float multiplier."""
+        from src.core.correlation import CorrelationEngine
+
+        legs = [
+            {"event_id": "e1", "sport": "soccer_epl", "market": "h2h",
+             "selection": "Home", "odds": 1.80, "probability": 0.55},
+            {"event_id": "e1", "sport": "soccer_epl", "market": "totals",
+             "selection": "Over 2.5", "odds": 1.90, "probability": 0.52},
+        ]
+        mult = CorrelationEngine.compute_combo_correlation(legs)
+        assert isinstance(mult, float)
+        assert 0.50 <= mult <= 2.50
+
+    def test_empirical_rho_table_has_proper_values(self):
+        """Rho values should be Pearson correlations in [-1, 1], not multipliers."""
+        from src.core.correlation import _EMPIRICAL_RHO
+
+        for key, rho in _EMPIRICAL_RHO.items():
+            assert -1.0 <= rho <= 1.0, (
+                f"Rho {key}={rho} is outside [-1, 1] — must be Pearson correlation"
+            )
+
+    def test_correlation_matrix_is_psd(self):
+        """Built correlation matrix must be positive semi-definite."""
+        from src.core.correlation import _build_correlation_matrix
+
+        legs = [
+            {"event_id": "e1", "sport": "soccer_epl", "market": "h2h",
+             "selection": "Home", "odds": 1.80, "probability": 0.55},
+            {"event_id": "e1", "sport": "soccer_epl", "market": "totals",
+             "selection": "Over 2.5", "odds": 1.90, "probability": 0.52},
+            {"event_id": "e2", "sport": "soccer_epl", "market": "h2h",
+             "selection": "Away", "odds": 2.20, "probability": 0.45},
+        ]
+        corr = _build_correlation_matrix(legs)
+        eigvals = np.linalg.eigvalsh(corr)
+        assert np.all(eigvals >= -1e-10), (
+            f"Correlation matrix not PSD: min eigenvalue = {eigvals.min()}"
+        )
+
+    def test_fav_over_has_positive_rho(self):
+        """Favorite H2H + Over should have positive correlation (rho > 0)."""
+        from src.core.correlation import _empirical_pair_rho
+
+        leg_h2h = {"event_id": "e1", "sport": "soccer_epl", "market": "h2h",
+                    "selection": "Home", "odds": 1.60}
+        leg_totals = {"event_id": "e1", "sport": "soccer_epl", "market": "totals",
+                      "selection": "Over 2.5", "odds": 1.90}
+        rho = _empirical_pair_rho(leg_h2h, leg_totals)
+        assert rho > 0, f"Fav + Over should have positive rho, got {rho}"
+
+    def test_fav_under_has_negative_rho(self):
+        """Favorite H2H + Under should have negative correlation."""
+        from src.core.correlation import _empirical_pair_rho
+
+        leg_h2h = {"event_id": "e1", "sport": "soccer_epl", "market": "h2h",
+                    "selection": "Home", "odds": 1.60}
+        leg_totals = {"event_id": "e1", "sport": "soccer_epl", "market": "totals",
+                      "selection": "Under 2.5", "odds": 2.10}
+        rho = _empirical_pair_rho(leg_h2h, leg_totals)
+        assert rho < 0, f"Fav + Under should have negative rho, got {rho}"
+
+
+# --- 42. Pydantic-Enforced LLM Outputs -----------------------------------
+
+class TestPydanticLLMOutputs:
+    """Verify AnalystReasoning Pydantic schema and structured LLM output."""
+
+    def test_analyst_reasoning_schema_importable(self):
+        """AnalystReasoning must be importable from analyst_agent."""
+        from src.agents.analyst_agent import AnalystReasoning
+        assert hasattr(AnalystReasoning, "model_validate")
+
+    def test_valid_json_parses(self):
+        """Valid JSON should parse into AnalystReasoning."""
+        from src.agents.analyst_agent import AnalystReasoning
+
+        data = {
+            "summary": "Starke Heimform, hohe EV, klare Wette.",
+            "confidence": 0.82,
+            "key_factors": ["Heimvorteil", "Formstärke", "Verletzungen Gast"],
+            "risk_flags": ["Regen erwartet"],
+            "verdict": "BET",
+        }
+        result = AnalystReasoning.model_validate(data)
+        assert result.verdict == "BET"
+        assert result.confidence == 0.82
+        assert len(result.key_factors) == 3
+        assert len(result.risk_flags) == 1
+
+    def test_partial_json_gets_defaults(self):
+        """Partial JSON should fill defaults without raising."""
+        from src.agents.analyst_agent import AnalystReasoning
+
+        result = AnalystReasoning.model_validate({"summary": "Test"})
+        assert result.summary == "Test"
+        assert result.confidence == 0.5  # default
+        assert result.verdict == "NEUTRAL"  # default
+        assert result.key_factors == []  # default
+
+    def test_invalid_verdict_normalizes(self):
+        """Invalid verdict should normalize to NEUTRAL."""
+        from src.agents.analyst_agent import AnalystReasoning
+
+        result = AnalystReasoning.model_validate({"verdict": "MAYBE"})
+        assert result.verdict == "NEUTRAL"
+
+    def test_confidence_clamps_to_bounds(self):
+        """Confidence outside [0, 1] should be clamped."""
+        from src.agents.analyst_agent import AnalystReasoning
+
+        result = AnalystReasoning.model_validate({"confidence": 1.5})
+        assert result.confidence == 1.0
+        result2 = AnalystReasoning.model_validate({"confidence": -0.3})
+        assert result2.confidence == 0.0
+
+    def test_to_display_text_format(self):
+        """to_display_text should return a human-readable string."""
+        from src.agents.analyst_agent import AnalystReasoning
+
+        data = {
+            "summary": "Klare Value-Wette",
+            "key_factors": ["Form", "EV"],
+            "risk_flags": ["Wetter"],
+        }
+        result = AnalystReasoning.model_validate(data)
+        text = result.to_display_text()
+        assert "Klare Value-Wette" in text
+        assert "Faktoren" in text
+        assert "Risiken" in text
+
+    def test_reason_with_llm_uses_generate_json(self):
+        """reason_with_llm should call generate_json for structured output."""
+        import inspect
+        from src.agents.analyst_agent import AnalystAgent
+        source = inspect.getsource(AnalystAgent.reason_with_llm)
+        assert "generate_json" in source, (
+            "Must use generate_json for structured Pydantic output"
+        )
+        assert "AnalystReasoning" in source, (
+            "Must validate with AnalystReasoning schema"
+        )
+
+    def test_structured_method_exists(self):
+        """reason_with_llm_structured must exist for typed access."""
+        from src.agents.analyst_agent import AnalystAgent
+        assert hasattr(AnalystAgent, "reason_with_llm_structured")
+        import asyncio
+        assert asyncio.iscoroutinefunction(AnalystAgent.reason_with_llm_structured)
+
+
+# --- 43. OpenTelemetry Pipeline Tracing -----------------------------------
+
+class TestOpenTelemetryTracing:
+    """Verify OpenTelemetry integration in observability module."""
+
+    def test_otel_span_importable(self):
+        """otel_span context manager must be importable."""
+        from src.core.observability import otel_span
+        assert callable(otel_span)
+
+    def test_otel_span_works_without_sdk(self):
+        """otel_span must work as no-op when OpenTelemetry is not enabled."""
+        from src.core.observability import otel_span
+
+        with otel_span("test_operation", {"key": "value"}) as span:
+            span.set_attribute("test", True)
+            # Should not raise even without OTEL SDK
+
+    def test_noop_span_interface(self):
+        """_NoOpSpan must implement the span interface."""
+        from src.core.observability import _NoOpSpan
+
+        span = _NoOpSpan()
+        span.set_attribute("key", "value")
+        span.set_status(None)
+        span.record_exception(Exception("test"))
+
+    def test_track_duration_has_otel_span(self):
+        """track_duration must create an OTel span alongside log output."""
+        import inspect
+        from src.core.observability import track_duration
+        source = inspect.getsource(track_duration)
+        assert "otel_span" in source, (
+            "track_duration must wrap operations in an OTel span"
+        )
+
+    def test_otel_record_metric_importable(self):
+        """otel_record_metric helper must exist."""
+        from src.core.observability import otel_record_metric
+        assert callable(otel_record_metric)
+        # Should work without raising when OTEL is disabled
+        otel_record_metric("test_metric", 42.0, {"sport": "soccer"})
+
+    def test_otel_enabled_flag_exists(self):
+        """Module must have _OTEL_ENABLED flag for conditional activation."""
+        from src.core import observability
+        assert hasattr(observability, "_OTEL_ENABLED")
+        assert isinstance(observability._OTEL_ENABLED, bool)
+
+    def test_observability_env_var_controls_activation(self):
+        """OTEL_ENABLED env var must control whether tracing is active."""
+        import inspect
+        from src.core import observability
+        source = inspect.getsource(observability)
+        assert "OTEL_ENABLED" in source, (
+            "Must check OTEL_ENABLED env var for activation"
+        )
+        assert "OTEL_EXPORTER_OTLP_ENDPOINT" in source, (
+            "Must support OTLP endpoint configuration"
+        )

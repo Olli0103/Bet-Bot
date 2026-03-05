@@ -6,13 +6,19 @@ Provides:
     telegram, db, training)
   - Heartbeat summaries (single compact health line per cycle)
   - Duration tracking helpers
+  - OpenTelemetry integration for distributed tracing with microsecond
+    latency tracking across the full pipeline
 
 All loggers emit human-readable messages while preserving machine-parseable
 key=value fields for downstream analysis.
+
+OpenTelemetry is optional: if the opentelemetry SDK is not installed,
+all tracing functions gracefully degrade to no-ops.
 """
 from __future__ import annotations
 
 import logging
+import os
 import time
 import uuid
 from contextlib import contextmanager
@@ -20,6 +26,111 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# OpenTelemetry integration (optional — degrades to no-op if not installed)
+# ---------------------------------------------------------------------------
+
+_OTEL_ENABLED = False
+_tracer = None
+
+try:
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import (
+        BatchSpanProcessor,
+        ConsoleSpanExporter,
+    )
+    from opentelemetry.sdk.resources import Resource
+
+    # Only initialize if explicitly enabled via env var
+    if os.getenv("OTEL_ENABLED", "").lower() in ("1", "true", "yes"):
+        resource = Resource.create({
+            "service.name": "bet-bot",
+            "service.version": os.getenv("BOT_VERSION", "1.0.0"),
+        })
+        provider = TracerProvider(resource=resource)
+
+        # Use OTLP exporter if endpoint configured, otherwise console
+        otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+        if otlp_endpoint:
+            try:
+                from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+                    OTLPSpanExporter,
+                )
+                exporter = OTLPSpanExporter(endpoint=otlp_endpoint)
+            except ImportError:
+                exporter = ConsoleSpanExporter()
+        else:
+            exporter = ConsoleSpanExporter()
+
+        provider.add_span_processor(BatchSpanProcessor(exporter))
+        trace.set_tracer_provider(provider)
+        _tracer = trace.get_tracer("bet-bot")
+        _OTEL_ENABLED = True
+        log.info("OpenTelemetry tracing enabled (endpoint=%s)", otlp_endpoint or "console")
+except ImportError:
+    pass
+
+
+class _NoOpSpan:
+    """No-op span for when OpenTelemetry is not available."""
+
+    def set_attribute(self, key: str, value: Any) -> None:
+        pass
+
+    def set_status(self, status: Any) -> None:
+        pass
+
+    def record_exception(self, exc: Exception) -> None:
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+
+@contextmanager
+def otel_span(name: str, attributes: Optional[Dict[str, Any]] = None):
+    """Create an OpenTelemetry span, falling back to no-op if not enabled.
+
+    Usage::
+
+        with otel_span("fetch_odds", {"sport": "soccer_epl"}) as span:
+            data = fetcher.get_odds()
+            span.set_attribute("events_count", len(data))
+    """
+    if _OTEL_ENABLED and _tracer is not None:
+        with _tracer.start_as_current_span(name, attributes=attributes or {}) as span:
+            try:
+                yield span
+            except Exception as exc:
+                span.record_exception(exc)
+                try:
+                    from opentelemetry.trace import StatusCode
+                    span.set_status(StatusCode.ERROR, str(exc))
+                except ImportError:
+                    pass
+                raise
+    else:
+        yield _NoOpSpan()
+
+
+def otel_record_metric(name: str, value: float, attributes: Optional[Dict[str, Any]] = None) -> None:
+    """Record a custom metric via span event (lightweight alternative to metrics SDK)."""
+    if not _OTEL_ENABLED or _tracer is None:
+        return
+    try:
+        span = trace.get_current_span()
+        if span and span.is_recording():
+            attrs = {"metric.value": value}
+            if attributes:
+                attrs.update(attributes)
+            span.add_event(name, attributes=attrs)
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------------------
 # Correlation / Cycle ID
@@ -49,7 +160,7 @@ def get_cycle_id() -> str:
 
 @contextmanager
 def track_duration(operation: str, logger: Optional[logging.Logger] = None):
-    """Context manager that logs operation duration.
+    """Context manager that logs operation duration and creates an OTel span.
 
     Usage::
 
@@ -60,21 +171,26 @@ def track_duration(operation: str, logger: Optional[logging.Logger] = None):
     cid = get_cycle_id()
     start = time.monotonic()
     _log.info("op=%s cycle=%s status=start", operation, cid)
-    try:
-        yield
-    except Exception as exc:
-        elapsed = time.monotonic() - start
-        _log.error(
-            "op=%s cycle=%s status=error duration=%.2fs error=%s",
-            operation, cid, elapsed, type(exc).__name__,
-        )
-        raise
-    else:
-        elapsed = time.monotonic() - start
-        _log.info(
-            "op=%s cycle=%s status=done duration=%.2fs",
-            operation, cid, elapsed,
-        )
+
+    with otel_span(operation, {"cycle_id": cid}) as span:
+        try:
+            yield
+        except Exception as exc:
+            elapsed = time.monotonic() - start
+            _log.error(
+                "op=%s cycle=%s status=error duration=%.2fs error=%s",
+                operation, cid, elapsed, type(exc).__name__,
+            )
+            span.set_attribute("duration_ms", elapsed * 1000)
+            span.set_attribute("error", True)
+            raise
+        else:
+            elapsed = time.monotonic() - start
+            _log.info(
+                "op=%s cycle=%s status=done duration=%.2fs",
+                operation, cid, elapsed,
+            )
+            span.set_attribute("duration_ms", elapsed * 1000)
 
 
 # ---------------------------------------------------------------------------

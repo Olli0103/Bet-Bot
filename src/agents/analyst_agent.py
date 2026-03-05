@@ -3,12 +3,17 @@
 When the Scout detects a steam move or breaking injury, the Analyst
 performs full analysis: news enrichment, sentiment, injury aggregation,
 ML model prediction, EV computation, and optional LLM reasoning.
+
+LLM outputs use Pydantic-validated JSON schemas to guarantee deterministic,
+typed responses instead of unparseable raw text.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field, field_validator
 
 from src.core.betting_math import expected_value, public_bias_score
 from src.core.elo_ratings import EloSystem
@@ -23,6 +28,68 @@ from src.core.sport_mapping import normalize_team
 from src.core.volatility_tracker import get_line_velocity, get_volatility_features
 
 log = logging.getLogger(__name__)
+
+
+# ---- Pydantic schema for deterministic LLM output ----------------------------
+
+class AnalystReasoning(BaseModel):
+    """Structured LLM reasoning output with Pydantic validation.
+
+    Forces the LLM (Gemma 3 4B via Ollama) to return typed JSON instead
+    of unparseable raw text.  Every field has a default so partial LLM
+    responses still produce a valid object.
+    """
+    summary: str = Field(
+        default="",
+        max_length=200,
+        description="Ultra-short German summary (max 30 words)",
+    )
+    confidence: float = Field(
+        default=0.5,
+        description="LLM's confidence in the recommendation (0-1), clamped to [0, 1]",
+    )
+    key_factors: List[str] = Field(
+        default_factory=list,
+        max_length=5,
+        description="Top 3-5 factors driving the recommendation",
+    )
+    risk_flags: List[str] = Field(
+        default_factory=list,
+        max_length=5,
+        description="Risk factors that could invalidate the bet",
+    )
+    verdict: str = Field(
+        default="NEUTRAL",
+        description="BET, SKIP, or NEUTRAL",
+    )
+
+    @field_validator("verdict")
+    @classmethod
+    def _normalize_verdict(cls, v: str) -> str:
+        v = v.upper().strip()
+        if v not in ("BET", "SKIP", "NEUTRAL"):
+            return "NEUTRAL"
+        return v
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _clamp_confidence(cls, v: Any) -> float:
+        try:
+            return max(0.0, min(1.0, float(v)))
+        except (TypeError, ValueError):
+            return 0.5
+
+    def to_display_text(self) -> str:
+        """Format for Telegram display (backward-compatible with raw string)."""
+        parts = [self.summary]
+        if self.key_factors:
+            parts.append("Faktoren: " + ", ".join(self.key_factors[:3]))
+        if self.risk_flags:
+            parts.append("Risiken: " + ", ".join(self.risk_flags[:2]))
+        return " | ".join(p for p in parts if p)
+
+
+# ---- end Pydantic schema -----------------------------------------------------
 
 # Operational exceptions that can legitimately occur at runtime
 # (network, Redis, parsing, import of optional modules).
@@ -310,9 +377,13 @@ class AnalystAgent:
         return result
 
     async def reason_with_llm(self, context: Dict) -> Optional[str]:
-        """LLM reasoning optimized for Gemma 3 4B.
+        """LLM reasoning with Pydantic-validated structured JSON output.
 
-        Uses concise German prompts with strict data-only reasoning.
+        Forces Gemma 3 4B to return a typed AnalystReasoning schema via
+        Ollama's JSON mode, then validates with Pydantic.  Falls back to
+        raw text generation if JSON parsing fails.
+
+        Returns a display-ready string for backward compatibility.
         """
         try:
             from src.integrations.ollama_sentiment import OllamaSentimentClient
@@ -331,8 +402,12 @@ class AnalystAgent:
 
             prompt = (
                 "Basiere deine Analyse STRIKT auf den Daten. "
-                "Erstelle eine ultrakurze, praegnante Zusammenfassung (maximal 30 Woerter) auf Deutsch. "
-                "Verwende KEINE Formatierungen wie Sterne, fett oder kursiv. Antworte in reinem Text.\n\n"
+                "Antworte ALS JSON mit exakt diesen Feldern:\n"
+                '{"summary": "Ultrakurze deutsche Zusammenfassung (max 30 Woerter)", '
+                '"confidence": 0.0-1.0, '
+                '"key_factors": ["Faktor1", "Faktor2", "Faktor3"], '
+                '"risk_flags": ["Risiko1"], '
+                '"verdict": "BET oder SKIP oder NEUTRAL"}\n\n'
                 f"Sport: {context.get('sport')}\n"
                 f"Match: {context.get('home')} vs {context.get('away')}\n"
                 f"Tipp: {context.get('selection')}\n"
@@ -343,8 +418,68 @@ class AnalystAgent:
                 f"{inj_text}"
             )
 
-            result = await asyncio.to_thread(nlp.generate_raw, prompt)
-            return result if result else None
+            # Try structured JSON output first
+            raw_json = await asyncio.to_thread(nlp.generate_json, prompt)
+            if raw_json:
+                try:
+                    reasoning = AnalystReasoning.model_validate(raw_json)
+                    log.debug(
+                        "LLM structured output: verdict=%s confidence=%.2f factors=%d",
+                        reasoning.verdict, reasoning.confidence, len(reasoning.key_factors),
+                    )
+                    return reasoning.to_display_text()
+                except Exception as exc:
+                    log.debug("Pydantic validation failed (%s), using raw fallback", exc)
+
+            # Fallback: raw text generation (backward-compatible)
+            raw_text = await asyncio.to_thread(nlp.generate_raw, prompt)
+            return raw_text if raw_text else None
         except _OP_ERRORS:
             log.warning("LLM reasoning failed", exc_info=True)
+            return None
+
+    async def reason_with_llm_structured(self, context: Dict) -> Optional[AnalystReasoning]:
+        """Return the full structured AnalystReasoning object.
+
+        Use this when you need the typed fields (confidence, verdict,
+        key_factors, risk_flags) instead of just the display string.
+        """
+        try:
+            from src.integrations.ollama_sentiment import OllamaSentimentClient
+            nlp = OllamaSentimentClient()
+
+            model_p = context.get("model_probability", 0)
+            ev = context.get("expected_value", 0)
+            momentum = context.get("market_momentum", 0.0)
+
+            inj_details = context.get("injury_details", [])
+            inj_text = ""
+            if inj_details:
+                inj_lines = [f"  {i['player']} ({i['team']}): {i['status']}" for i in inj_details[:5]]
+                inj_text = f"\nVerletzungen:\n" + "\n".join(inj_lines)
+
+            prompt = (
+                "Basiere deine Analyse STRIKT auf den Daten. "
+                "Antworte ALS JSON mit exakt diesen Feldern:\n"
+                '{"summary": "Ultrakurze deutsche Zusammenfassung (max 30 Woerter)", '
+                '"confidence": 0.0-1.0, '
+                '"key_factors": ["Faktor1", "Faktor2", "Faktor3"], '
+                '"risk_flags": ["Risiko1"], '
+                '"verdict": "BET oder SKIP oder NEUTRAL"}\n\n'
+                f"Sport: {context.get('sport')}\n"
+                f"Match: {context.get('home')} vs {context.get('away')}\n"
+                f"Tipp: {context.get('selection')}\n"
+                f"Modell-Wk: {model_p:.0%}\n"
+                f"Erwarteter Profit (EV): {ev * 100:+.2f}%\n"
+                f"Wettmarkt-Momentum: {momentum * 100:+.1f}%\n"
+                f"Empfehlung: {'Wetten' if ev > 0.01 else 'Nicht wetten'}"
+                f"{inj_text}"
+            )
+
+            raw_json = await asyncio.to_thread(nlp.generate_json, prompt)
+            if raw_json:
+                return AnalystReasoning.model_validate(raw_json)
+            return None
+        except _OP_ERRORS:
+            log.warning("LLM structured reasoning failed", exc_info=True)
             return None
