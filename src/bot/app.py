@@ -211,7 +211,7 @@ async def agent_cycle(context: ContextTypes.DEFAULT_TYPE):
 
     try:
         orchestrator = AgentOrchestrator(bot=context.bot, chat_id=chat_router.primary_id)
-        is_fast_mode = orchestrator._has_imminent_kickoffs()
+        is_fast_mode = orchestrator._get_adaptive_interval() <= 60
 
         if not is_fast_mode and (_agent_cycle_counter % 5) != 0:
             return
@@ -221,7 +221,7 @@ async def agent_cycle(context: ContextTypes.DEFAULT_TYPE):
             mode_label = "FAST" if is_fast_mode else "NORMAL"
             await _broadcast(context.bot, (
                 f"🤖 Agent [{mode_label}]: {summary['scout_alerts']} alerts, "
-                f"{summary['bets_placed']} bets, {summary['bets_skipped']} skipped"
+                f"{summary['tips_published']} tips, {summary['tips_rejected']} rejected"
             ))
     except Exception:
         import traceback

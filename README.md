@@ -491,35 +491,30 @@ python scripts/backfill_form_features.py
 
 ## Architecture
 
-### Split Worker Architecture
+### Runtime Modes
+
+| Mode | Command | Status | Notes |
+|------|---------|--------|-------|
+| **Monolith (default)** | `python -m src.bot.app` | **Stable** | Single process, all components |
+| Split Worker | `core_worker` + `telegram_worker` | Experimental | Requires process supervision |
+
+The monolith is the stable production default. The split-worker architecture was tested
+but proved laggy under load (Redis outbox backups, race conditions, 5-15s latency).
 
 ```
-┌─────────────────────────────────────────────┐
-│ CORE WORKER (python -m src.bot.core_worker) │
-│                                             │
-│  Orchestrator (adaptive 60s / 5min)         │
-│    ├── Scout Agent    → odds, steam, RSS    │
-│    ├── Analyst Agent  → ML, enrichment      │
-│    ├── Executioner    → Kelly, circuits      │
-│    └── Performance    → ROI, self-eval      │
-│                                             │
-│  Scheduled: fetch, grading, retrain, health │
-│                                             │
-│  Writes → Redis Outbox Queue                │
-│  Reads  ← Redis Inbox Queue                 │
-└──────────────────┬──────────────────────────┘
-                   │ Redis
-┌──────────────────┴──────────────────────────┐
-│ TELEGRAM WORKER (python -m src.bot.telegram_worker) │
-│                                             │
-│  Polling / Webhook                          │
-│  Commands, Buttons, NLP Intent Router       │
-│  Multi-Chat-ID Broadcast + Access Control   │
-│  Circuit Breaker (retry + backoff)          │
-│                                             │
-│  Reads  ← Redis Outbox Queue               │
-│  Writes → Redis Inbox Queue                 │
-└─────────────────────────────────────────────┘
+┌────────────────────────────────────────────────┐
+│ MONOLITH (python -m src.bot.app)               │
+│                                                │
+│  Orchestrator (adaptive 10s / 60s / 5min)      │
+│    ├── Scout Agent    → odds, steam, RSS       │
+│    ├── Analyst Agent  → ML, enrichment, XAI    │
+│    ├── DSS Tip Publisher → human-in-the-loop   │
+│    └── Performance    → ROI, self-eval         │
+│                                                │
+│  Telegram: commands, inline keyboards, NLP     │
+│  Scheduled: fetch, grading, retrain, health    │
+│  DLQ: in-memory dead letter queue (max 100)    │
+└────────────────────────────────────────────────┘
 ```
 
 ### Pipeline Overview
@@ -546,7 +541,7 @@ Agent Orchestrator (adaptive: 60s pre-kickoff / 5min normal)
 4. **Feature Engineering** -- 34+ features including CLV, Elo differential, Poisson-derived probabilities, form tracking, H2H history, odds volatility, public bias, market momentum, attack/defense strength, form trend slope, rest fatigue, schedule congestion, over 2.5/BTTS rates, home/away splits, league position delta
 5. **Model Prediction** -- XGBoost with isotonic calibration, sport-specific models (soccer/basketball/tennis/americanfootball/icehockey), TimeSeriesSplit validation, reliability diagrams, quality gates (Brier > 0.25 rejection, min 50 samples)
 6. **Value Detection** -- Tax-adjusted EV calculation (Tipico 5% tax + combo tax-free mode), consensus sharp line from weighted Pinnacle/Betfair/bet365, public bias detection
-7. **Bet Sizing** -- Fractional Kelly criterion with performance-based multipliers, calibration-adjusted scaling, and circuit breakers
+7. **Bet Sizing** -- Fractional Kelly criterion with performance-based multipliers, calibration-adjusted scaling, circuit breakers, and **CVaR-constrained portfolio sizing** for simultaneous bets (Monte Carlo tail-risk control)
 8. **Combo Construction** -- Constraint-optimized 10/20/30-leg lotto combos with dynamic pairwise correlation penalties and market-type-aware scoring
 9. **Virtual Trading** -- Ghost-trades all signals for tracking without real money
 10. **Source Health** -- Per-source circuit breakers with failure counting, cooldown timers, and half-open recovery for all 8 data sources
@@ -891,6 +886,57 @@ Feature importance and pruning decisions are stored in the model's `metrics` dic
 | Model degradation | Hit rate < 40% over 14 days | Kelly x0.7, min EV raised (`MIN_EV_DEGRADATION`, default 0.015) |
 | Data source offline | Odds API circuit breaker open | All betting halted |
 
+### Portfolio Sizing (CVaR-Constrained Kelly)
+
+When multiple bets fire simultaneously (e.g. 5 Bundesliga games at 15:30),
+independent Kelly sizing ignores correlation and can over-expose the bankroll.
+
+**Mean-variance optimization:**
+```
+maximize  mu^T f - 0.5 f^T Sigma f
+subject to  sum(f) <= MAX_TOTAL_EXPOSURE (15%), f >= 0
+```
+
+**CVaR constraint:** After computing Kelly fractions, Monte Carlo simulation
+(5000 scenarios via Gaussian copula) estimates the Conditional Value at Risk.
+If the expected loss in the worst 5% of scenarios exceeds `CVAR_MAX_LOSS` (8%),
+fractions are scaled down via binary search until the constraint is satisfied.
+
+**Covariance estimation:**
+- Heuristic prior: same-event different-market ρ=0.30, same-sport ρ=0.05, cross-sport ρ=0.0
+- When historical residuals exist: **Ledoit-Wolf** oracle-approximating shrinkage toward the heuristic prior
+
+The portfolio sizer is called automatically in `live_feed.py` before ranking. It only
+activates when 2+ playable signals exist, and only reduces stakes (never increases).
+
+### DSS Compliance (GlüStV / GDPR Art. 22)
+
+The system strictly functions as a **Decision Support System** — no automated execution.
+
+**Meaningful Human Intervention:**
+Every tip follows the `StatefulTip` state machine (`src/models/compliance.py`):
+
+```
+Signal → TipAlert (AI) → Telegram (with DSS keyboard) → Human Review → StatefulTip (finalized)
+```
+
+**DSS Keyboard layout:**
+- Row 0: `[Tipico öffnen]` — URL button, opens Tipico app directly to event search
+- Row 1: `[Platziert @ X.XX]` `[Abgelehnt]` — audit trail callbacks
+- Row 2: `[Mathe zeigen]` `[Deep Dive]` — XAI transparency
+
+**Audit trail:** `HumanReviewData` records `operator_id`, `confirmed_odds`, `confirmed_stake`,
+`action` (placed/rejected/adjusted), `reason_for_override`, and `reviewed_at`.
+
+**Slippage tracking (4 layers):**
+1. Signal-time odds capture (`analyst_agent.py`)
+2. Cache-first re-validation with **math veto** at confirmation (`validator_node.py`) — auto-rejects if EV < 0 or odds < MAO
+3. T-90s closing line snapshot (`clv_logger.py`)
+4. CLV regressor training on signal vs closing odds (`pricing_model.py`)
+
+**Tipico deep links:** `src/integrations/tipico_deeplink.py` generates search URLs with
+EN→DE team name translation (26 teams mapped). Betslip pre-population for Tipico-native IDs.
+
 ### Backtesting
 
 Walk-forward backtesting engine with strategy comparison:
@@ -948,9 +994,13 @@ All settings are loaded from environment variables (`.env` file) via `src/core/s
 | `MAX_STAKE_LONGSHOT_PCT` | `0.0075` | No | Max stake for draws/longshots (0.75%) |
 | `LONGSHOT_ODDS_THRESHOLD` | `3.5` | No | Odds >= this trigger longshot cap |
 | `MIN_COMBO_LEG_CONFIDENCE` | `0.40` | No | Min model_probability per combo leg |
-| **Kelly Fraction** | | | |
+| **Kelly Fraction & Portfolio** | | | |
 | `KELLY_FRACTION_DEFAULT` | `0.20` | No | Standard Kelly fraction for bet sizing |
 | `KELLY_FRACTION_REACTIVE` | `0.15` | No | Reduced Kelly fraction for reactive bets (steam moves) |
+| `MAX_TOTAL_EXPOSURE` | `0.15` | No | Max total bankroll fraction across simultaneous bets (15%) |
+| `CVAR_ALPHA` | `0.05` | No | CVaR tail probability (worst 5% of scenarios) |
+| `CVAR_MAX_LOSS` | `0.08` | No | Max acceptable expected loss in tail scenarios (8%) |
+| `CVAR_N_SCENARIOS` | `5000` | No | Monte Carlo scenarios for CVaR estimation |
 | **Circuit Breakers** | | | |
 | `LOSING_STREAK_THRESHOLD` | `7` | No | Consecutive losses to trigger losing streak breaker |
 | `DAILY_LOSS_LIMIT_PCT` | `0.05` | No | Daily loss as fraction of bankroll to trigger breaker (5%) |
@@ -1085,7 +1135,8 @@ Bet-Bot/
 │   │   ├── scout_agent.py              # Odds monitoring, steam moves, momentum
 │   │   ├── analyst_agent.py            # Deep analysis, ML prediction, Gemma reasoning
 │   │   ├── executioner_agent.py        # Circuit breakers & bet execution
-│   │   └── orchestrator.py             # Agent coordination (adaptive polling)
+│   │   ├── orchestrator.py             # Agent coordination (adaptive polling, DLQ)
+│   │   └── tip_publisher.py            # DSS tip flow (StatefulTip state machine)
 │   ├── bot/
 │   │   ├── app.py                      # Monolithic entry point (backward compat)
 │   │   ├── core_worker.py              # Core worker (signals, agents, ML — no Telegram)
@@ -1107,6 +1158,7 @@ Bet-Bot/
 │   │   ├── dynamic_settings.py         # Redis-backed dynamic settings (Telegram toggles)
 │   │   ├── elo_ratings.py              # Redis-backed Elo power ratings
 │   │   ├── enrichment.py               # News sentiment & injury enrichment
+│   │   ├── fetch_scheduler.py          # Sequential rate-limited odds fetcher (sync + async)
 │   │   ├── feature_engineering.py      # 34 feature builder (core + stats-based)
 │   │   ├── form_tracker.py             # Redis-backed last-5-games form
 │   │   ├── ghost_trading.py            # Virtual bet placement
@@ -1115,6 +1167,7 @@ Bet-Bot/
 │   │   ├── live_feed.py                # Main signal pipeline (DC/DNB, momentum)
 │   │   ├── ml_trainer.py               # XGBoost training with calibration
 │   │   ├── performance_monitor.py      # ROI tracking & circuit breakers
+│   │   ├── portfolio_sizing.py         # CVaR-constrained simultaneous Kelly (Ledoit-Wolf)
 │   │   ├── poisson_model.py            # Poisson goal model (0.5/1.5/2.5/3.5)
 │   │   ├── pricing_model.py            # True probability estimation (XGBoost)
 │   │   ├── risk_guards.py             # Confidence gates, stake caps, data source gate
@@ -1138,9 +1191,11 @@ Bet-Bot/
 │   │   ├── rss_fetcher.py              # Rotowire RSS injury/lineup scraper
 │   │   ├── injury_aggregator.py        # Unified aggregator (API-Sports + RSS + LLM)
 │   │   ├── apisports_fetcher.py        # API-Sports injuries/lineups
-│   │   └── ollama_sentiment.py         # Ollama Gemma 3 4B (sentiment + intents)
+│   │   ├── ollama_sentiment.py         # Ollama Gemma 3 4B (sentiment + intents)
+│   │   └── tipico_deeplink.py          # Tipico deep links (search + betslip + combo)
 │   ├── models/
-│   │   └── betting.py                  # Pydantic models (BetSignal, ComboBet)
+│   │   ├── betting.py                  # Pydantic models (BetSignal, ComboBet)
+│   │   └── compliance.py              # DSS models (TipAlert, StatefulTip, HumanReviewData)
 │   └── utils/
 │       ├── charts.py                   # Matplotlib dashboards (equity, pie)
 │       └── telegram_md.py              # Telegram markdown formatting

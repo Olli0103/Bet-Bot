@@ -1,4 +1,4 @@
-"""Simultaneous Kelly Portfolio Sizing (Mean-Variance Optimization).
+"""Simultaneous Kelly Portfolio Sizing (Mean-Variance + CVaR Optimization).
 
 When multiple bets fire simultaneously (e.g. 5 Bundesliga games at 15:30),
 sizing each independently with Kelly leads to catastrophic over-exposure
@@ -16,6 +16,14 @@ log-growth rate under the constraint of a maximum total exposure cap.
 For uncorrelated bets, this reduces to independent Kelly (as expected).
 For correlated bets (e.g. same-league matches, Over/Under + H2H on same
 match), it automatically reduces exposure to avoid concentration risk.
+
+**CVaR (Conditional Value at Risk):**
+Betting returns have fat left tails — a portfolio can lose most of its
+simultaneous stakes in a single bad window.  Pure mean-variance ignores
+this asymmetry.  The ``cvar_constrained_kelly_sizing`` function adds a
+CVaR constraint: the expected loss in the worst α% of scenarios must
+not exceed ``max_cvar_loss`` (fraction of bankroll).  This caps left-
+tail risk without sacrificing much upside.
 """
 from __future__ import annotations
 
@@ -29,6 +37,11 @@ log = logging.getLogger(__name__)
 
 # Maximum fraction of bankroll that can be risked across all simultaneous bets
 MAX_TOTAL_EXPOSURE = 0.15  # 15% hard cap
+
+# CVaR defaults
+CVAR_ALPHA = 0.05           # 5th-percentile tail
+CVAR_MAX_LOSS = 0.08        # max 8% expected loss in worst 5% scenarios
+CVAR_N_SCENARIOS = 5_000    # Monte Carlo scenarios
 
 
 def simultaneous_kelly_sizing(
@@ -120,6 +133,216 @@ def _independent_kelly_fallback(
     if total > max_total_exposure and total > 0:
         raw = raw * (max_total_exposure / total)
     return np.round(raw, 6)
+
+
+# ---------------------------------------------------------------------------
+# CVaR-constrained portfolio sizing
+# ---------------------------------------------------------------------------
+
+def _simulate_portfolio_returns(
+    fractions: np.ndarray,
+    probabilities: np.ndarray,
+    odds: np.ndarray,
+    cov_matrix: np.ndarray,
+    n_scenarios: int = CVAR_N_SCENARIOS,
+    rng: Optional[np.random.Generator] = None,
+) -> np.ndarray:
+    """Monte Carlo simulation of portfolio returns.
+
+    Each scenario draws correlated Bernoulli outcomes (win/loss) for
+    every bet, then computes the portfolio return as:
+        R = sum_i f_i * (odds_i - 1)  if bet i wins
+          - sum_i f_i                  if bet i loses
+
+    Correlation is introduced via a Gaussian copula: draw correlated
+    normals from the covariance matrix, then threshold each at the
+    bet's win probability to decide win/loss.
+
+    Returns
+    -------
+    np.ndarray
+        Portfolio returns for each scenario, shape (n_scenarios,).
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    n_bets = len(fractions)
+
+    # Correlation matrix from covariance
+    std = np.sqrt(np.diag(cov_matrix))
+    std[std < 1e-12] = 1e-12
+    corr = cov_matrix / np.outer(std, std)
+    np.fill_diagonal(corr, 1.0)
+
+    # Ensure PSD for Cholesky
+    eigvals = np.linalg.eigvalsh(corr)
+    if eigvals.min() < 1e-8:
+        corr = corr + np.eye(n_bets) * (1e-8 - eigvals.min())
+
+    try:
+        L = np.linalg.cholesky(corr)
+    except np.linalg.LinAlgError:
+        # Fallback: independent draws
+        L = np.eye(n_bets)
+
+    # Draw correlated standard normals
+    z = rng.standard_normal((n_scenarios, n_bets))
+    correlated = z @ L.T  # (n_scenarios, n_bets)
+
+    # Convert to correlated uniform via CDF, then to Bernoulli
+    from scipy.stats import norm
+    u = norm.cdf(correlated)
+    wins = u < probabilities  # (n_scenarios, n_bets) boolean
+
+    # Compute returns per scenario
+    payoffs = np.where(wins, fractions * (odds - 1.0), -fractions)
+    portfolio_returns = payoffs.sum(axis=1)
+
+    return portfolio_returns
+
+
+def compute_cvar(
+    returns: np.ndarray,
+    alpha: float = CVAR_ALPHA,
+) -> float:
+    """Compute Conditional Value at Risk (Expected Shortfall).
+
+    CVaR_α = mean of the worst α fraction of returns.
+    A more negative CVaR means higher left-tail risk.
+
+    Parameters
+    ----------
+    returns : np.ndarray
+        Simulated portfolio returns.
+    alpha : float
+        Tail probability (default 0.05 = worst 5%).
+
+    Returns
+    -------
+    float
+        CVaR as a negative number (loss).  E.g. -0.08 means the
+        expected loss in the worst 5% of scenarios is 8% of bankroll.
+    """
+    n = len(returns)
+    if n == 0:
+        return 0.0
+    cutoff = max(1, int(np.ceil(n * alpha)))
+    sorted_returns = np.sort(returns)
+    return float(sorted_returns[:cutoff].mean())
+
+
+def cvar_constrained_kelly_sizing(
+    edges: np.ndarray,
+    cov_matrix: np.ndarray,
+    probabilities: np.ndarray,
+    odds: np.ndarray,
+    kelly_fraction: float = 0.25,
+    max_total_exposure: float = MAX_TOTAL_EXPOSURE,
+    alpha: float = CVAR_ALPHA,
+    max_cvar_loss: float = CVAR_MAX_LOSS,
+    n_scenarios: int = CVAR_N_SCENARIOS,
+) -> np.ndarray:
+    """Kelly sizing with a CVaR constraint on left-tail risk.
+
+    First runs standard mean-variance Kelly.  Then checks whether
+    the resulting portfolio satisfies the CVaR constraint via Monte
+    Carlo simulation.  If not, iteratively scales down until the
+    constraint is met.
+
+    Parameters
+    ----------
+    edges : np.ndarray
+        Expected value per bet, shape (n_bets,).
+    cov_matrix : np.ndarray
+        Covariance matrix, shape (n_bets, n_bets).
+    probabilities : np.ndarray
+        Win probabilities per bet, shape (n_bets,).
+    odds : np.ndarray
+        Decimal odds per bet, shape (n_bets,).
+    kelly_fraction : float
+        Fractional Kelly multiplier.
+    max_total_exposure : float
+        Hard cap on total allocation.
+    alpha : float
+        CVaR tail probability (default 0.05).
+    max_cvar_loss : float
+        Maximum acceptable CVaR loss as a positive fraction of bankroll.
+        E.g. 0.08 = "the expected loss in the worst 5% of scenarios must
+        not exceed 8% of bankroll".
+    n_scenarios : int
+        Monte Carlo scenarios for CVaR estimation.
+
+    Returns
+    -------
+    np.ndarray
+        Optimal fractions satisfying both exposure and CVaR constraints.
+    """
+    n_bets = len(edges)
+    if n_bets == 0:
+        return np.array([])
+
+    probabilities = np.asarray(probabilities, dtype=float)
+    odds = np.asarray(odds, dtype=float)
+
+    # Step 1: Get unconstrained (mean-variance) Kelly solution
+    fractions = simultaneous_kelly_sizing(
+        edges, cov_matrix, kelly_fraction, max_total_exposure,
+    )
+
+    if fractions.sum() < 1e-8:
+        return fractions  # Nothing to constrain
+
+    # Step 2: Check CVaR constraint via Monte Carlo
+    rng = np.random.default_rng(42)
+    returns = _simulate_portfolio_returns(
+        fractions, probabilities, odds, cov_matrix, n_scenarios, rng,
+    )
+    cvar = compute_cvar(returns, alpha)
+
+    if cvar >= -max_cvar_loss:
+        log.debug(
+            "CVaR constraint satisfied: CVaR(%.0f%%)=%.4f >= -%.4f",
+            alpha * 100, cvar, max_cvar_loss,
+        )
+        return fractions
+
+    # Step 3: Iteratively scale down to satisfy CVaR constraint
+    # Binary search for the largest scale factor that satisfies CVaR
+    lo, hi = 0.0, 1.0
+    best_fractions = fractions * 0.0  # worst case: zero everything
+
+    for _ in range(20):  # 20 iterations gives ~1e-6 precision
+        mid = (lo + hi) / 2.0
+        scaled = fractions * mid
+        returns = _simulate_portfolio_returns(
+            scaled, probabilities, odds, cov_matrix, n_scenarios, rng,
+        )
+        trial_cvar = compute_cvar(returns, alpha)
+
+        if trial_cvar >= -max_cvar_loss:
+            lo = mid
+            best_fractions = scaled
+        else:
+            hi = mid
+
+    best_fractions[best_fractions < 1e-6] = 0.0
+    scale_applied = lo
+
+    log.info(
+        "CVaR constraint required scaling: %.1f%% of original Kelly "
+        "(CVaR(%.0f%%)=%.4f, limit=%.4f)",
+        scale_applied * 100, alpha * 100,
+        compute_cvar(
+            _simulate_portfolio_returns(
+                best_fractions, probabilities, odds, cov_matrix,
+                n_scenarios, rng,
+            ),
+            alpha,
+        ),
+        -max_cvar_loss,
+    )
+
+    return np.round(best_fractions, 6)
 
 
 def build_covariance_matrix(

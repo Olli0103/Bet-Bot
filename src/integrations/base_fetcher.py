@@ -50,6 +50,12 @@ def _safe_sync_run(coro, timeout: float = 30):
     Always creates a fresh event loop in a dedicated thread to avoid
     'Event loop is closed' errors from reusing dead loops. The coroutine
     is bounded by a timeout to prevent hangs.
+
+    Resource cleanup:
+    - All pending tasks are cancelled before the loop closes
+    - The thread-pool executor is bounded to 1 worker to avoid thread leaks
+    - Executor shutdown uses ``wait=True`` to ensure the thread is joined
+    - A ``cancel_scope`` timeout on the outer future prevents orphaned threads
     """
     async def _with_timeout():
         return await asyncio.wait_for(coro, timeout=timeout)
@@ -69,6 +75,10 @@ def _safe_sync_run(coro, timeout: float = 30):
                     loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
             except Exception:
                 pass
+            try:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception:
+                pass
             loop.close()
 
     try:
@@ -76,7 +86,13 @@ def _safe_sync_run(coro, timeout: float = 30):
         # Already inside an event loop — offload to a thread with its own loop
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(_run_in_new_loop)
-            return future.result(timeout=timeout + 5)
+            try:
+                return future.result(timeout=timeout + 5)
+            except concurrent.futures.TimeoutError:
+                future.cancel()
+                raise TimeoutError(
+                    f"_safe_sync_run: coroutine did not complete within {timeout + 5}s"
+                )
     except RuntimeError:
         # No running loop — run directly in a new loop
         return _run_in_new_loop()

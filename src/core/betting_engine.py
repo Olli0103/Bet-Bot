@@ -145,6 +145,65 @@ class BettingEngine:
             is_paper=is_paper_mode,
         )
 
+    def size_portfolio(
+        self,
+        signals: List[BetSignal],
+        max_cvar_loss: float = 0.08,
+    ) -> List[BetSignal]:
+        """Re-size a batch of simultaneous signals using CVaR-constrained Kelly.
+
+        When multiple bets fire in the same window (e.g. 5 Bundesliga games
+        at 15:30), independent Kelly sizing ignores correlation and can lead
+        to over-exposure.  This method re-sizes the entire batch as a
+        portfolio, constraining left-tail risk via CVaR.
+
+        Signals with ``recommended_stake == 0`` (rejected) are left untouched.
+        The method modifies ``recommended_stake`` in-place and returns the
+        same list for convenience.
+        """
+        from src.core.portfolio_sizing import (
+            build_covariance_matrix,
+            cvar_constrained_kelly_sizing,
+        )
+
+        playable = [s for s in signals if s.recommended_stake > 0]
+        if len(playable) < 2:
+            return signals  # Nothing to correlate
+
+        edges = np.array([s.expected_value for s in playable])
+        probs = np.array([s.model_probability for s in playable])
+        odds = np.array([s.bookmaker_odds for s in playable])
+        event_ids = [s.event_id for s in playable]
+        markets = [s.market for s in playable]
+        sports = [s.sport for s in playable]
+
+        cov = build_covariance_matrix(
+            n_bets=len(playable),
+            event_ids=event_ids,
+            markets=markets,
+            sports=sports,
+        )
+
+        fractions = cvar_constrained_kelly_sizing(
+            edges=edges,
+            cov_matrix=cov,
+            probabilities=probs,
+            odds=odds,
+            kelly_fraction=get_dynamic_kelly_frac(),
+            max_cvar_loss=max_cvar_loss,
+        )
+
+        for sig, frac in zip(playable, fractions):
+            new_stake = round(frac * self.bankroll, 2)
+            if new_stake < sig.recommended_stake:
+                log.info(
+                    "CVaR portfolio sizing: %s %s stake %.2f -> %.2f",
+                    sig.sport, sig.selection, sig.recommended_stake, new_stake,
+                )
+                sig.recommended_stake = new_stake
+
+        return signals
+
     @staticmethod
     def _is_learning_phase(sport: str, min_samples: int = 500, max_brier: float = 0.23) -> bool:
         """Check if the model for this sport is still in a learning phase.

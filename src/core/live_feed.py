@@ -908,6 +908,10 @@ def fetch_and_build_signals(
                         "market": f"totals {point_val}",
                     })
 
+    # CVaR-constrained portfolio sizing: re-size simultaneous bets to cap
+    # left-tail risk.  Only activates when 2+ playable signals exist.
+    engine.size_portfolio(signals)
+
     # Rank: model_probability DESC -> EV DESC -> odds ASC
     # Only include signals that passed the confidence gate (stake > 0)
     ranked = [s for s in signals if s.expected_value > 0 and s.recommended_stake > 0]
