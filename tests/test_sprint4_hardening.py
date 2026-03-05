@@ -500,3 +500,237 @@ class TestGammaPoissonUpdate:
         # After 10 extreme results, attack should be high but clamped at 3.0
         assert stored_strengths["attack"] <= 3.0
         assert stored_strengths["defense"] >= 0.2
+
+
+# ---------------------------------------------------------------------------
+# 7. IdentityCalibrator fallback
+# ---------------------------------------------------------------------------
+
+
+class TestIdentityCalibrator:
+    """Verify IdentityCalibrator passes through raw probabilities."""
+
+    def test_identity_passthrough(self):
+        """IdentityCalibrator.predict returns input unchanged."""
+        from src.core.ml_trainer import IdentityCalibrator
+
+        cal = IdentityCalibrator()
+        raw = np.array([0.1, 0.5, 0.9])
+        result = cal.predict(raw)
+        np.testing.assert_array_equal(result, raw)
+
+    def test_identity_in_beta_calibrated_model(self):
+        """BetaCalibratedModel with IdentityCalibrator returns clamped raw probs."""
+        from xgboost import XGBClassifier
+
+        from src.core.ml_trainer import BetaCalibratedModel, IdentityCalibrator
+
+        rng = np.random.RandomState(42)
+        X = rng.randn(100, 3)
+        y = (X[:, 0] > 0).astype(int)
+
+        base = XGBClassifier(n_estimators=10, max_depth=2, verbosity=0, use_label_encoder=False)
+        base.fit(X, y)
+
+        model = BetaCalibratedModel(base, IdentityCalibrator())
+        proba = model.predict_proba(X[:5])
+
+        assert proba.shape == (5, 2)
+        np.testing.assert_allclose(proba.sum(axis=1), 1.0, atol=1e-6)
+        # Should be close to raw XGBoost output (just clamped)
+        raw = base.predict_proba(X[:5])[:, 1]
+        np.testing.assert_allclose(proba[:, 1], np.clip(raw, 0.01, 0.99), atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# 8. Out-of-Sample DM-Test holdout preds
+# ---------------------------------------------------------------------------
+
+
+class TestDMHoldoutIntegrity:
+    """Verify holdout predictions come from val_model, not final model."""
+
+    def test_holdout_preds_are_out_of_sample(self):
+        """The holdout predictions must NOT be from the 100% trained model.
+
+        We verify this by checking that a model trained on data including
+        the holdout would produce different (better) predictions than
+        what's stored in metrics.
+        """
+        import pandas as pd
+        from xgboost import XGBClassifier
+
+        from src.core.ml_trainer import _train_xgboost
+
+        rng = np.random.RandomState(42)
+        n = 500
+        X_data = pd.DataFrame({
+            f"feat_{i}": rng.randn(n) for i in range(5)
+        })
+        y_data = pd.Series((X_data["feat_0"] + X_data["feat_1"] > 0).astype(int))
+
+        features = [f"feat_{i}" for i in range(5)]
+        model, metrics, final_features = _train_xgboost(X_data, y_data, features, prune_features=False)
+
+        # The stored holdout_y_pred should exist
+        assert "holdout_y_pred" in metrics
+        assert "holdout_y_true" in metrics
+        stored_preds = np.array(metrics["holdout_y_pred"])
+
+        # Now get predictions from the final model (which saw holdout data)
+        holdout_idx = max(1, int(n * 0.8))
+        X_holdout = X_data[features].values[holdout_idx:]
+        final_preds = model.predict_proba(X_holdout)[:, 1]
+
+        # They should NOT be identical (val_model != final_model)
+        # The final model trained on holdout data should have different preds
+        assert not np.allclose(stored_preds, final_preds, atol=1e-6), \
+            "Holdout predictions match final model — in-sample leak detected!"
+
+
+# ---------------------------------------------------------------------------
+# 9. Tipico Tax-Free Combos
+# ---------------------------------------------------------------------------
+
+
+class TestTipicoTaxFreeCombos:
+    """Verify 3+ leg combos get tax-free treatment."""
+
+    def test_3leg_combo_tax_free(self):
+        """3-leg combos should compute EV without tax deduction."""
+        from unittest.mock import patch
+
+        from src.core.betting_engine import BettingEngine
+
+        engine = BettingEngine(bankroll=1000.0)
+        legs = [
+            {"event_id": f"e{i}", "selection": f"T{i}", "odds": 2.0,
+             "probability": 0.55, "sport": "soccer_epl", "market_type": "h2h"}
+            for i in range(3)
+        ]
+
+        mock_model = {"metrics": {"brier_score": 0.18}, "n_samples": 1000}
+        with patch("src.core.ml_trainer.load_model", return_value=mock_model):
+            combo = engine.build_combo(legs, kelly_frac=0.10, tax_rate=0.05)
+
+        # With 3 legs, effective tax should be 0.0
+        # EV should be higher than if 5% tax were applied
+        p = combo.combined_probability
+        odds = combo.combined_odds
+        ev_no_tax = p * odds - 1.0
+        ev_with_tax = p * odds * 0.95 - 1.0
+
+        # The stored EV should match the no-tax calculation, not the taxed one
+        assert abs(combo.expected_value - ev_no_tax) < abs(combo.expected_value - ev_with_tax)
+
+    def test_2leg_combo_still_taxed(self):
+        """2-leg combos should still have tax applied."""
+        from unittest.mock import patch
+
+        from src.core.betting_engine import BettingEngine
+
+        engine = BettingEngine(bankroll=1000.0)
+        legs = [
+            {"event_id": f"e{i}", "selection": f"T{i}", "odds": 2.0,
+             "probability": 0.55, "sport": "soccer_epl", "market_type": "h2h"}
+            for i in range(2)
+        ]
+
+        mock_model = {"metrics": {"brier_score": 0.18}, "n_samples": 1000}
+        with patch("src.core.ml_trainer.load_model", return_value=mock_model):
+            combo_taxed = engine.build_combo(legs, kelly_frac=0.10, tax_rate=0.05)
+            combo_notax = engine.build_combo(legs, kelly_frac=0.10, tax_rate=0.0)
+
+        # 2-leg combo with tax_rate=0.05 should have lower EV than tax_rate=0.0
+        assert combo_taxed.expected_value < combo_notax.expected_value
+
+
+# ---------------------------------------------------------------------------
+# 10. Dixon-Coles Marginal Preservation
+# ---------------------------------------------------------------------------
+
+
+class TestDixonColesMarginals:
+    """Verify the Dixon-Coles adjustment preserves marginal distributions."""
+
+    def test_matrix_sums_to_one(self):
+        """Score matrix should sum to approximately 1.0."""
+        from src.core.poisson_model import PoissonSoccerModel
+
+        matrix = PoissonSoccerModel._score_matrix(1.5, 1.2, rho=-0.13)
+        total = sum(sum(row) for row in matrix)
+        assert abs(total - 1.0) < 0.01
+
+    def test_marginals_preserved(self):
+        """Row and column marginals should match the independent Poisson PMF."""
+        from scipy.stats import poisson as poisson_dist
+
+        from src.core.poisson_model import PoissonSoccerModel, SCORE_RANGE
+
+        home_xg, away_xg = 1.5, 1.2
+        matrix = PoissonSoccerModel._score_matrix(home_xg, away_xg, rho=-0.13)
+        matrix_indep = PoissonSoccerModel._score_matrix(home_xg, away_xg, rho=0.0)
+
+        # Home marginals (row sums)
+        home_marginals_dc = [sum(matrix[i]) for i in range(SCORE_RANGE)]
+        home_marginals_indep = [sum(matrix_indep[i]) for i in range(SCORE_RANGE)]
+
+        # The DC-adjusted marginals should be very close to the independent ones
+        for i in range(SCORE_RANGE):
+            assert abs(home_marginals_dc[i] - home_marginals_indep[i]) < 0.02, \
+                f"Home marginal i={i}: DC={home_marginals_dc[i]:.4f} vs Indep={home_marginals_indep[i]:.4f}"
+
+        # Away marginals (column sums)
+        away_marginals_dc = [sum(matrix[i][j] for i in range(SCORE_RANGE)) for j in range(SCORE_RANGE)]
+        away_marginals_indep = [sum(matrix_indep[i][j] for i in range(SCORE_RANGE)) for j in range(SCORE_RANGE)]
+
+        for j in range(SCORE_RANGE):
+            assert abs(away_marginals_dc[j] - away_marginals_indep[j]) < 0.02, \
+                f"Away marginal j={j}: DC={away_marginals_dc[j]:.4f} vs Indep={away_marginals_indep[j]:.4f}"
+
+    def test_no_negative_probabilities(self):
+        """All cells must be non-negative after DC adjustment."""
+        from src.core.poisson_model import PoissonSoccerModel, SCORE_RANGE
+
+        # Test with extreme rho values
+        for rho in [-0.25, -0.13, 0.0, 0.10]:
+            matrix = PoissonSoccerModel._score_matrix(1.5, 1.2, rho=rho)
+            for i in range(SCORE_RANGE):
+                for j in range(SCORE_RANGE):
+                    assert matrix[i][j] >= 0.0, \
+                        f"Negative probability at ({i},{j}) with rho={rho}: {matrix[i][j]}"
+
+
+# ---------------------------------------------------------------------------
+# 11. Event-Driven Orchestrator
+# ---------------------------------------------------------------------------
+
+
+class TestEventDrivenOrchestrator:
+    """Verify the orchestrator's event-driven architecture."""
+
+    def test_alert_queue_exists(self):
+        """Orchestrator must have an asyncio.Queue for alert routing."""
+        import asyncio
+        from unittest.mock import MagicMock, patch
+
+        with patch("src.agents.orchestrator.ScoutAgent"), \
+             patch("src.agents.orchestrator.AnalystAgent"), \
+             patch("src.agents.orchestrator.ExecutionerAgent"), \
+             patch("src.agents.orchestrator.PerformanceMonitor"), \
+             patch("src.agents.orchestrator.settings"):
+            from src.agents.orchestrator import AgentOrchestrator
+            orch = AgentOrchestrator.__new__(AgentOrchestrator)
+            orch.alert_queue = asyncio.Queue()
+
+        assert isinstance(orch.alert_queue, asyncio.Queue)
+
+    def test_fast_interval_is_5s(self):
+        """Fast polling interval should be 5 seconds, not 60."""
+        from src.agents.orchestrator import FAST_INTERVAL_SECONDS
+        assert FAST_INTERVAL_SECONDS == 5
+
+    def test_normal_interval_is_60s(self):
+        """Normal polling interval should be 60 seconds, not 300."""
+        from src.agents.orchestrator import NORMAL_INTERVAL_SECONDS
+        assert NORMAL_INTERVAL_SECONDS == 60

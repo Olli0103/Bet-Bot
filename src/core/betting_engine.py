@@ -401,11 +401,17 @@ class BettingEngine:
         corr_matrix = self._build_correlation_matrix(combo_legs)
         p_copula = self._compute_joint_probability_copula(combo_legs, corr_matrix)
 
+        # TIPICO TAX-FREE RULE: Combos with 3+ legs are exempt from the
+        # 5% Wettsteuer.  Without this, the engine incorrectly deducts 5%
+        # from every combo's EV, systematically rejecting profitable 3-leg
+        # parlays that would actually be placed tax-free.
+        effective_tax = 0.0 if len(combo_legs) >= 3 else tax_rate
+
         # Dynamic Kelly for combos: use first leg's sport for model lookup
         combo_sport = combo_legs[0].sport if combo_legs else ""
         effective_kelly_frac = get_dynamic_kelly_frac(combo_sport, base_frac=kelly_frac)
-        ev = expected_value(p_copula, odds, tax_rate=tax_rate)
-        kf = kelly_fraction(p_copula, odds, frac=effective_kelly_frac, tax_rate=tax_rate)
+        ev = expected_value(p_copula, odds, tax_rate=effective_tax)
+        kf = kelly_fraction(p_copula, odds, frac=effective_kelly_frac, tax_rate=effective_tax)
         stake = round(kelly_stake(self.bankroll, kf), 2)
 
         # For backward compatibility, store the ratio vs independent as "correlation_penalty"

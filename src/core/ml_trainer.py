@@ -461,6 +461,21 @@ def _get_active_features(X: pd.DataFrame, feature_list: List[str]) -> List[str]:
     return active
 
 
+class IdentityCalibrator:
+    """Safe fallback that passes through raw probabilities unchanged.
+
+    Used when BetaCalibration fitting fails — preserves the XGBoost
+    probability space instead of forcing it through a degenerate
+    2-point calibration curve that destroys all information.
+    """
+
+    def predict(self, raw_probs: np.ndarray) -> np.ndarray:
+        return raw_probs
+
+    def fit(self, *args, **kwargs):
+        return self
+
+
 class BetaCalibratedModel:
     """Wrapper: raw XGBClassifier + BetaCalibration as a single predict_proba() interface.
 
@@ -470,7 +485,7 @@ class BetaCalibratedModel:
     information that Platt scaling destroys.
     """
 
-    def __init__(self, base_model: XGBClassifier, calibrator: BetaCalibration):
+    def __init__(self, base_model: XGBClassifier, calibrator):
         self.base_model = base_model
         self.calibrator = calibrator
 
@@ -555,13 +570,12 @@ def _train_xgboost(
     y_oof_valid = y_vals[oof_mask]
 
     # --- Step 3: fit BetaCalibration on OOF predictions ---
-    beta_cal = BetaCalibration(parameters="abm")
     try:
+        beta_cal = BetaCalibration(parameters="abm")
         beta_cal.fit(oof_valid, y_oof_valid)
     except Exception as exc:
-        log.warning("Beta calibration fit failed (%s), using identity", exc)
-        beta_cal = BetaCalibration(parameters="abm")
-        beta_cal.fit(np.array([0.1, 0.9]), np.array([0, 1]))
+        log.error("Beta calibration failed — using Identity fallback. Error: %s", exc)
+        beta_cal = IdentityCalibrator()
 
     # --- Feature pruning pass (uses the validation model, not final) ---
     final_features = active_features
@@ -612,12 +626,12 @@ def _train_xgboost(
                     oof_preds_pruned[test_index] = cv_m.predict_proba(X_pruned[test_index])[:, 1]
 
                 oof_mask_p = ~np.isnan(oof_preds_pruned)
-                beta_cal = BetaCalibration(parameters="abm")
                 try:
+                    beta_cal = BetaCalibration(parameters="abm")
                     beta_cal.fit(oof_preds_pruned[oof_mask_p], y_vals[oof_mask_p])
                 except Exception:
-                    beta_cal = BetaCalibration(parameters="abm")
-                    beta_cal.fit(np.array([0.1, 0.9]), np.array([0, 1]))
+                    log.error("Beta recalibration (pruned) failed — using Identity fallback")
+                    beta_cal = IdentityCalibrator()
             else:
                 log.info(
                     "Pruned model rejected: brier %.4f -> %.4f (keeping all features)",
@@ -632,13 +646,18 @@ def _train_xgboost(
 
     calibrated = BetaCalibratedModel(final_base_model, beta_cal)
 
-    # Store holdout predictions for Diebold-Mariano testing (from val model, not final)
+    # Store STRICT OUT-OF-SAMPLE holdout predictions for Diebold-Mariano.
+    # CRITICAL: Use val_model (trained on first 80%) wrapped with beta_cal,
+    # NOT final_base_model (trained on 100%).  Using the final model here
+    # would create in-sample predictions that artificially inflate metrics,
+    # causing the champion to never be dethroned by future challengers.
     if len(X_holdout) > 0:
+        val_wrapped = BetaCalibratedModel(val_model, beta_cal)
         if final_features == active_features:
-            holdout_preds = calibrated.predict_proba(X_holdout)[:, 1]
+            holdout_preds = val_wrapped.predict_proba(X_holdout)[:, 1]
         else:
             kept_idx = [active_features.index(f) for f in final_features]
-            holdout_preds = calibrated.predict_proba(X_holdout[:, kept_idx])[:, 1]
+            holdout_preds = val_wrapped.predict_proba(X_holdout[:, kept_idx])[:, 1]
         metrics["holdout_y_true"] = y_holdout.tolist()
         metrics["holdout_y_pred"] = holdout_preds.tolist()
 
