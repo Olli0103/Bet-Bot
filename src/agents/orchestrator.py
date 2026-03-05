@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 from src.agents.analyst_agent import AnalystAgent
 from src.agents.executioner_agent import ExecutionerAgent
 from src.agents.scout_agent import ScoutAgent
+from src.agents.tip_publisher import TipState, TipStatus, tip_flow
 from src.core.performance_monitor import PerformanceMonitor
 from src.core.settings import settings
 from src.data.redis_cache import cache
@@ -372,6 +373,80 @@ class AgentOrchestrator:
             await worker_task
         except asyncio.CancelledError:
             pass
+
+    async def _get_current_odds(self, event_id: str, selection: str) -> float:
+        """Fetch the latest odds for a selection from the odds API.
+
+        Used by the tip publisher to refresh odds before validation.
+        """
+        try:
+            fetcher = OddsFetcher()
+            odds_data = await fetcher.get_event_odds(event_id)
+            if odds_data and selection in odds_data:
+                return float(odds_data[selection])
+        except Exception as exc:
+            log.warning("Failed to fetch current odds for %s: %s", event_id, exc)
+        return 0.0
+
+    async def _publish_tip(self, state: TipState) -> None:
+        """Publish a validated tip via Telegram (Tippprovider output).
+
+        Instead of placing a bet, formats and sends the tip as an
+        actionable recommendation to the user's Telegram channel.
+        """
+        if not self.bot or not self.chat_id:
+            log.info("Tip ready but no Telegram bot configured: %s", state.to_dict())
+            return
+
+        ev_pct = state.expected_value * 100
+        revals = (f" (re-validated {state.revalidation_count}x)"
+                  if state.revalidation_count > 0 else "")
+        text = (
+            f"\U0001f4ca TIPP{revals}\n"
+            f"{state.home} vs {state.away}\n"
+            f"Selection: {state.selection}\n"
+            f"Odds: {state.current_odds:.2f}\n"
+            f"Model Prob: {state.model_probability:.1%}\n"
+            f"Tax-Adj EV: {ev_pct:+.2f}%\n"
+            f"Sport: {state.sport}"
+        )
+        try:
+            await self.bot.send_message(chat_id=self.chat_id, text=text)
+        except Exception as exc:
+            log.warning("Failed to send tip to Telegram: %s", exc)
+
+    async def run_tip_flow(self, alert: Dict[str, Any]) -> TipState:
+        """Process a single alert through the stateful tip publisher.
+
+        This is the Tippprovider alternative to ``_process_single_alert``
+        that uses the state-graph flow with re-validation instead of the
+        linear Executioner pipeline.
+        """
+        state = TipState(
+            event_id=alert.get("event_id", ""),
+            sport=alert.get("sport", ""),
+            home=alert.get("home", ""),
+            away=alert.get("away", ""),
+            selection=alert.get("selection", alert.get("team", "")),
+            market=alert.get("market", "h2h"),
+            initial_odds=float(alert.get("current_odds", 2.0)),
+        )
+
+        result = await tip_flow(
+            state=state,
+            analyst=self.analyst,
+            get_current_odds=self._get_current_odds,
+            publish_fn=self._publish_tip,
+        )
+
+        # Cache tip state for monitoring
+        cache.set_json(
+            f"tip:{state.event_id}:{state.market}",
+            state.to_dict(),
+            ttl_seconds=6 * 3600,
+        )
+
+        return result
 
     def stop(self) -> None:
         """Stop the continuous monitoring loop."""
