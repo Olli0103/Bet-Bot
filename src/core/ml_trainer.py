@@ -254,19 +254,25 @@ def _clean_frame(df: pd.DataFrame, feature_list: List[str]) -> pd.DataFrame:
             else:
                 out[indicator_name] = 1.0  # all missing
 
+    # Ensure all expected columns exist.  For missing-indicator columns
+    # (binary flags), fill with the default so they are never NaN.  For
+    # all other features, leave NaN in place: XGBoost has a native,
+    # learned NaN-routing strategy that outperforms manual imputation.
+    # Filling NaN with "semantically neutral" defaults (e.g. 1.0 for
+    # attack_strength) conflates "not measured" with "genuinely 1.0",
+    # destroying the model's ability to distinguish the two cases.
+    indicator_cols = set(MISSING_INDICATOR_GROUPS.keys())
     for c in feature_list:
         if c not in out.columns:
-            out[c] = FEATURE_DEFAULTS.get(c, 0.0)
-        else:
-            default = FEATURE_DEFAULTS.get(c, 0.0)
-            out[c] = out[c].fillna(default)
-    # Convert to numeric (coerce non-numeric strings to NaN, then re-fill)
+            if c in indicator_cols:
+                out[c] = FEATURE_DEFAULTS.get(c, 1.0)
+            else:
+                out[c] = np.nan
+        elif c in indicator_cols:
+            # Indicators must be 0/1, never NaN
+            out[c] = out[c].fillna(FEATURE_DEFAULTS.get(c, 1.0))
+    # Convert to numeric (coerce non-numeric strings to NaN)
     out[feature_list] = out[feature_list].apply(pd.to_numeric, errors="coerce")
-    # Re-fill any NaN introduced by coercion
-    for c in feature_list:
-        remaining_nan = out[c].isna().sum()
-        if remaining_nan > 0:
-            out[c] = out[c].fillna(FEATURE_DEFAULTS.get(c, 0.0))
 
     # NaN spike detection: warn if any feature has an unexpectedly high NaN
     # rate, which may indicate a schema change or data source failure.
@@ -424,13 +430,19 @@ def _train_xgboost(
         verbosity=0,
     )
 
-    # Calibrate with TimeSeriesSplit on *training* data only
+    # Calibrate with TimeSeriesSplit on *training* data only.
+    # Isotonic regression fits a flexible step-function which requires
+    # enough data per fold to avoid overfitting to noise.  For small
+    # datasets (< 2000 training samples), Platt scaling (sigmoid) is
+    # mathematically more stable — it has only two parameters and is
+    # far less prone to memorising random fluctuations.
     n_splits = min(5, max(2, len(X_train) // 200))
     tscv = TimeSeriesSplit(n_splits=n_splits)
+    calib_method = "isotonic" if len(X_train) >= 2000 else "sigmoid"
 
     calibrated = CalibratedClassifierCV(
         estimator=base_model,
-        method="isotonic",
+        method=calib_method,
         cv=tscv,
     )
     calibrated.fit(X_train, y_train)
@@ -477,7 +489,7 @@ def _train_xgboost(
             )
             calibrated_2 = CalibratedClassifierCV(
                 estimator=base_model_2,
-                method="isotonic",
+                method=calib_method,
                 cv=TimeSeriesSplit(n_splits=n_splits),
             )
             calibrated_2.fit(X_train_pruned, y_train)
@@ -819,6 +831,39 @@ def _validate_model(model, metrics: Dict, active_features: List[str]) -> List[st
     return warnings
 
 
+def _load_bets_dataframe(
+    include_training_data: bool = True,
+    sport_filter: Optional[str] = None,
+) -> pd.DataFrame:
+    """Load settled bets from DB into a DataFrame using batched reads.
+
+    Uses ``yield_per`` to stream rows in chunks instead of loading the
+    entire bet history into memory at once.  This prevents OOM crashes
+    when the table grows beyond ~50k rows with large JSONB meta_features.
+    """
+    _BATCH_SIZE = 5000
+
+    with SessionLocal() as db:
+        query = select(PlacedBet).where(
+            PlacedBet.status.in_(["won", "lost"])
+        ).order_by(PlacedBet.created_at.asc())
+        if not include_training_data:
+            query = query.where(PlacedBet.is_training_data.is_(False))
+        if sport_filter and sport_filter != "general":
+            matching_sports = [k for k, v in SPORT_GROUPS.items() if v == sport_filter]
+            if matching_sports:
+                query = query.where(PlacedBet.sport.in_(matching_sports))
+
+        chunks = []
+        for bet in db.scalars(query).yield_per(_BATCH_SIZE):
+            row = {col.name: getattr(bet, col.name) for col in PlacedBet.__table__.columns}
+            chunks.append(row)
+
+    if not chunks:
+        return pd.DataFrame()
+    return pd.DataFrame(chunks)
+
+
 def auto_train_model(min_samples: int = 500, include_training_data: bool = True) -> str:
     """Train the general model and also save legacy JSON weights for backward compatibility.
 
@@ -830,13 +875,7 @@ def auto_train_model(min_samples: int = 500, include_training_data: bool = True)
     """
     MODELS_DIR.mkdir(exist_ok=True)
 
-    with SessionLocal() as db:
-        query = select(PlacedBet).where(
-            PlacedBet.status.in_(["won", "lost"])
-        ).order_by(PlacedBet.created_at.asc())
-        if not include_training_data:
-            query = query.where(PlacedBet.is_training_data.is_(False))
-        df = pd.read_sql(query, db.bind)
+    df = _load_bets_dataframe(include_training_data=include_training_data)
 
     if len(df) < min_samples:
         return f"Zu wenig Daten: {len(df)}/{min_samples}"
@@ -1061,13 +1100,7 @@ def auto_train_all_models(min_samples: int = 2000, include_training_data: bool =
     """
     MODELS_DIR.mkdir(exist_ok=True)
 
-    with SessionLocal() as db:
-        query = select(PlacedBet).where(
-            PlacedBet.status.in_(["won", "lost"])
-        ).order_by(PlacedBet.created_at.asc())
-        if not include_training_data:
-            query = query.where(PlacedBet.is_training_data.is_(False))
-        df = pd.read_sql(query, db.bind)
+    df = _load_bets_dataframe(include_training_data=include_training_data)
 
     if len(df) < min_samples:
         return f"Zu wenig Daten: {len(df)}/{min_samples}"

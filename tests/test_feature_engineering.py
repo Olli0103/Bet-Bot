@@ -62,7 +62,12 @@ class TestBuildCoreFeatures:
             selection="Bayern",
             home_team="Bayern",
         )
-        assert f["sharp_implied_prob"] == pytest.approx(1 / 1.9, abs=0.001)
+        # sharp_implied_prob is vig-stripped: (1/1.9) / (1 + vig)
+        # vig = 1/1.9 + 1/3.5 + 1/4.2 - 1 ≈ 0.0501
+        # sharp_implied_prob ≈ 0.5263 / 1.0501 ≈ 0.5012
+        vig = 1/1.9 + 1/3.5 + 1/4.2 - 1.0
+        expected_prob = (1/1.9) / (1.0 + vig)
+        assert f["sharp_implied_prob"] == pytest.approx(expected_prob, abs=0.001)
         assert f["home_advantage"] == 1.0
         # Sentiment delta: home - away = 0.5 - (-0.3) = 0.8
         assert f["sentiment_delta"] == pytest.approx(0.8)

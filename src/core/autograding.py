@@ -39,7 +39,14 @@ def _evaluate_match_result(row: dict) -> dict:
 
     scores = row.get("scores")
     if not scores:
-        return {"winner": "Void"}
+        # Only treat as void if the match was explicitly canceled/abandoned/
+        # postponed.  An empty scores array on a completed match is a
+        # temporary API sync delay — returning "Open" forces a retry on
+        # the next grading cycle instead of permanently voiding the bet.
+        match_status = str(row.get("status") or row.get("match_status") or "").lower()
+        if match_status in ("canceled", "cancelled", "abandoned", "postponed"):
+            return {"winner": "Void"}
+        return {"winner": "Open"}
 
     home_team = row.get("home_team") or ""
     away_team = row.get("away_team") or ""
@@ -83,80 +90,125 @@ async def run_auto_grading() -> int:
     odds = OddsFetcher()
     settled_count = 0
 
+    # --- Phase 1: Read open bets from DB, then CLOSE session immediately ---
+    # Holding a synchronous DB connection open while making async HTTP calls
+    # blocks a connection-pool slot for the entire network round-trip.  With
+    # SQLAlchemy's default pool of 5, a few slow API responses can exhaust
+    # the pool and deadlock the entire system.
     with SessionLocal() as db:
-        open_bets = db.scalars(
+        open_bets_rows = db.scalars(
             select(PlacedBet).where(
                 PlacedBet.status == "open",
                 PlacedBet.is_training_data.is_(False),
             )
         ).all()
-        if not open_bets:
+        if not open_bets_rows:
             return 0
 
-        score_map = {}
-        sports = [s.strip() for s in settings.live_sports.split(",") if s.strip()]
-        available = await odds.get_sports_async()
-        available_keys = {str(x.get("key")) for x in (available or []) if x.get("key")}
+        # Detach ORM objects: copy the fields we need into plain dicts so
+        # we can close the session before any network I/O.
+        bet_snapshots = []
+        for b in open_bets_rows:
+            bet_snapshots.append({
+                "id": b.id,
+                "event_id": str(b.event_id),
+                "selection": str(b.selection),
+                "stake": float(b.stake),
+                "odds": float(b.odds),
+            })
+    # DB session is now closed — connection returned to pool.
 
-        expanded = []
-        for s in sports:
-            if s in available_keys:
-                expanded.append(s)
-            else:
-                expanded.extend(sorted([k for k in available_keys if k.startswith(s + "_")]))
+    # --- Phase 2: Async HTTP calls (no DB connection held) ---
+    score_map = {}
+    sports = [s.strip() for s in settings.live_sports.split(",") if s.strip()]
+    available = await odds.get_sports_async()
+    available_keys = {str(x.get("key")) for x in (available or []) if x.get("key")}
 
-        for sport in expanded:
-            try:
-                rows = await odds.get(
-                    f"sports/{sport}/scores",
-                    params={"apiKey": settings.odds_api_key, "daysFrom": 3},
-                )
-            except Exception:
+    expanded = []
+    for s in sports:
+        if s in available_keys:
+            expanded.append(s)
+        else:
+            expanded.extend(sorted([k for k in available_keys if k.startswith(s + "_")]))
+
+    for sport in expanded:
+        try:
+            rows = await odds.get(
+                f"sports/{sport}/scores",
+                params={"apiKey": settings.odds_api_key, "daysFrom": 3},
+            )
+        except Exception as exc:
+            log.warning(
+                "Scores fetch failed for sport '%s': %s", sport, exc,
+            )
+            continue
+        if not isinstance(rows, list):
+            log.warning(
+                "Unexpected scores response type for '%s': %s",
+                sport, type(rows).__name__,
+            )
+            continue
+
+        for r in rows:
+            r["sport_key"] = sport
+            event_id = str(r.get("id") or "")
+            result = _evaluate_match_result(r)
+            if event_id and result.get("winner") != "Open":
+                score_map[event_id] = result
+
+    # --- Phase 3: Match bets to results (in-memory) ---
+    updates = []  # list of (bet_id, status, pnl, result_dict, pick)
+    updated_events: set = set()
+
+    for snap in bet_snapshots:
+        result = score_map.get(snap["event_id"])
+        if not result:
+            continue
+
+        winner = result["winner"]
+
+        # Void only for explicitly canceled/abandoned/postponed matches.
+        # An empty scores array with completed=True is a temporary API
+        # sync delay, NOT a void — grading must be retried later.
+        if winner == "Void":
+            updates.append((snap["id"], "void", 0.0, result, None))
+            continue
+
+        pick = _selection_token(snap["selection"])
+        is_won = normalize_team(pick) == normalize_team(winner)
+        if is_won:
+            status = "won"
+            pnl = round(snap["stake"] * (snap["odds"] - 1.0), 2)
+        else:
+            status = "lost"
+            pnl = round(-snap["stake"], 2)
+
+        updates.append((snap["id"], status, pnl, result, pick))
+
+    if not updates:
+        return 0
+
+    # --- Phase 4: Persist results in a NEW, short-lived DB session ---
+    with SessionLocal() as db:
+        for bet_id, status, pnl, result, pick in updates:
+            bet = db.get(PlacedBet, bet_id)
+            if bet is None or bet.status != "open":
                 continue
-            if not isinstance(rows, list):
-                continue
 
-            for r in rows:
-                r["sport_key"] = sport
-                event_id = str(r.get("id") or "")
-                result = _evaluate_match_result(r)
-                if event_id and result.get("winner") != "Open":
-                    score_map[event_id] = result
-
-        # Track which events we've already updated ratings for
-        updated_events: set = set()
-
-        for bet in open_bets:
-            result = score_map.get(str(bet.event_id))
-            if not result:
-                continue
-
-            winner = result["winner"]
-
-            if winner == "Void":
-                bet.status = "void"
-                bet.pnl = 0.0
-                settled_count += 1
-                continue
-
-            pick = _selection_token(str(bet.selection))
-            is_won = normalize_team(pick) == normalize_team(winner)
-            if is_won:
-                bet.status = "won"
-                bet.pnl = round(float(bet.stake) * (float(bet.odds) - 1.0), 2)
-            else:
-                bet.status = "lost"
-                bet.pnl = round(-float(bet.stake), 2)
+            bet.status = status
+            bet.pnl = pnl
             settled_count += 1
 
-            # Update form tracker for the selected team
-            try:
-                update_form(pick, is_won)
-            except Exception as exc:
-                log.warning("Form tracker update failed for %s: %s", pick, exc)
+            if pick is not None:
+                is_won = status == "won"
+                try:
+                    update_form(pick, is_won)
+                except Exception as exc:
+                    log.warning("Form tracker update failed for %s: %s", pick, exc)
 
             # Update Elo and Poisson (once per event)
             ev_id = str(bet.event_id)
+            winner = result["winner"]
             if ev_id not in updated_events:
                 updated_events.add(ev_id)
                 home = result.get("home", "")
