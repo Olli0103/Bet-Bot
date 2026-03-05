@@ -32,6 +32,8 @@ def learning_health(live_only: bool = True, owner_chat_id: str = "") -> dict:
     losses = sum(1 for b in settled if b.status == "lost")
     pnl = round(sum(float(b.pnl or 0.0) for b in settled), 2)
     hit = round((wins / max(1, len(settled))) * 100, 2)
+    total_staked = sum(float(b.stake or 0.0) for b in settled)
+    yield_pct = round((pnl / total_staked) * 100, 2) if total_staked > 0 else 0.0
     return {
         "total": total,
         "settled": len(settled),
@@ -39,6 +41,8 @@ def learning_health(live_only: bool = True, owner_chat_id: str = "") -> dict:
         "wins": wins,
         "losses": losses,
         "hit_rate_pct": hit,
+        "yield_pct": yield_pct,
+        "total_staked": round(total_staked, 2),
         "pnl": pnl,
         "live_only": live_only,
     }

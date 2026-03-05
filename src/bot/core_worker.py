@@ -309,7 +309,7 @@ def _run_learning_status():
         lines = [
             "🧠 Learning Check (Live Bets Only)",
             f"Total: {h['total']} | Settled: {h['settled']} | Open: {h['open']}",
-            f"W/L: {h['wins']}/{h['losses']} | Hit: {h['hit_rate_pct']}% | PnL: {h['pnl']:.2f} EUR",
+            f"W/L: {h['wins']}/{h['losses']} | Yield: {h.get('yield_pct', 0):.1f}% | PnL: {h['pnl']:.2f} EUR",
         ]
         # Paper signal stats
         try:

@@ -59,10 +59,16 @@ def _make_analysis(
 
 
 class FakeCache:
-    """In-memory Redis cache replacement for testing."""
+    """In-memory Redis cache replacement for testing.
+
+    Supports both the high-level get_json/set_json API and the low-level
+    Redis hash/list commands used by AlertMetrics (HINCRBY, HSET, etc.).
+    """
 
     def __init__(self):
         self._store: dict = {}
+        self._hashes: dict = {}
+        self._lists: dict = {}
 
     def get_json(self, key):
         val = self._store.get(key)
@@ -75,6 +81,43 @@ class FakeCache:
 
     def delete(self, key):
         self._store.pop(key, None)
+        self._hashes.pop(key, None)
+        self._lists.pop(key, None)
+
+    # Redis hash operations (for AlertMetrics)
+    def hincrby(self, name, key, amount=1):
+        if name not in self._hashes:
+            self._hashes[name] = {}
+        current = int(self._hashes[name].get(key, 0))
+        self._hashes[name][key] = str(current + amount)
+        return current + amount
+
+    def hset(self, name, key, value):
+        if name not in self._hashes:
+            self._hashes[name] = {}
+        self._hashes[name][key] = str(value)
+
+    def hgetall(self, name):
+        return dict(self._hashes.get(name, {}))
+
+    # Redis list operations (for AlertMetrics timestamps)
+    def lpush(self, name, *values):
+        if name not in self._lists:
+            self._lists[name] = []
+        for v in values:
+            self._lists[name].insert(0, v)
+
+    def ltrim(self, name, start, end):
+        if name in self._lists:
+            self._lists[name] = self._lists[name][start:end + 1]
+
+    def lrange(self, name, start, end):
+        if name not in self._lists:
+            return []
+        return self._lists[name][start:end + 1 if end >= 0 else None]
+
+    def expire(self, name, seconds):
+        pass  # no-op in tests
 
     @property
     def client(self):

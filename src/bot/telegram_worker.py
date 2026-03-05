@@ -27,7 +27,7 @@ from telegram.ext import (
 )
 
 from src.bot.chat_router import chat_router
-from src.bot.message_queue import pop_outbox, push_inbox, push_outbox
+from src.bot.message_queue import ack_outbox, pop_outbox, push_inbox, push_outbox, recover_unacked
 from src.core.settings import settings
 
 log = logging.getLogger(__name__)
@@ -38,39 +38,51 @@ logging.basicConfig(
 
 PID_FILE = os.path.join(os.path.dirname(__file__), ".telegram_worker.pid")
 
-# ── Telegram send with retry + circuit breaker ────────────────
+# ── Per-chat circuit breaker ──────────────────────────────────
+# Isolates failures per chat_id so one blocked/dead chat doesn't
+# prevent sends to all other chats.
 
-_send_failures = 0
-_send_circuit_open = False
-_circuit_reset_at = 0.0
-_CIRCUIT_THRESHOLD = 5  # open after 5 consecutive failures
-_CIRCUIT_COOLDOWN = 60  # seconds before retry
+_CIRCUIT_THRESHOLD = 5   # open after 5 consecutive failures per chat
+_CIRCUIT_COOLDOWN = 60   # seconds before retry
+
+# {chat_id: {"failures": int, "open": bool, "reset_at": float}}
+_chat_circuits: Dict[str, Dict[str, Any]] = {}
+
+
+def _get_circuit(chat_id: str) -> Dict[str, Any]:
+    if chat_id not in _chat_circuits:
+        _chat_circuits[chat_id] = {"failures": 0, "open": False, "reset_at": 0.0}
+    return _chat_circuits[chat_id]
 
 
 async def _safe_send(bot, chat_id: str, text: str, **kwargs) -> bool:
-    """Send a message with retry + exponential backoff + circuit breaker."""
-    global _send_failures, _send_circuit_open, _circuit_reset_at
+    """Send a message with retry + exponential backoff + per-chat circuit breaker.
 
-    if _send_circuit_open:
-        if time.time() < _circuit_reset_at:
-            log.warning("Telegram circuit open, skipping send to %s", chat_id)
+    Each chat_id has an independent circuit breaker. A blocked user or
+    invalid chat_id will only trip its own breaker, not affect other chats.
+    """
+    circuit = _get_circuit(chat_id)
+
+    if circuit["open"]:
+        if time.time() < circuit["reset_at"]:
+            log.warning("Circuit open for chat %s, skipping", chat_id)
             return False
-        log.info("Telegram circuit half-open, attempting reset")
-        _send_circuit_open = False
+        log.info("Circuit half-open for chat %s, attempting reset", chat_id)
+        circuit["open"] = False
 
     delays = [1, 2, 4, 8]
     for attempt, delay in enumerate(delays):
         try:
             await bot.send_message(chat_id=chat_id, text=text[:4096], **kwargs)
-            _send_failures = 0
+            circuit["failures"] = 0
             return True
         except Exception as exc:
-            _send_failures += 1
-            log.warning("Telegram send failed (attempt %d): %s", attempt + 1, exc)
-            if _send_failures >= _CIRCUIT_THRESHOLD:
-                _send_circuit_open = True
-                _circuit_reset_at = time.time() + _CIRCUIT_COOLDOWN
-                log.error("Telegram circuit breaker OPEN (will retry in %ds)", _CIRCUIT_COOLDOWN)
+            circuit["failures"] += 1
+            log.warning("Send to %s failed (attempt %d): %s", chat_id, attempt + 1, exc)
+            if circuit["failures"] >= _CIRCUIT_THRESHOLD:
+                circuit["open"] = True
+                circuit["reset_at"] = time.time() + _CIRCUIT_COOLDOWN
+                log.error("Circuit breaker OPEN for chat %s (retry in %ds)", chat_id, _CIRCUIT_COOLDOWN)
                 return False
             if attempt < len(delays) - 1:
                 await asyncio.sleep(delay)
@@ -93,7 +105,11 @@ async def _broadcast(bot, text: str, target: str = "broadcast", chat_ids: Option
 # ── Outbox consumer ──────────────────────────────────────────
 
 async def _consume_outbox(bot):
-    """Drain the outbox queue and send messages via Telegram."""
+    """Drain the outbox queue and send messages via Telegram.
+
+    Uses reliable queue pattern: messages are moved to a processing queue
+    on pop and only removed (acked) after successful delivery.
+    """
     for _ in range(20):  # process up to 20 messages per tick
         msg = pop_outbox(timeout=0)
         if msg is None:
@@ -120,8 +136,12 @@ async def _consume_outbox(bot):
                 if text:
                     await _broadcast(bot, text, target, chat_ids)
 
+            # Acknowledge successful delivery
+            ack_outbox(msg)
+
         except Exception as exc:
             log.error("Outbox message processing failed: %s", exc)
+            # Do NOT ack — message stays in processing queue for recovery
 
 
 async def _send_signal_push(bot, payload: Dict, target: str, chat_ids: Optional[List[str]]):
@@ -270,6 +290,14 @@ async def error_handler(update, context):
 def main():
     _write_pid()
     atexit.register(_remove_pid)
+
+    # Recover any unacked messages from previous crash
+    try:
+        recovered = recover_unacked()
+        if recovered:
+            log.info("Recovered %d unacked messages from previous session", recovered)
+    except Exception as exc:
+        log.warning("Message recovery failed (Redis may be down): %s", exc)
 
     app = build_app()
     app.add_error_handler(error_handler)

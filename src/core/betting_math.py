@@ -57,15 +57,30 @@ def kelly_fraction(
 ) -> float:
     """Kelly criterion using net odds after tax.
 
-    Returns the *true* fractional Kelly value (scaled by ``frac`` but
-    **not** hard-capped).  The hard cap should be applied at the
-    execution / UI layer (e.g. ``apply_stake_cap``) so that internal
-    ranking and EV systems can distinguish between a 6 % and 15 %
-    Kelly edge.
+    Returns fractional Kelly (scaled by ``frac``) with a **hard safety cap**
+    at ``max_fraction`` (default 5% of bankroll).  This is a defense-in-depth
+    measure: even if downstream caps (``apply_stake_cap``) have bugs or are
+    bypassed, the math layer will never return a ruinous fraction.
 
-    ``max_fraction`` is retained in the signature for backward
-    compatibility but is no longer applied here.
+    Use ``kelly_fraction_uncapped()`` for ranking/display where the true
+    magnitude matters.
     """
+    net_b = decimal_odds * (1.0 - tax_rate) - 1.0
+    q = 1.0 - model_probability
+    if net_b <= 0:
+        return 0.0
+    raw = (net_b * model_probability - q) / net_b
+    scaled = max(0.0, raw) * frac
+    return min(scaled, max_fraction)
+
+
+def kelly_fraction_uncapped(
+    model_probability: float,
+    decimal_odds: float,
+    frac: float = 0.2,
+    tax_rate: float = 0.0,
+) -> float:
+    """Uncapped Kelly fraction for ranking/display (NOT for staking)."""
     net_b = decimal_odds * (1.0 - tax_rate) - 1.0
     q = 1.0 - model_probability
     if net_b <= 0:
@@ -92,34 +107,50 @@ def combo_probability(probs: Iterable[float]) -> float:
     return out
 
 
+def _remove_vig(prices: Dict[str, float]) -> Dict[str, float]:
+    """Remove vig from a set of odds using the proportional-to-implied method.
+
+    Converts raw implied probabilities to fair probabilities that sum to 1.0.
+    This is essential before comparing two books with different margins.
+    """
+    if not prices:
+        return {}
+    raw_ips = {}
+    for sel, odds in prices.items():
+        if odds > 1.0:
+            raw_ips[sel] = 1.0 / odds
+    total_ip = sum(raw_ips.values())
+    if total_ip <= 0:
+        return {}
+    return {sel: round(ip / total_ip, 6) for sel, ip in raw_ips.items()}
+
+
 def public_bias_score(
     sharp_prices: Dict[str, float],
     retail_prices: Dict[str, float],
 ) -> Dict[str, float]:
     """Detect Tipico market shading (public bias) vs sharp book.
 
-    When Tipico shortens the favorite's odds more than the underdog relative
-    to Pinnacle, the favorite carries extra retail-driven vig. Returns a
-    per-selection bias score: positive = Tipico is shading this selection
-    (over-bet by the public), negative = Tipico is offering relative value.
+    Compares **vig-removed fair probabilities** between Pinnacle (sharp) and
+    Tipico (retail).  Both books' margins are stripped before comparison so
+    the bias score reflects genuine shading, not margin differences.
 
-    Interpretation:
-    - bias > 0.02: Tipico favorite is significantly shaded → higher skepticism
-    - bias < -0.02: Tipico underdog is relatively generous → potential value
+    Returns a per-selection bias score:
+    - bias > 0.02: Tipico is shading this selection (public over-bet)
+    - bias < -0.02: Tipico is offering relative value on this selection
     """
     if not sharp_prices or not retail_prices:
         return {}
 
-    # Compute implied probability gap per selection
+    # Remove vig from BOTH books before comparing
+    sharp_fair = _remove_vig(sharp_prices)
+    retail_fair = _remove_vig(retail_prices)
+
     bias: Dict[str, float] = {}
-    for sel in sharp_prices:
-        sharp_odds = sharp_prices.get(sel, 0)
-        retail_odds = retail_prices.get(sel, 0)
-        if sharp_odds <= 1.0 or retail_odds <= 1.0:
+    for sel in sharp_fair:
+        if sel not in retail_fair:
             continue
-        sharp_ip = 1.0 / sharp_odds
-        retail_ip = 1.0 / retail_odds
-        # Positive gap = retail implies higher probability than sharp → over-bet
-        bias[sel] = round(retail_ip - sharp_ip, 4)
+        # Positive gap = retail implies higher fair prob than sharp → over-bet
+        bias[sel] = round(retail_fair[sel] - sharp_fair[sel], 4)
 
     return bias

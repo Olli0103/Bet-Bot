@@ -4,8 +4,15 @@ Two queues:
   outbox  (Core -> Telegram)  : signals, alerts, reports to send
   inbox   (Telegram -> Core)  : user actions (mark-as-placed, deep-dive, etc.)
 
-Messages are JSON dicts pushed via LPUSH / consumed via BRPOP.
-Each message carries a dedup_key to prevent double-sends on restart.
+Reliable Queue Pattern:
+  Uses RPOPLPUSH (BRPOPLPUSH) to atomically move messages from the main
+  queue to a processing queue.  After successful delivery, the message
+  is removed from the processing queue via LREM.  If the consumer crashes
+  before acknowledging, the message remains in the processing queue and
+  can be recovered on restart via ``recover_unacked()``.
+
+  This prevents the data-loss scenario of plain BRPOP where a pop + crash
+  loses the message forever.
 """
 from __future__ import annotations
 
@@ -20,9 +27,14 @@ from src.data.redis_cache import cache
 log = logging.getLogger(__name__)
 
 OUTBOX_KEY = "queue:outbox"
+OUTBOX_PROCESSING_KEY = "queue:outbox:processing"
 INBOX_KEY = "queue:inbox"
+INBOX_PROCESSING_KEY = "queue:inbox:processing"
 DEDUP_PREFIX = "queue:dedup:"
 DEDUP_TTL = 3600  # 1 hour dedup window
+
+# Messages older than this in the processing queue are considered dead
+_PROCESSING_TTL = 300  # 5 minutes
 
 
 def _dedup_key(msg: Dict[str, Any]) -> str:
@@ -41,18 +53,6 @@ def push_outbox(
 ) -> bool:
     """Push a message to the outbox queue.
 
-    Parameters
-    ----------
-    msg_type : str
-        Message type: "text", "photo", "signal_push", "combo_push",
-        "agent_alert", "report", "health".
-    payload : dict
-        Message content. Must include "text" for text messages.
-    target : str
-        "broadcast" | "primary" — routing hint for telegram worker.
-    chat_ids : list of str, optional
-        Explicit chat IDs. Overrides target routing.
-
     Returns True if enqueued, False if dedup hit.
     """
     msg = {
@@ -66,8 +66,6 @@ def push_outbox(
     dk = _dedup_key(msg)
     dedup_redis_key = f"{DEDUP_PREFIX}{dk}"
 
-    # Atomic dedup: SET NX returns True only for the first caller,
-    # eliminating the race window of the old exists() + lpush() pattern.
     r = cache.client
     if not r.set(dedup_redis_key, "1", ex=DEDUP_TTL, nx=True):
         return False
@@ -77,16 +75,38 @@ def push_outbox(
 
 
 def pop_outbox(timeout: int = 5) -> Optional[Dict[str, Any]]:
-    """Blocking pop from outbox. Returns None on timeout."""
+    """Pop from outbox using reliable queue pattern.
+
+    The message is atomically moved to the processing queue.
+    Call ``ack_outbox(raw_msg)`` after successful delivery,
+    or the message will be recovered on next ``recover_unacked()``.
+
+    Returns (parsed_dict, raw_bytes) or None on timeout.
+    """
     r = cache.client
-    result = r.brpop(OUTBOX_KEY, timeout=timeout)
-    if result:
-        _, raw = result
+    if timeout > 0:
+        raw = r.brpoplpush(OUTBOX_KEY, OUTBOX_PROCESSING_KEY, timeout=timeout)
+    else:
+        raw = r.rpoplpush(OUTBOX_KEY, OUTBOX_PROCESSING_KEY)
+    if raw:
         try:
-            return json.loads(raw)
+            parsed = json.loads(raw)
+            # Embed raw bytes for ack
+            parsed["_raw"] = raw if isinstance(raw, (str, bytes)) else json.dumps(parsed, default=str)
+            return parsed
         except (json.JSONDecodeError, TypeError):
             log.warning("Invalid outbox message: %s", raw)
+            # Remove corrupt message from processing queue
+            r.lrem(OUTBOX_PROCESSING_KEY, 1, raw)
     return None
+
+
+def ack_outbox(msg: Dict[str, Any]) -> None:
+    """Acknowledge successful delivery — remove from processing queue."""
+    r = cache.client
+    raw = msg.get("_raw")
+    if raw:
+        r.lrem(OUTBOX_PROCESSING_KEY, 1, raw)
 
 
 def outbox_len() -> int:
@@ -101,17 +121,7 @@ def push_inbox(
     payload: Dict[str, Any],
     chat_id: str = "",
 ) -> None:
-    """Push a user action to the inbox queue.
-
-    Parameters
-    ----------
-    action : str
-        "mark_placed", "deep_dive", "ghost_bet", "settings_change", etc.
-    payload : dict
-        Action-specific data.
-    chat_id : str
-        The originating chat ID.
-    """
+    """Push a user action to the inbox queue."""
     msg = {
         "action": action,
         "payload": payload,
@@ -123,18 +133,60 @@ def push_inbox(
 
 
 def pop_inbox(timeout: int = 1) -> Optional[Dict[str, Any]]:
-    """Non-blocking (short timeout) pop from inbox."""
+    """Pop from inbox using reliable queue pattern."""
     r = cache.client
-    result = r.brpop(INBOX_KEY, timeout=timeout)
-    if result:
-        _, raw = result
+    if timeout > 0:
+        raw = r.brpoplpush(INBOX_KEY, INBOX_PROCESSING_KEY, timeout=timeout)
+    else:
+        raw = r.rpoplpush(INBOX_KEY, INBOX_PROCESSING_KEY)
+    if raw:
         try:
-            return json.loads(raw)
+            parsed = json.loads(raw)
+            parsed["_raw"] = raw if isinstance(raw, (str, bytes)) else json.dumps(parsed, default=str)
+            return parsed
         except (json.JSONDecodeError, TypeError):
             log.warning("Invalid inbox message: %s", raw)
+            r.lrem(INBOX_PROCESSING_KEY, 1, raw)
     return None
+
+
+def ack_inbox(msg: Dict[str, Any]) -> None:
+    """Acknowledge successful processing — remove from inbox processing queue."""
+    r = cache.client
+    raw = msg.get("_raw")
+    if raw:
+        r.lrem(INBOX_PROCESSING_KEY, 1, raw)
 
 
 def inbox_len() -> int:
     r = cache.client
     return r.llen(INBOX_KEY)
+
+
+# ── Recovery ──────────────────────────────────────────────────
+
+def recover_unacked() -> int:
+    """Move stale messages from processing queues back to main queues.
+
+    Call this on worker startup to recover messages that were popped
+    but never acked (e.g. due to a crash).
+
+    Returns the number of recovered messages.
+    """
+    r = cache.client
+    recovered = 0
+
+    for proc_key, main_key in [
+        (OUTBOX_PROCESSING_KEY, OUTBOX_KEY),
+        (INBOX_PROCESSING_KEY, INBOX_KEY),
+    ]:
+        while True:
+            raw = r.rpoplpush(proc_key, main_key)
+            if raw is None:
+                break
+            recovered += 1
+            log.info("Recovered unacked message from %s", proc_key)
+
+    if recovered > 0:
+        log.warning("Recovered %d unacked messages on startup", recovered)
+    return recovered
