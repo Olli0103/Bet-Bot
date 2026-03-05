@@ -550,38 +550,63 @@ def _train_xgboost(
 
     val_model = XGBClassifier(**_XGB_PARAMS)
     val_model.fit(X_train_val, y_train_val)
-    val_preds = val_model.predict_proba(X_holdout)[:, 1]
-    metrics = _evaluate_holdout_raw(val_preds, X_holdout, y_holdout, y_train_val)
 
-    # --- Step 2: generate OOF predictions over the full dataset ---
     n_splits = min(5, max(2, len(X_active) // 200))
     gap_size = min(200, max(50, len(X_active) // 20))
-    tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap_size)
+
+    # --- Step 2a: OOF predictions over TRAIN-VAL only (first 80%) ---
+    # This calibrator is used ONLY for holdout evaluation and DM-Test.
+    # It has never seen any holdout labels, preventing calibration leakage.
+    n_splits_val = min(5, max(2, len(X_train_val) // 200))
+    gap_val = min(200, max(50, len(X_train_val) // 20))
+    tscv_val = TimeSeriesSplit(n_splits=n_splits_val, gap=gap_val)
+
+    oof_preds_val = np.full(len(X_train_val), np.nan)
+    for train_index, test_index in tscv_val.split(X_train_val):
+        cv_model = XGBClassifier(**_XGB_PARAMS)
+        cv_model.fit(X_train_val[train_index], y_train_val[train_index])
+        oof_preds_val[test_index] = cv_model.predict_proba(X_train_val[test_index])[:, 1]
+
+    oof_mask_val = ~np.isnan(oof_preds_val)
+    try:
+        beta_cal_val = BetaCalibration(parameters="abm")
+        beta_cal_val.fit(oof_preds_val[oof_mask_val], y_train_val[oof_mask_val])
+    except Exception as exc:
+        log.error("Beta calibration (val) failed — using Identity fallback. Error: %s", exc)
+        beta_cal_val = IdentityCalibrator()
+
+    # Evaluate holdout with the CLEAN calibrator (no leakage)
+    val_wrapped_clean = BetaCalibratedModel(val_model, beta_cal_val)
+    val_preds = val_wrapped_clean.predict_proba(X_holdout)[:, 1]
+    metrics = _evaluate_holdout_raw(val_preds, X_holdout, y_holdout, y_train_val)
+
+    # --- Step 2b: OOF predictions over FULL dataset (100%) ---
+    # This calibrator is used for the PRODUCTION model only.
+    tscv_prod = TimeSeriesSplit(n_splits=n_splits, gap=gap_size)
 
     oof_preds = np.full(len(X_active), np.nan)
-    for train_index, test_index in tscv.split(X_active):
+    for train_index, test_index in tscv_prod.split(X_active):
         cv_model = XGBClassifier(**_XGB_PARAMS)
         cv_model.fit(X_active[train_index], y_vals[train_index])
         oof_preds[test_index] = cv_model.predict_proba(X_active[test_index])[:, 1]
 
-    # Only fit beta calibration on samples that have OOF predictions
     oof_mask = ~np.isnan(oof_preds)
     oof_valid = oof_preds[oof_mask]
     y_oof_valid = y_vals[oof_mask]
 
-    # --- Step 3: fit BetaCalibration on OOF predictions ---
+    # --- Step 3: fit PRODUCTION BetaCalibration on full OOF predictions ---
     try:
         beta_cal = BetaCalibration(parameters="abm")
         beta_cal.fit(oof_valid, y_oof_valid)
     except Exception as exc:
-        log.error("Beta calibration failed — using Identity fallback. Error: %s", exc)
+        log.error("Beta calibration (prod) failed — using Identity fallback. Error: %s", exc)
         beta_cal = IdentityCalibrator()
 
     # --- Feature pruning pass (uses the validation model, not final) ---
     final_features = active_features
     if prune_features and len(X_active) > 50:
-        # Wrap val_model temporarily for importance computation
-        val_wrapped = BetaCalibratedModel(val_model, beta_cal)
+        # Wrap val_model with CLEAN calibrator (no holdout leakage)
+        val_wrapped = BetaCalibratedModel(val_model, beta_cal_val)
         importance_map = _compute_feature_importance(
             val_wrapped, X_holdout, y_holdout, active_features,
         )
@@ -647,12 +672,12 @@ def _train_xgboost(
     calibrated = BetaCalibratedModel(final_base_model, beta_cal)
 
     # Store STRICT OUT-OF-SAMPLE holdout predictions for Diebold-Mariano.
-    # CRITICAL: Use val_model (trained on first 80%) wrapped with beta_cal,
-    # NOT final_base_model (trained on 100%).  Using the final model here
-    # would create in-sample predictions that artificially inflate metrics,
-    # causing the champion to never be dethroned by future challengers.
+    # CRITICAL: Use val_model (trained on first 80%) wrapped with beta_cal_val
+    # (fitted on 80%-only OOF), NOT beta_cal (fitted on 100% OOF).
+    # beta_cal has seen holdout labels through OOF, which would contaminate
+    # the DM-Test and cause the champion to never be dethroned.
     if len(X_holdout) > 0:
-        val_wrapped = BetaCalibratedModel(val_model, beta_cal)
+        val_wrapped = BetaCalibratedModel(val_model, beta_cal_val)
         if final_features == active_features:
             holdout_preds = val_wrapped.predict_proba(X_holdout)[:, 1]
         else:

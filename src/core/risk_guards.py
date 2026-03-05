@@ -229,6 +229,58 @@ def get_dynamic_min_ev(sport: str, market: str = "h2h") -> float:
     return dynamic_ev
 
 
+def get_liquidity_cap(sport: str, market: str = "h2h") -> float:
+    """Return a stake multiplier based on league liquidity tier.
+
+    Low-tier leagues have thin markets where large stakes move the line
+    against us and increase the risk of getting limited.  This caps the
+    maximum stake as a fraction of what Kelly would recommend.
+
+    Tier mapping:
+        Tier 1 (EPL, NFL, NBA, La Liga, Champions League): 1.0
+        Tier 2 (Bundesliga, Serie A, Ligue 1, NHL):        0.7
+        Tier 3 (2nd leagues, MLS, domestic cups):           0.3
+        Tier 4 (Unknown / niche leagues):                   0.1
+    """
+    s = sport.lower()
+
+    # Tier 1: highest liquidity markets
+    _TIER_1 = (
+        "soccer_epl", "soccer_spain_la_liga", "soccer_uefa_champs_league",
+        "americanfootball_nfl", "basketball_nba",
+        "soccer_uefa_europa_league",
+    )
+    # Tier 2: major European leagues, NHL
+    _TIER_2 = (
+        "soccer_germany_bundesliga", "soccer_italy_serie_a",
+        "soccer_france_ligue_one", "soccer_brazil_serie_a",
+        "icehockey_nhl", "basketball_euroleague",
+        "soccer_portugal_primeira_liga", "soccer_netherlands_eredivisie",
+    )
+    # Tier 3: second divisions, domestic cups, MLS
+    _TIER_3 = (
+        "soccer_germany_bundesliga2", "soccer_england_league1",
+        "soccer_england_league2", "soccer_efl_champ",
+        "soccer_usa_mls", "soccer_turkey_super_league",
+        "soccer_scotland_premiership", "soccer_belgium_first_div",
+    )
+
+    # Check most specific tiers first (Tier 3 before Tier 2)
+    # to avoid "bundesliga" matching before "bundesliga2"
+    for key in _TIER_3:
+        if key in s:
+            return 0.3
+    for key in _TIER_1:
+        if key in s:
+            return 1.0
+    for key in _TIER_2:
+        if key in s:
+            return 0.7
+
+    # Tier 4: unknown / niche — maximum caution
+    return 0.1
+
+
 def get_dynamic_kelly_frac(sport: str, base_frac: float = 0.20) -> float:
     """Return a Brier-score-dependent Kelly fraction for the given sport.
 
