@@ -353,10 +353,13 @@ class CalibrationManager:
 
         report: Dict[str, Any] = {"sport_market_reports": {}, "global": {}}
 
-        # Fit per sport/market
-        # - >= MIN_SAMPLES_SPORT_MARKET (300): use configured method (isotonic/platt)
-        # - 30-299 samples: force Platt scaling (2 params, safe on small N)
+        # Fit per sport/market with sample-count-dependent method:
+        # - >= MIN_SAMPLES_SPORT_MARKET (300): use configured method (beta preferred)
+        # - 100-299 samples: use beta calibration (3 params, better than Platt
+        #   for tree models, safe with 100+ samples)
+        # - 30-99 samples: force Platt scaling (2 params, safest on small N)
         # - < 30 samples: insufficient, use global fallback
+        _BETA_FALLBACK_MIN = 100
         _PLATT_FALLBACK_MIN = 30
         for key, (probs, actuals) in groups.items():
             n = len(probs)
@@ -371,8 +374,27 @@ class CalibrationManager:
                     "method": self.method,
                     **metrics,
                 }
+            elif n >= _BETA_FALLBACK_MIN:
+                # 100-299 samples: beta calibration (3 params) is ideal here.
+                # It handles tree-model distortions without the overfitting
+                # risk of isotonic, and is more expressive than Platt.
+                cal = Calibrator(method="beta")
+                cal.fit(np.array(probs), np.array(actuals))
+                self._calibrators[key] = cal
+
+                metrics = _compute_calibration_metrics(np.array(probs), np.array(actuals))
+                report["sport_market_reports"][key] = {
+                    "n_samples": n,
+                    "method": "beta_fallback",
+                    "note": f"< {MIN_SAMPLES_SPORT_MARKET} samples, using beta calibration",
+                    **metrics,
+                }
+                log.info(
+                    "Calibration %s: %d samples < %d, using beta fallback (3 params)",
+                    key, n, MIN_SAMPLES_SPORT_MARKET,
+                )
             elif n >= _PLATT_FALLBACK_MIN:
-                # Too few for isotonic, but Platt scaling (logistic, 2 params) is safe
+                # 30-99 samples: Platt scaling (2 params, safest)
                 cal = Calibrator(method="platt")
                 cal.fit(np.array(probs), np.array(actuals))
                 self._calibrators[key] = cal
@@ -381,12 +403,12 @@ class CalibrationManager:
                 report["sport_market_reports"][key] = {
                     "n_samples": n,
                     "method": "platt_fallback",
-                    "note": f"< {MIN_SAMPLES_SPORT_MARKET} samples, forced Platt scaling",
+                    "note": f"< {_BETA_FALLBACK_MIN} samples, forced Platt scaling",
                     **metrics,
                 }
                 log.info(
                     "Calibration %s: %d samples < %d, using Platt fallback",
-                    key, n, MIN_SAMPLES_SPORT_MARKET,
+                    key, n, _BETA_FALLBACK_MIN,
                 )
             else:
                 report["sport_market_reports"][key] = {
@@ -425,10 +447,19 @@ class CalibrationManager:
 
         key = self._key(sport, market)
 
-        # Try sport/market calibrator
+        # Try sport/market calibrator.
+        # Beta calibration (3 params) is safe with 100+ samples.
+        # Platt scaling (2 params) is safe with 30+ samples.
+        # Only isotonic requires the full MIN_SAMPLES_SPORT_MARKET (300).
+        _MIN_FOR_METHOD = {
+            "beta": 100,
+            "platt": 30,
+        }
         cal = self._calibrators.get(key)
-        if cal and cal.fitted and cal.n_samples >= MIN_SAMPLES_SPORT_MARKET:
-            return cal.calibrate(raw_prob), "sport_market"
+        if cal and cal.fitted:
+            min_n = _MIN_FOR_METHOD.get(cal.method, MIN_SAMPLES_SPORT_MARKET)
+            if cal.n_samples >= min_n:
+                return cal.calibrate(raw_prob), "sport_market"
 
         # Fallback to global
         if self._global_calibrator and self._global_calibrator.fitted:

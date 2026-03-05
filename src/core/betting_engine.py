@@ -137,34 +137,34 @@ class BettingEngine:
 
     @staticmethod
     def _compute_correlation_penalty(combo_legs: List[ComboLeg]) -> float:
-        """Compute a correlation penalty based on intra-event leg overlap.
+        """Compute directional correlation multiplier for combo legs.
 
-        Legs from *different* events are assumed independent (penalty = 1.0).
-        Legs sharing the same ``event_id`` (same-game parlay) are heavily
-        correlated — multiplying independent probabilities drastically
-        overestimates the combined EV.  A per-pair penalty of 0.80 is
-        applied multiplicatively to compensate.
+        Uses the CorrelationEngine for directional SGP handling:
+        - Positively correlated pairs (e.g., Fav Win + Over 2.5) get a
+          multiplier > 1.0, *boosting* the joint probability.
+        - Negatively correlated pairs (e.g., Fav Win + Under 0.5) get a
+          multiplier < 1.0, *penalizing* the joint probability.
+        - Cross-event pairs use league/sport correlation penalties.
+
+        Returns a multiplier in [0.50, 2.50].
         """
-        from collections import Counter
-        event_counts = Counter(leg.event_id for leg in combo_legs)
-        # Number of intra-event pairs that share a match
-        correlated_pairs = sum(
-            n * (n - 1) // 2 for n in event_counts.values() if n > 1
-        )
-        if correlated_pairs == 0:
-            return 1.0
-        # Warn on same-game parlays — they should normally be blocked upstream
-        for eid, cnt in event_counts.items():
-            if cnt > 1:
-                log.warning(
-                    "Same-game parlay detected: %d legs share event_id=%s "
-                    "(correlation penalty applied)", cnt, eid,
-                )
-        # Configurable penalty per correlated pair (default 0.80).
-        # Floor prevents exponential blow-up on large SGPs.
-        penalty = settings.combo_correlation_penalty
-        floor = settings.combo_correlation_floor
-        return max(floor, penalty ** correlated_pairs)
+        from src.core.correlation import CorrelationEngine
+
+        legs_as_dicts = [
+            {
+                "event_id": leg.event_id,
+                "selection": leg.selection,
+                "odds": leg.odds,
+                "probability": leg.probability,
+                "sport": leg.sport,
+                "market_type": leg.market_type,
+                "market": leg.market,
+                "home_team": leg.home_team,
+                "away_team": leg.away_team,
+            }
+            for leg in combo_legs
+        ]
+        return CorrelationEngine.compute_combo_correlation(legs_as_dicts)
 
     def build_combo(
         self,

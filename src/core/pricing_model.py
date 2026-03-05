@@ -247,27 +247,40 @@ class QuantPricingModel:
         # Blend with CLV regressor if available
         clv_prob = self._clv_predict(features)
         if clv_prob is not None:
-            # Inverse-variance weighting: models with lower historical
-            # error (Brier/MSE) get exponentially more weight.  This
-            # replaces the previous hardcoded 70/30 split which ignored
-            # model confidence entirely.
+            # Inverse-variance weighting with metric-scale correction.
+            #
+            # Problem: Brier score (classifier error, range [0,~0.25]) and
+            # CLV MSE (regressor error against continuous target, often
+            # much smaller ~0.01-0.05) are on fundamentally different
+            # scales.  Raw inverse-variance would let the CLV dominate.
+            #
+            # Solution: scale CLV MSE by 4.0 to approximate Brier-score
+            # magnitude.  Brier = E[(p - y)^2] with binary y in {0,1},
+            # CLV MSE = E[(p - closing_prob)^2] with closing_prob in [0,1].
+            # The scaling factor compensates for the variance reduction
+            # when predicting against a continuous target vs binary labels.
+            eps = 1e-6
             var_classifier = model_data.get("metrics", {}).get("brier_score", 0.25)
             clv_model_data = _load_joblib_model("clv_general")
-            var_clv = (
-                clv_model_data.get("metrics", {}).get("clv_mse", 0.25)
-                if clv_model_data else 0.25
+            raw_clv_mse = (
+                clv_model_data.get("metrics", {}).get("clv_mse", 0.05)
+                if clv_model_data else 0.05
             )
+            var_clv_scaled = raw_clv_mse * 4.0
 
-            if var_classifier > 0 and var_clv > 0:
-                w_classifier = (1.0 / var_classifier) / (1.0 / var_classifier + 1.0 / var_clv)
-            else:
-                # Fallback to 70/30 if metrics are missing or zero
-                w_classifier = 0.70
+            w_classifier_raw = 1.0 / (var_classifier + eps)
+            w_clv_raw = 1.0 / (var_clv_scaled + eps)
+            w_classifier = w_classifier_raw / (w_classifier_raw + w_clv_raw)
 
-            blended = w_classifier * classifier_prob + (1.0 - w_classifier) * clv_prob
+            # Clamp CLV weight to [0.10, 0.40] to prevent extreme allocations
+            w_clv = 1.0 - w_classifier
+            w_clv = max(0.10, min(0.40, w_clv))
+            w_classifier = 1.0 - w_clv
+
+            blended = w_classifier * classifier_prob + w_clv * clv_prob
             log.debug(
-                "Blending: w_classifier=%.2f (brier=%.4f) w_clv=%.2f (mse=%.4f) -> %.4f",
-                w_classifier, var_classifier, 1.0 - w_classifier, var_clv, blended,
+                "Blending: w_classifier=%.2f (brier=%.4f) w_clv=%.2f (mse=%.4f, scaled=%.4f) -> %.4f",
+                w_classifier, var_classifier, w_clv, raw_clv_mse, var_clv_scaled, blended,
             )
             return max(0.01, min(0.99, blended))
 
