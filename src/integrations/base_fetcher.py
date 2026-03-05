@@ -4,10 +4,11 @@ import asyncio
 import concurrent.futures
 import logging
 import os
+import random
 import ssl
 
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_if_exception_type
 
 log = logging.getLogger(__name__)
 
@@ -111,14 +112,25 @@ class AsyncBaseFetcher:
 
     @retry(
         retry=retry_if_exception_type((httpx.HTTPError, APIFetchError)),
-        wait=wait_exponential(multiplier=1, min=1, max=30),
+        wait=wait_exponential_jitter(initial=1, max=30, jitter=2),
         stop=stop_after_attempt(6),
         reraise=True,
     )
     async def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """HTTP GET with jittered exponential backoff.
+
+        Uses ``wait_exponential_jitter`` (±2s random jitter) to decorrelate
+        retry storms across concurrent workers.  A 429 triggers an
+        additional respect delay from the Retry-After header.
+        """
         async with self._make_client() as client:
             response = await client.get(path.lstrip('/'), params=params)
-            if response.status_code in (408, 429, 500, 502, 503, 504):
+            if response.status_code == 429:
+                retry_after = int(response.headers.get("Retry-After", "5"))
+                log.warning("Rate limited (429) for %s — respecting Retry-After=%ds", path, retry_after)
+                await asyncio.sleep(retry_after + random.uniform(0, 1))
+                raise APIFetchError(f"Rate limited (429) for {path}")
+            if response.status_code in (408, 500, 502, 503, 504):
                 raise APIFetchError(f"Transient API error {response.status_code} for {path}")
             response.raise_for_status()
             return response.json()

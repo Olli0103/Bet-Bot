@@ -14,18 +14,33 @@ State Flow:
 
 As a Tippprovider, the system never places bets directly.  The
 "Publisher" replaces the "Executioner" for the tip delivery path.
+
+DSS Compliance:
+    Every published tip is paired with a ``StatefulTip`` audit record
+    that requires ``HumanReviewData`` before any bankroll update.
+    Interactive Telegram inline keyboards allow the operator to
+    [Mark as Placed], [Reject], or [Show Math] — satisfying the
+    "meaningful human intervention" requirement under GDPR Art. 22.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import time
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from src.core.betting_math import (
     DEFAULT_GERMAN_TAX_RATE,
     calculate_mao,
+    kelly_fraction,
     tax_adjusted_expected_value,
+)
+from src.models.compliance import (
+    ConfidenceBreakdown,
+    StatefulTip,
+    TipAlert,
 )
 
 log = logging.getLogger(__name__)
@@ -253,3 +268,85 @@ async def tip_flow(
         log.error("Tip publication failed for %s: %s", state.event_id, exc)
 
     return state
+
+
+def build_dss_alert(state: TipState, reasoning: str = "") -> TipAlert:
+    """Build a validated TipAlert from a published TipState.
+
+    Includes the Tipico deep link, confidence breakdown, and net EV
+    for the operator's decision-making.
+    """
+    from src.integrations.tipico_deeplink import event_link as tipico_event_link
+
+    # Extract confidence breakdown from analysis if available
+    cb_raw = state.analysis.get("confidence_breakdown")
+    confidence_breakdown = None
+    if cb_raw and isinstance(cb_raw, dict):
+        try:
+            confidence_breakdown = ConfidenceBreakdown.model_validate(cb_raw)
+        except Exception:
+            pass
+
+    # Build Tipico deep link
+    tipico_link = ""
+    try:
+        tipico_link = tipico_event_link(
+            state.event_id, state.home, state.away,
+        )
+    except Exception:
+        pass
+
+    # Compute Kelly fraction for stake recommendation
+    tax_rate = DEFAULT_GERMAN_TAX_RATE
+    kf = kelly_fraction(
+        state.model_probability, state.current_odds,
+        frac=0.20, tax_rate=tax_rate,
+    )
+
+    mao = calculate_mao(state.model_probability, tax_rate=tax_rate, required_edge=0.01)
+
+    risk_flags: List[str] = []
+    if state.revalidation_count > 0:
+        risk_flags.append(f"Odds drifted {state.revalidation_count}x during analysis")
+    if state.current_odds < state.analysis.get("sharp_odds", state.current_odds):
+        risk_flags.append("Below sharp opening odds")
+
+    return TipAlert(
+        event_id=state.event_id,
+        match_name=f"{state.home} vs {state.away}",
+        sport=state.sport,
+        market=state.market,
+        recommended_selection=state.selection,
+        target_odds=state.current_odds,
+        signal_odds=state.analysis.get("sharp_odds", state.current_odds),
+        model_probability=state.model_probability,
+        net_ev=state.expected_value,
+        kelly_fraction=round(kf, 4),
+        mao=round(mao, 3),
+        confidence_breakdown=confidence_breakdown,
+        ai_reasoning=reasoning or "Quantitatives Signal bestätigt durch Modell und Marktanalyse.",
+        risk_flags=risk_flags,
+        tipico_deeplink=tipico_link,
+        commence_time=str(state.analysis.get("commence_time", "")),
+    )
+
+
+def cache_stateful_tip(state: TipState, alert: TipAlert) -> str:
+    """Cache a StatefulTip for later human review, return the tip_id.
+
+    The cached record awaits ``HumanReviewData`` before any bankroll
+    update occurs — this is the audit trail required by German regulations.
+    """
+    from src.data.redis_cache import cache
+
+    tip_id = f"{state.event_id}:{state.market}:{int(state.created_at)}"
+    stateful = StatefulTip(
+        tip_id=tip_id,
+        ai_recommendation=alert,
+    )
+    cache.set_json(
+        f"dss_tip:{tip_id}",
+        stateful.model_dump(),
+        ttl_seconds=12 * 3600,
+    )
+    return tip_id

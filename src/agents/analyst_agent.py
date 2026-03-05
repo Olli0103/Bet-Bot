@@ -15,7 +15,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-from src.core.betting_math import expected_value, public_bias_score
+from src.core.betting_math import expected_value, public_bias_score, tax_adjusted_expected_value
+from src.models.compliance import ConfidenceBreakdown
 from src.core.elo_ratings import EloSystem
 from src.core.enrichment import team_sentiment_score
 from src.core.feature_engineering import FeatureEngineer
@@ -350,11 +351,22 @@ class AnalystAgent:
         if sel_bias > 0.02:
             ev_threshold = 0.02  # require stronger edge on shaded favorites
 
+        # Net EV: always computed with German tax for DSS display
+        net_ev = tax_adjusted_expected_value(model_p, target_odds)
+
+        # XAI Confidence Breakdown for operator transparency
+        confidence_breakdown = self.build_confidence_breakdown(
+            features=ml_features,
+            model_p=model_p,
+            trigger=trigger,
+        )
+
         result.update({
             "model_probability": round(model_p, 4),
             "model_probability_raw": round(raw_p, 4),
             "calibration_source": cal_source,
             "expected_value": round(ev, 4),
+            "net_ev": round(net_ev, 4),
             "features": ml_features,
             "sentiment": {"home": sent_home, "away": sent_away},
             "injuries": {"home": inj_home, "away": inj_away},
@@ -364,6 +376,7 @@ class AnalystAgent:
             "elo": elo_feats,
             "poisson_prob": poisson_prob,
             "public_bias": sel_bias,
+            "confidence_breakdown": confidence_breakdown.model_dump(),
             # Preserve input parameters so downstream (cache, Deep Dive) can
             # reproduce identical results without re-guessing inputs.
             "sharp_odds": sharp_odds,
@@ -375,6 +388,112 @@ class AnalystAgent:
         })
 
         return result
+
+    @staticmethod
+    def build_confidence_breakdown(
+        features: Dict[str, Any],
+        model_p: float,
+        trigger: str = "",
+    ) -> ConfidenceBreakdown:
+        """Build an XAI confidence decomposition from feature contributions.
+
+        Decomposes the model's confidence into three interpretable buckets
+        so the human operator can see *why* the system recommends a bet.
+        This satisfies the "meaningful intervention" requirement under
+        GDPR Article 22 and German gambling regulations.
+
+        Weight allocation heuristic:
+        - **Statistical**: Elo, form, attack/defense, Poisson, H2H
+        - **Market signal**: Sharp odds, steam moves, CLV, line velocity, public bias
+        - **Qualitative**: Sentiment, injuries, weather
+        """
+        stat_score = 0.0
+        market_score = 0.0
+        qual_score = 0.0
+        top_factors: List[str] = []
+
+        # --- Statistical features ---
+        elo_diff = abs(float(features.get("elo_diff", 0)))
+        if elo_diff > 50:
+            stat_score += 0.15
+            top_factors.append(f"Elo-Vorteil: {elo_diff:+.0f}")
+
+        form_wr = float(features.get("form_winrate_l5", 0.5))
+        if abs(form_wr - 0.5) > 0.1:
+            stat_score += 0.10
+            top_factors.append(f"Form L5: {form_wr:.0%}")
+
+        atk_str = float(features.get("team_attack_strength", 1.0))
+        def_str = float(features.get("opp_defense_strength", 1.0))
+        if atk_str > 1.2 and def_str < 0.9:
+            stat_score += 0.10
+            top_factors.append(f"Angriff/Abwehr-Mismatch")
+
+        poisson_p = features.get("poisson_true_prob")
+        if poisson_p is not None and float(poisson_p) > 0:
+            stat_score += 0.10
+
+        h2h_wr = float(features.get("h2h_home_winrate", 0.5))
+        if abs(h2h_wr - 0.5) > 0.15:
+            stat_score += 0.05
+
+        # --- Market signal features ---
+        sharp_ip = float(features.get("sharp_implied_prob", 0))
+        if sharp_ip > 0 and model_p > sharp_ip:
+            market_score += 0.15
+            top_factors.append(f"Sharp-Edge: +{(model_p - sharp_ip)*100:.1f}pp vs Pinnacle")
+
+        if trigger in ("steam_move", "totals_steam"):
+            market_score += 0.15
+            top_factors.append("Steam Move bestätigt")
+
+        velocity = abs(float(features.get("line_velocity", 0)))
+        if velocity > 0.01:
+            market_score += 0.05
+
+        bias = abs(float(features.get("public_bias", 0)))
+        if bias > 0.02:
+            market_score += 0.05
+            top_factors.append(f"Public Bias: {bias:.3f}")
+
+        momentum = abs(float(features.get("market_momentum", 0)))
+        if momentum > 0.01:
+            market_score += 0.05
+
+        # --- Qualitative features ---
+        sent_delta = abs(float(features.get("sentiment_delta", 0)))
+        if sent_delta > 0.5:
+            qual_score += 0.10
+            top_factors.append(f"Stimmung: Delta {sent_delta:+.2f}")
+
+        inj_delta = abs(float(features.get("injury_delta", 0)))
+        if inj_delta > 2:
+            qual_score += 0.10
+            top_factors.append(f"Verletzungen: Delta {inj_delta:+.0f}")
+
+        weather_rain = float(features.get("weather_rain", 0))
+        weather_wind = float(features.get("weather_wind_high", 0))
+        if weather_rain > 0.5 or weather_wind > 0.5:
+            qual_score += 0.05
+            top_factors.append("Wetter-Einfluss")
+
+        # Normalize to sum to 1.0
+        total = stat_score + market_score + qual_score
+        if total < 0.01:
+            # Minimal signal — default to balanced
+            return ConfidenceBreakdown(
+                statistical_weight=0.34,
+                market_signal_weight=0.33,
+                qualitative_weight=0.33,
+                top_factors=top_factors[:5],
+            )
+
+        return ConfidenceBreakdown(
+            statistical_weight=round(stat_score / total, 2),
+            market_signal_weight=round(market_score / total, 2),
+            qualitative_weight=round(qual_score / total, 2),
+            top_factors=top_factors[:5],
+        )
 
     async def reason_with_llm(self, context: Dict) -> Optional[str]:
         """LLM reasoning with Pydantic-validated structured JSON output.

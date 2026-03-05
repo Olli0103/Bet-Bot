@@ -1,4 +1,5 @@
 import logging
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -14,6 +15,37 @@ _ACTIVE_SPORTS_TTL = 2 * 3600  # 2 hours
 # Deep-Sleep: sports with zero events in today's trading window
 _DEEP_SLEEP_KEY = "odds:deep_sleep_sports"
 _DEEP_SLEEP_TTL = 24 * 3600  # 24 hours — re-check once per day
+
+# Global rate limiter — protects the API key across all workers
+_RATE_LIMIT_KEY = "odds:api:rate_limit"
+_MIN_REQUEST_INTERVAL_S = 1.0  # minimum 1s between requests to the Odds API
+
+
+def _check_global_rate_limit() -> bool:
+    """Check whether enough time has passed since the last Odds API request.
+
+    Uses a Redis key with the last-request timestamp.  If the interval
+    since the last call is smaller than ``_MIN_REQUEST_INTERVAL_S``, the
+    caller should skip or wait.  This prevents a manual "Odds Refresh"
+    button from triggering a redundant external API call if the data is
+    still fresh (< interval).
+
+    Returns True if OK to proceed, False if rate-limited.
+    """
+    raw = cache.get(_RATE_LIMIT_KEY)
+    if raw:
+        try:
+            last_ts = float(raw)
+            if time.time() - last_ts < _MIN_REQUEST_INTERVAL_S:
+                return False
+        except (ValueError, TypeError):
+            pass
+    return True
+
+
+def _record_api_call() -> None:
+    """Record the current timestamp in Redis for rate-limit tracking."""
+    cache.set(_RATE_LIMIT_KEY, str(time.time()), ttl_seconds=60)
 
 
 def get_trading_window_end() -> datetime:
@@ -175,6 +207,11 @@ class OddsFetcher(AsyncBaseFetcher):
         if cached:
             return cached
 
+        # Global rate limiter: skip redundant calls across all workers
+        if not _check_global_rate_limit():
+            log.debug("Rate-limited: skipping redundant API call for %s", sport_key)
+            return cached or []
+
         params = {
             "apiKey": settings.odds_api_key,
             "regions": regions,
@@ -186,6 +223,7 @@ class OddsFetcher(AsyncBaseFetcher):
         if commence_time_to:
             params["commenceTimeTo"] = commence_time_to
 
+        _record_api_call()
         data = await self.get(
             f"sports/{sport_key}/odds",
             params=params,
@@ -304,6 +342,53 @@ class OddsFetcher(AsyncBaseFetcher):
             log.debug("Historical odds 12h ago not available for %s: %s", sport_key, exc)
 
         return result
+
+    async def get_event_odds(self, event_id: str) -> Optional[Dict[str, float]]:
+        """Fetch current odds for a single event by ID.
+
+        Returns ``{selection_name: decimal_odds}`` or None.  Uses a short
+        TTL cache (10s) to allow rapid re-checks from the tip publisher
+        without burning API quota.
+        """
+        cache_key = f"odds:event:{event_id}"
+        cached = cache.get_json(cache_key)
+        if cached:
+            return cached
+
+        if not _check_global_rate_limit():
+            return None
+
+        try:
+            _record_api_call()
+            data = await self.get(
+                f"sports/upcoming/odds",
+                params={
+                    "apiKey": settings.odds_api_key,
+                    "regions": "eu",
+                    "markets": "h2h",
+                    "eventIds": event_id,
+                    "bookmakers": "tipico_de,pinnacle",
+                },
+            )
+            result: Dict[str, float] = {}
+            if isinstance(data, list):
+                for event in data:
+                    if str(event.get("id", "")) == event_id:
+                        for bm in event.get("bookmakers", []):
+                            for mkt in bm.get("markets", []):
+                                for outcome in mkt.get("outcomes", []):
+                                    name = outcome.get("name")
+                                    price = outcome.get("price")
+                                    if name and price and float(price) > 1.0:
+                                        result[name] = float(price)
+                            if result:
+                                break
+            if result:
+                cache.set_json(cache_key, result, ttl_seconds=10)
+            return result or None
+        except Exception as exc:
+            log.warning("get_event_odds failed for %s: %s", event_id, exc)
+            return None
 
     # sync helpers for non-async call sites (loop-safe)
     def get_sports(self, ttl_seconds: int = 3600):

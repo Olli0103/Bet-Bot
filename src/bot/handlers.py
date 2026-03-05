@@ -1067,6 +1067,112 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("🛑 Alert ignoriert.")
         return
 
+    # --- DSS: Mark as Placed (Meaningful Human Intervention) ---
+    if data.startswith("dss_placed:"):
+        tip_id = data.split(":", 1)[1]
+        tip_data = cache.get_json(f"dss_tip:{tip_id}")
+        if not tip_data:
+            await q.edit_message_text("Tipp abgelaufen.")
+            return
+
+        try:
+            from src.models.compliance import HumanReviewData, StatefulTip
+            stateful = StatefulTip.model_validate(tip_data)
+            user_id = str(q.from_user.id) if q.from_user else "unknown"
+            review = HumanReviewData(
+                operator_id=user_id,
+                confirmed_odds=stateful.ai_recommendation.target_odds,
+                confirmed_stake=stateful.ai_recommendation.recommended_stake,
+                action="placed",
+            )
+            stateful.finalize(review)
+            cache.set_json(f"dss_tip:{tip_id}", stateful.model_dump(), ttl_seconds=12 * 3600)
+
+            await q.edit_message_text(
+                f"✅ Platziert bestätigt @ {review.confirmed_odds:.2f}\n"
+                f"Stake: {review.confirmed_stake:.2f} EUR\n"
+                f"Operator: {user_id}\n"
+                f"Audit-ID: {tip_id}"
+            )
+        except Exception as exc:
+            await q.edit_message_text(f"Fehler: {type(exc).__name__}")
+        return
+
+    # --- DSS: Rejected ---
+    if data.startswith("dss_rejected:"):
+        tip_id = data.split(":", 1)[1]
+        tip_data = cache.get_json(f"dss_tip:{tip_id}")
+        if not tip_data:
+            await q.edit_message_text("Tipp abgelaufen.")
+            return
+
+        try:
+            from src.models.compliance import HumanReviewData, StatefulTip
+            stateful = StatefulTip.model_validate(tip_data)
+            user_id = str(q.from_user.id) if q.from_user else "unknown"
+            review = HumanReviewData(
+                operator_id=user_id,
+                confirmed_odds=stateful.ai_recommendation.target_odds,
+                confirmed_stake=0.0,
+                action="rejected",
+                reason_for_override="Operator rejected via Telegram",
+            )
+            stateful.finalize(review)
+            cache.set_json(f"dss_tip:{tip_id}", stateful.model_dump(), ttl_seconds=12 * 3600)
+            await q.edit_message_text(f"❌ Tipp abgelehnt (Audit-ID: {tip_id})")
+        except Exception:
+            await q.edit_message_text("❌ Tipp abgelehnt.")
+        return
+
+    # --- DSS: Show Math (Reasoning Transparency) ---
+    if data.startswith("dss_math:"):
+        tip_id = data.split(":", 1)[1]
+        tip_data = cache.get_json(f"dss_tip:{tip_id}")
+        if not tip_data:
+            await q.edit_message_text("Tipp abgelaufen.")
+            return
+
+        try:
+            from src.models.compliance import StatefulTip
+            stateful = StatefulTip.model_validate(tip_data)
+            rec = stateful.ai_recommendation
+
+            lines = [
+                f"📊 Mathe | {rec.match_name}",
+                f"{'━' * 24}",
+                f"Model Prob: {rec.model_probability:.1%}",
+                f"Target Odds: {rec.target_odds:.3f}",
+                f"Signal Odds: {rec.signal_odds:.3f}",
+                f"Net EV (nach 5% Steuer): {rec.net_ev * 100:+.2f}%",
+                f"MAO: {rec.mao:.3f}",
+                f"Kelly: {rec.kelly_fraction:.4f}",
+                f"Empf. Stake: {rec.recommended_stake:.2f} EUR",
+            ]
+
+            if rec.confidence_breakdown:
+                cb = rec.confidence_breakdown
+                lines.extend([
+                    f"{'━' * 24}",
+                    "Konfidenz-Aufschlüsselung:",
+                    f"  Statistik: {cb.statistical_weight:.0%}",
+                    f"  Markt-Signal: {cb.market_signal_weight:.0%}",
+                    f"  Qualitativ: {cb.qualitative_weight:.0%}",
+                ])
+                if cb.top_factors:
+                    lines.append("Top-Faktoren:")
+                    for f in cb.top_factors[:5]:
+                        lines.append(f"  • {f}")
+
+            if rec.risk_flags:
+                lines.extend([f"{'━' * 24}", "⚠️ Risiken:"])
+                for rf in rec.risk_flags:
+                    lines.append(f"  • {rf}")
+
+            await q.message.reply_text("\n".join(lines))
+        except Exception as exc:
+            await q.message.reply_text(f"Mathe-Anzeige fehlgeschlagen: {type(exc).__name__}")
+        return
+
 
 # ---------------------------------------------------------------------------
 # Dynamic Settings Dashboard (EPIC 2)
