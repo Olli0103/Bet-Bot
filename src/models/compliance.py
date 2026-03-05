@@ -106,7 +106,7 @@ class TipAlert(BaseModel):
     """Validated tip signal for Telegram delivery.
 
     Ensures the LLM cannot hallucinate data types when generating a tip.
-    The ``net_ev`` field is post-5% German tax, preventing the operator
+    The ``net_ev`` field is post-5.3% German tax, preventing the operator
     from seeing misleadingly high "gross EV" numbers.
     """
     model_config = ConfigDict(protected_namespaces=())
@@ -126,7 +126,7 @@ class TipAlert(BaseModel):
     )
     model_probability: float = Field(..., gt=0.0, lt=1.0)
     net_ev: float = Field(
-        ..., description="Expected Value AFTER 5% German Wettsteuer"
+        ..., description="Expected Value AFTER 5.3% German Wettsteuer"
     )
     kelly_fraction: float = Field(default=0.0, ge=0.0)
     recommended_stake: float = Field(default=0.0, ge=0.0)

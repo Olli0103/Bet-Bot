@@ -258,43 +258,43 @@ class TestVigRemoval:
 # ---------------------------------------------------------------------------
 
 class TestDefaultGermanTaxRate:
-    def test_constant_is_five_percent(self):
-        assert DEFAULT_GERMAN_TAX_RATE == 0.05
+    def test_constant_is_five_point_three_percent(self):
+        assert DEFAULT_GERMAN_TAX_RATE == 0.053
 
 
 class TestGetNetPayout:
     def test_standard_tax(self):
-        # odds 2.0, tax 5% → 2.0 * 0.95 = 1.90
-        assert get_net_payout(2.0) == pytest.approx(1.90)
+        # odds 2.0, tax 5.3% → 2.0 * 0.947 = 1.894
+        assert get_net_payout(2.0) == pytest.approx(1.894)
 
     def test_no_tax(self):
         assert get_net_payout(2.0, tax_rate=0.0) == pytest.approx(2.0)
 
     def test_high_odds(self):
-        # odds 10.0, tax 5% → 10.0 * 0.95 = 9.50
-        assert get_net_payout(10.0) == pytest.approx(9.50)
+        # odds 10.0, tax 5.3% → 10.0 * 0.947 = 9.47
+        assert get_net_payout(10.0) == pytest.approx(9.47)
 
 
 class TestTaxAdjustedExpectedValue:
     def test_defaults_to_german_tax(self):
-        """tax_adjusted_expected_value defaults to 5% tax unlike expected_value."""
+        """tax_adjusted_expected_value defaults to 5.3% tax unlike expected_value."""
         ev_no_tax = expected_value(0.6, 2.0, tax_rate=0.0)
         ev_tax = tax_adjusted_expected_value(0.6, 2.0)
         assert ev_tax < ev_no_tax
-        # net_odds = 2.0 * 0.95 = 1.90, net_profit = 0.90
-        # EV = 0.6 * 0.90 - 0.4 = 0.14
-        assert ev_tax == pytest.approx(0.14)
+        # net_odds = 2.0 * 0.947 = 1.894, net_profit = 0.894
+        # EV = 0.6 * 0.894 - 0.4 = 0.1364
+        assert ev_tax == pytest.approx(0.1364)
 
     def test_matches_expected_value_when_same_rate(self):
         """Should match expected_value when given the same tax rate."""
-        ev1 = expected_value(0.55, 3.0, tax_rate=0.05)
-        ev2 = tax_adjusted_expected_value(0.55, 3.0, tax_rate=0.05)
+        ev1 = expected_value(0.55, 3.0, tax_rate=0.053)
+        ev2 = tax_adjusted_expected_value(0.55, 3.0, tax_rate=0.053)
         assert ev1 == pytest.approx(ev2)
 
     def test_losing_bet_after_tax(self):
-        """A marginally +EV pre-tax bet becomes -EV after 5% Wettsteuer."""
+        """A marginally +EV pre-tax bet becomes -EV after 5.3% Wettsteuer."""
         # 51% at 2.0: pre-tax EV = 0.51*1.0 - 0.49 = 0.02 (barely positive)
-        # post-tax: 0.51*0.90 - 0.49 = -0.031 (negative!)
+        # post-tax: 0.51*0.894 - 0.49 = -0.03406 (negative!)
         ev = tax_adjusted_expected_value(0.51, 2.0)
         assert ev < 0
 
@@ -312,7 +312,7 @@ class TestTaxAdjustedKellyGrowth:
 
     def test_negative_edge_negative_growth(self):
         """Bet with tax-negative EV should have negative growth at any fraction."""
-        # 40% prob at 2.0 odds, 5% tax → definitely -EV
+        # 40% prob at 2.0 odds, 5.3% tax → definitely -EV
         g = tax_adjusted_kelly_growth(0.4, 2.0, fraction=0.05)
         assert g < 0
 

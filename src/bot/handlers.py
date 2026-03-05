@@ -1143,7 +1143,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Model Prob: {rec.model_probability:.1%}",
                 f"Target Odds: {rec.target_odds:.3f}",
                 f"Signal Odds: {rec.signal_odds:.3f}",
-                f"Net EV (nach 5% Steuer): {rec.net_ev * 100:+.2f}%",
+                f"Net EV (nach 5,3% Steuer): {rec.net_ev * 100:+.2f}%",
                 f"MAO: {rec.mao:.3f}",
                 f"Kelly: {rec.kelly_fraction:.4f}",
                 f"Empf. Stake: {rec.recommended_stake:.2f} EUR",

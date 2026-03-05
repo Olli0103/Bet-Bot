@@ -49,8 +49,8 @@ class Settings(BaseModel):
     # Bankroll
     initial_bankroll: float = float(os.getenv("INITIAL_BANKROLL", "1000.0"))
 
-    # Tipico tax
-    tipico_tax_rate: float = float(os.getenv("TIPICO_TAX_RATE", "0.05"))
+    # Tipico tax (5.3% Wettsteuer as of 2025 — GlüStV 2021 updated rate)
+    tipico_tax_rate: float = float(os.getenv("TIPICO_TAX_RATE", "0.053"))
     tax_free_mode: bool = os.getenv("TAX_FREE_MODE", "false").lower() == "true"
 
     # Data sources (TheSportsDB, football-data.org)

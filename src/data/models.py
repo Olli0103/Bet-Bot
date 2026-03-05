@@ -80,6 +80,14 @@ class PlacedBet(Base):
         nullable=True,
     )
 
+    # Human Override audit trail (GDPR Art. 22 / GlüStV DSS compliance)
+    operator_id = Column(String(64), nullable=True)
+    confirmed_odds = Column(Float, nullable=True)
+    confirmed_stake = Column(Float, nullable=True)
+    human_action = Column(String(16), nullable=True)  # placed/skipped/adjusted/rejected
+    override_reason = Column(Text, nullable=True)
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
+
     # Closing line snapshot (logged at kickoff for CLV-based continuous learning)
     sharp_closing_odds = Column(Float, nullable=True)
     sharp_closing_prob = Column(Float, nullable=True)
