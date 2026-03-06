@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
+import time
 from typing import Any, Dict, List, Tuple
 
 import feedparser
@@ -26,13 +28,24 @@ def _headers_key(feed_id: str) -> str:
     return f"reddit:rss:headers:{h}"
 
 
-def _get_feed_headers(feed_id: str) -> Tuple[str | None, str | None]:
-    data = cache.get_json(_headers_key(feed_id)) or {}
-    return data.get("etag"), data.get("modified")
+def _get_feed_headers(feed_id: str) -> Dict[str, Any]:
+    return cache.get_json(_headers_key(feed_id)) or {}
 
 
-def _save_feed_headers(feed_id: str, etag: str | None, modified: str | None) -> None:
-    cache.set_json(_headers_key(feed_id), {"etag": etag, "modified": modified}, ttl_seconds=_HEADERS_TTL)
+def _save_feed_headers(
+    feed_id: str,
+    etag: str | None,
+    modified: str | None,
+    next_poll_at: int | None = None,
+    cache_control: str | None = None,
+) -> None:
+    payload = {
+        "etag": etag,
+        "modified": modified,
+        "next_poll_at": int(next_poll_at or 0),
+        "cache_control": cache_control or "",
+    }
+    cache.set_json(_headers_key(feed_id), payload, ttl_seconds=_HEADERS_TTL)
 
 
 def _is_guid_processed(guid: str) -> bool:
@@ -53,8 +66,23 @@ def _norm_label(label: str) -> float:
 
 
 def fetch_feed_smart(url: str, feed_id: str) -> Tuple[List[dict], int]:
-    """Fetch feed with conditional requests (ETag/Last-Modified), return deltas + status."""
-    etag, modified = _get_feed_headers(feed_id)
+    """Fetch feed with conditional requests + cache-control backoff.
+
+    Returns (deltas, status), where status can be:
+    - 200: fetched
+    - 304: server not modified
+    - 399: locally skipped due to cache-control max-age still valid
+    """
+    hdr = _get_feed_headers(feed_id)
+    etag = hdr.get("etag")
+    modified = hdr.get("modified")
+    next_poll_at = int(hdr.get("next_poll_at") or 0)
+
+    now = int(time.time())
+    if next_poll_at and now < next_poll_at:
+        # Local 304-equivalent skip: avoid hammering unchanged RSS XML.
+        return [], 399
+
     feed = feedparser.parse(url, etag=etag, modified=modified)
 
     status = int(getattr(feed, "status", 200) or 200)
@@ -62,9 +90,19 @@ def fetch_feed_smart(url: str, feed_id: str) -> Tuple[List[dict], int]:
         log.info("reddit_rss_304: %s", url)
         return [], 304
 
+    headers = getattr(feed, "headers", {}) or {}
+    cc = str(headers.get("cache-control", ""))
+    max_age = 900  # sane default fallback (15m)
+    m = re.search(r"max-age=(\d+)", cc)
+    if m:
+        try:
+            max_age = max(60, int(m.group(1)))
+        except Exception:
+            pass
+
     new_etag = getattr(feed, "etag", etag)
     new_modified = getattr(feed, "modified", modified)
-    _save_feed_headers(feed_id, new_etag, new_modified)
+    _save_feed_headers(feed_id, new_etag, new_modified, next_poll_at=now + max_age, cache_control=cc)
 
     out: List[dict] = []
     for e in feed.entries:
@@ -74,7 +112,7 @@ def fetch_feed_smart(url: str, feed_id: str) -> Tuple[List[dict], int]:
         _mark_guid_processed(guid)
         out.append(dict(e))
 
-    log.info("reddit_rss_200: %s new=%d", url, len(out))
+    log.info("reddit_rss_200: %s new=%d max_age=%ds", url, len(out), max_age)
     return out, status
 
 
@@ -91,7 +129,7 @@ def run_sentiment_pipeline(max_items_per_run: int = 30) -> Dict[str, Any]:
         "processed": 0,
         "tier_counts": {"core": 0, "fact_only": 0, "high_noise": 0},
         "weighted": {"sentiment_delta": 0.0, "public_hype_index": 0.0},
-        "feeds": {"http_200": 0, "http_304": 0, "other": 0, "delta_items": 0},
+        "feeds": {"http_200": 0, "http_304": 0, "local_skip": 0, "other": 0, "delta_items": 0},
     }
 
     for tier in tiers:
@@ -113,6 +151,8 @@ def run_sentiment_pipeline(max_items_per_run: int = 30) -> Dict[str, Any]:
             deltas, http_status = fetch_feed_smart(url, feed_id=url)
             if http_status == 304:
                 detail["feeds"]["http_304"] += 1
+            elif http_status == 399:
+                detail["feeds"]["local_skip"] += 1
             elif http_status == 200:
                 detail["feeds"]["http_200"] += 1
             else:
