@@ -28,12 +28,8 @@ log = logging.getLogger(__name__)
 _MIN_REQUEST_INTERVAL = 6.0
 _last_request_ts: float = 0.0
 
-# IMPORTANT: Replace 'YOUR_REDDIT_USERNAME' with your actual Reddit
-# username before deploying.  Reddit silently blocks requests that use
-# a generic or missing User-Agent.
-_USER_AGENT = (
-    "python:bet-bot-sentiment-scraper:v1.0 (by /u/Olli0103)"
-)
+# User-Agent is configurable via REDDIT_USER_AGENT in settings/.env.
+_USER_AGENT = settings.reddit_user_agent
 
 _BASE_URL = "https://www.reddit.com"
 _OLD_BASE_URL = "https://old.reddit.com"
