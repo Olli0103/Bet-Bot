@@ -84,6 +84,12 @@
   - Impact: Deep Dive could show "Alert abgelaufen" for valid DSS tips.
   - Fix: handler now falls back to `dss_tip:<tip_id>` and builds a compatible alert view.
 
+- **Enrichment timeout guard thread-safety fix** (`src/core/enrichment.py`)
+  - Root cause: SIGALRM timeout guard attempted to register signal handlers in worker threads,
+    causing `ValueError: signal only works in main thread of the main interpreter`.
+  - Fix: timeout guard now enables SIGALRM only on main thread; in worker threads it falls
+    back to a no-op guard while request-level client timeouts remain active.
+
 ## 2026-03-05
 
 ### Fixed

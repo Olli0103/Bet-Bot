@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import signal
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime
@@ -36,12 +37,18 @@ class _EnrichmentTimeout(Exception):
 def _timeout_guard(seconds: int):
     """Context manager that raises _EnrichmentTimeout after `seconds`.
 
-    Falls back to a no-op on platforms without SIGALRM (Windows).
+    Falls back to a no-op when SIGALRM is unavailable *or* when called from a
+    non-main thread (Python signal handlers only work in main thread).
     """
     def _handler(signum, frame):
         raise _EnrichmentTimeout(f"Enrichment timed out after {seconds}s")
 
-    if hasattr(signal, "SIGALRM"):
+    can_use_sigalrm = (
+        hasattr(signal, "SIGALRM")
+        and threading.current_thread() is threading.main_thread()
+    )
+
+    if can_use_sigalrm:
         old_handler = signal.signal(signal.SIGALRM, _handler)
         signal.alarm(seconds)
         try:
@@ -50,6 +57,8 @@ def _timeout_guard(seconds: int):
             signal.alarm(0)
             signal.signal(signal.SIGALRM, old_handler)
     else:
+        # No-op timeout guard in worker threads; downstream fetchers/clients
+        # still have their own request-level timeouts.
         yield
 
 
