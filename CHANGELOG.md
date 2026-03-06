@@ -90,6 +90,11 @@
   - Fix: timeout guard now enables SIGALRM only on main thread; in worker threads it falls
     back to a no-op guard while request-level client timeouts remain active.
 
+- **Daily push ordering changed to enrichment-first** (`src/bot/app.py`)
+  - Scheduled fetch now performs: core fetch → enrichment → push.
+  - Push is emitted only when enrichment completed successfully.
+  - Prevents sending raw/unenriched tips in the morning push flow.
+
 ## 2026-03-05
 
 ### Fixed

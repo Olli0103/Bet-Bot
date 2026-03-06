@@ -139,16 +139,15 @@ async def scheduled_fetch(context: ContextTypes.DEFAULT_TYPE):
         items = await asyncio.to_thread(fetch_and_build_signals, skip_enrichment=True)
         await _broadcast(context.bot, f"📡 Data update done (core): {len(items)} Signals")
         push = bool((context.job.data or {}).get("push", False)) if context.job else False
-        if push:
-            for cid in chat_router.broadcast_ids():
-                await push_daily_signals(context.bot, cid)
 
-        # Phase 2: Enrichment in background
+        # Phase 2: Enrichment first
+        enrichment_ok = False
         try:
             result = await asyncio.to_thread(run_enrichment_pass)
             if result.get("status") == "done":
                 n_sig = result.get("signals", 0)
                 n_ev = result.get("events", 0)
+                enrichment_ok = True
                 await _broadcast(
                     context.bot,
                     f"🧠 Enrichment done: {n_sig} Signals aus {n_ev} Events angereichert",
@@ -157,6 +156,13 @@ async def scheduled_fetch(context: ContextTypes.DEFAULT_TYPE):
                 _log.info("Enrichment skipped: %s", result.get("reason"))
         except Exception as exc:
             _log.warning("Background enrichment failed: %s", exc)
+
+        # Phase 3: Push only after enrichment completed successfully
+        if push and enrichment_ok:
+            for cid in chat_router.broadcast_ids():
+                await push_daily_signals(context.bot, cid)
+        elif push and not enrichment_ok:
+            _log.warning("Push skipped because enrichment was not successful")
     except Exception:
         pass
 
