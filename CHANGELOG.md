@@ -53,6 +53,12 @@
   - When feed is still fresh, pipeline performs local skip (no network request).
   - Added telemetry fields/logging: `local_skip` and `ratio304eq` (server 304 + local fresh-skip equivalent).
 
+- **Feature-engineering placeholders for NLP sentiment generation** (`src/core/feature_engineering.py`)
+  - Added cold-start safe feature defaults:
+    - `public_hype_index` (imputed to `0.0` when missing)
+    - `smart_money_divergence = sentiment_delta - public_hype_index`
+  - Added both fields to core feature vector output (no retraining triggered).
+
 ### Changed
 - **Agent polling cadence reduced (budget mode)** (`src/bot/app.py`, `src/bot/core_worker.py`)
   - Agent cycle changed from frequent mode to **2x per hour** (`1800s` interval).
