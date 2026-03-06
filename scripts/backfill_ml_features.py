@@ -112,6 +112,41 @@ def _derive_sharp_vig(odds: float) -> float:
     return 0.05  # conservative default
 
 
+def _true_vig_from_prices(prices: Dict) -> Optional[float]:
+    vals: List[float] = []
+    for v in (prices or {}).values():
+        try:
+            vf = float(v)
+        except Exception:
+            continue
+        if isfinite(vf) and vf > 1.0:
+            vals.append(vf)
+    if len(vals) < 2:
+        return None
+    implied_sum = sum(1.0 / x for x in vals)
+    vig = implied_sum - 1.0
+    return round(max(0.001, vig), 4)
+
+
+def _derive_sharp_vig_from_meta(meta: Dict, odds: float) -> Tuple[float, str]:
+    """Prefer true market-book overround from meta_features when available."""
+    prices = meta.get("sharp_prices_h2h")
+    if isinstance(prices, dict):
+        true_vig = _true_vig_from_prices(prices)
+        if true_vig is not None:
+            return true_vig, "true_book"
+
+    # Secondary: explicit close odds pairs sometimes stored in meta
+    home_close = meta.get("home_odds_close")
+    away_close = meta.get("away_odds_close")
+    if home_close and away_close:
+        true_vig = _true_vig_from_prices({"home": home_close, "away": away_close})
+        if true_vig is not None:
+            return true_vig, "paired_close"
+
+    return _derive_sharp_vig(odds), "heuristic_fallback"
+
+
 def _compute_form_from_history(
     team: str,
     match_date=None,
@@ -253,8 +288,13 @@ def backfill(
 
             # sharp_vig
             if meta.get("sharp_vig") is None:
-                val = float(bet.sharp_vig) if bet.sharp_vig is not None and bet.sharp_vig != 0.0 else _derive_sharp_vig(best_odds)
+                if bet.sharp_vig is not None and bet.sharp_vig != 0.0:
+                    val = float(bet.sharp_vig)
+                    method = "column_existing"
+                else:
+                    val, method = _derive_sharp_vig_from_meta(meta, best_odds)
                 meta["sharp_vig"] = val
+                meta["_sharp_vig_method"] = method
                 stats["features_filled"]["sharp_vig"] += 1
                 changed = True
 

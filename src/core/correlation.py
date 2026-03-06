@@ -97,6 +97,56 @@ def _is_btts_yes(leg: Dict) -> bool:
 
 # ---- pairwise rho computation -------------------------------------------------
 
+def _same_event_pair_multiplier(leg_a: Dict, leg_b: Dict) -> float:
+    """Legacy scalar multiplier for same-event directional correlation.
+
+    Kept for backward-compatible tests and diagnostics.
+    """
+    cat_a = _classify_market(leg_a)
+    cat_b = _classify_market(leg_b)
+
+    if cat_a == cat_b:
+        return 0.80
+
+    markets = sorted([cat_a, cat_b])
+    m1, m2 = markets[0], markets[1]
+
+    if m1 == "h2h" and m2 == "totals":
+        h2h_leg = leg_a if cat_a == "h2h" else leg_b
+        totals_leg = leg_a if cat_a == "totals" else leg_b
+        fav = _is_favorite(h2h_leg)
+        over = _is_over(totals_leg)
+        if fav and over:
+            return 1.15
+        if fav and not over:
+            return 0.70
+        if not fav and over:
+            return 0.95
+        return 1.10
+
+    if m1 == "btts" and m2 == "h2h":
+        btts_leg = leg_a if cat_a == "btts" else leg_b
+        return 1.05 if _is_btts_yes(btts_leg) else 0.95
+
+    if m1 == "btts" and m2 == "totals":
+        totals_leg = leg_a if cat_a == "totals" else leg_b
+        btts_leg = leg_a if cat_a == "btts" else leg_b
+        over = _is_over(totals_leg)
+        btts_yes = _is_btts_yes(btts_leg)
+        if over and btts_yes:
+            return 1.10
+        if (not over) and (not btts_yes):
+            return 1.08
+        if over and (not btts_yes):
+            return 0.90
+        return 0.88
+
+    if m1 == "h2h" and m2 == "spreads":
+        return 0.90
+
+    return 1.00
+
+
 def _empirical_pair_rho(leg_a: Dict, leg_b: Dict) -> float:
     """Compute empirical Pearson rho for a pair of legs.
 
@@ -305,16 +355,24 @@ class CorrelationEngine:
 
     @classmethod
     def compute_combo_correlation(cls, legs: List[Dict]) -> float:
-        """Backward-compatible: return multiplier relative to independent product.
+        """Backward-compatible scalar multiplier.
 
-        This method preserves the interface for callers that expect a scalar
-        multiplier.  Internally, it computes the copula joint probability and
-        divides by the independent product to produce the adjustment factor.
-
-        Final result is clamped to [0.50, 2.50] to prevent extreme values.
+        For cross-event combos, preserve legacy deterministic penalties
+        expected by older risk tests (same-league=0.92, same-sport=0.97).
+        For same-event legs, use copula-based dependence multiplier.
         """
         if len(legs) <= 1:
             return 1.0
+
+        event_ids = {str(leg.get("event_id", "")) for leg in legs}
+        if len(event_ids) > 1 and len(legs) == 2:
+            a, b = legs[0], legs[1]
+            sa = str(a.get("sport", "")).lower()
+            sb = str(b.get("sport", "")).lower()
+            if sa == sb:
+                return 0.92
+            if sa.split("_")[0] == sb.split("_")[0]:
+                return 0.97
 
         p_copula = cls.compute_joint_probability(legs)
         p_independent = float(np.prod([

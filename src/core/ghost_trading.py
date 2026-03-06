@@ -59,32 +59,56 @@ def auto_place_virtual_bets(
 
         for sig in signals:
             sig_key = f"{sig.event_id}|{sig.selection}"
-            if sig.expected_value > 0 and sig_key not in existing_set:
-                feat = features_dict.get(f"{sig.event_id}:{sig.selection}", {})
-                new_bet = PlacedBet(
-                    event_id=str(sig.event_id),
-                    sport=str(sig.sport),
-                    market=str(sig.market),
-                    selection=str(sig.selection),
-                    odds=float(sig.bookmaker_odds),
-                    odds_open=float(sig.bookmaker_odds),
-                    odds_close=float(sig.bookmaker_odds),
-                    clv=float(feat.get("clv", 0.0)),
-                    form_winrate_l5=float(feat.get("form_winrate_l5", 0.5)),
-                    form_games_l5=int(feat.get("form_games_l5", 0)),
-                    stake=float(sig.recommended_stake),
-                    status="open",
-                    sharp_implied_prob=float(feat.get("sharp_implied_prob", 0.0)),
-                    sharp_vig=float(feat.get("sharp_vig", 0.0)),
-                    sentiment_delta=float(feat.get("sentiment_delta", 0.0)),
-                    injury_delta=float(feat.get("injury_delta", 0.0)),
-                    is_training_data=False,
-                    data_source="live_trade",
-                    owner_chat_id=owner_chat_id or None,
-                    meta_features=_safe_meta(feat),
+            if sig.expected_value <= 0:
+                continue
+
+            feat = features_dict.get(f"{sig.event_id}:{sig.selection}", {})
+
+            if sig_key in existing_set:
+                # Refresh enrichment/features for already-open live trades
+                existing_bet = db.scalar(
+                    select(PlacedBet).where(
+                        PlacedBet.event_id == str(sig.event_id),
+                        PlacedBet.selection == str(sig.selection),
+                        PlacedBet.market == str(sig.market),
+                        PlacedBet.data_source.in_(_user_bet_sources()),
+                        *([PlacedBet.owner_chat_id == owner_chat_id] if owner_chat_id else []),
+                    )
                 )
-                db.add(new_bet)
-                placed_count += 1
+                if existing_bet:
+                    existing_bet.meta_features = {**(existing_bet.meta_features or {}), **_safe_meta(feat)}
+                    existing_bet.sharp_implied_prob = float(feat.get("sharp_implied_prob", existing_bet.sharp_implied_prob or 0.0))
+                    existing_bet.sharp_vig = float(feat.get("sharp_vig", existing_bet.sharp_vig or 0.0))
+                    existing_bet.sentiment_delta = float(feat.get("sentiment_delta", existing_bet.sentiment_delta or 0.0))
+                    existing_bet.injury_delta = float(feat.get("injury_delta", existing_bet.injury_delta or 0.0))
+                    existing_bet.form_winrate_l5 = float(feat.get("form_winrate_l5", existing_bet.form_winrate_l5 or 0.5))
+                    existing_bet.form_games_l5 = int(feat.get("form_games_l5", existing_bet.form_games_l5 or 0))
+                continue
+
+            new_bet = PlacedBet(
+                event_id=str(sig.event_id),
+                sport=str(sig.sport),
+                market=str(sig.market),
+                selection=str(sig.selection),
+                odds=float(sig.bookmaker_odds),
+                odds_open=float(sig.bookmaker_odds),
+                odds_close=float(sig.bookmaker_odds),
+                clv=float(feat.get("clv", 0.0)),
+                form_winrate_l5=float(feat.get("form_winrate_l5", 0.5)),
+                form_games_l5=int(feat.get("form_games_l5", 0)),
+                stake=float(sig.recommended_stake),
+                status="open",
+                sharp_implied_prob=float(feat.get("sharp_implied_prob", 0.0)),
+                sharp_vig=float(feat.get("sharp_vig", 0.0)),
+                sentiment_delta=float(feat.get("sentiment_delta", 0.0)),
+                injury_delta=float(feat.get("injury_delta", 0.0)),
+                is_training_data=False,
+                data_source="live_trade",
+                owner_chat_id=owner_chat_id or None,
+                meta_features=_safe_meta(feat),
+            )
+            db.add(new_bet)
+            placed_count += 1
         db.commit()
 
     return placed_count
@@ -120,7 +144,19 @@ def place_virtual_bet(
                 )
             )
             if existing:
-                log.info("Duplicate bet skipped (owner-scoped): event=%s sel=%s owner=%s",
+                # Update enrichment/features on duplicate instead of skipping silently
+                existing_bet = db.get(PlacedBet, existing)
+                if existing_bet:
+                    safe_feat = _safe_meta(features)
+                    existing_bet.meta_features = {**(existing_bet.meta_features or {}), **safe_feat}
+                    existing_bet.sharp_implied_prob = float(features.get("sharp_implied_prob", existing_bet.sharp_implied_prob or 0.0))
+                    existing_bet.sharp_vig = float(features.get("sharp_vig", existing_bet.sharp_vig or 0.0))
+                    existing_bet.sentiment_delta = float(features.get("sentiment_delta", existing_bet.sentiment_delta or 0.0))
+                    existing_bet.injury_delta = float(features.get("injury_delta", existing_bet.injury_delta or 0.0))
+                    existing_bet.form_winrate_l5 = float(features.get("form_winrate_l5", existing_bet.form_winrate_l5 or 0.5))
+                    existing_bet.form_games_l5 = int(features.get("form_games_l5", existing_bet.form_games_l5 or 0))
+                    db.commit()
+                log.info("Duplicate bet updated (owner-scoped): event=%s sel=%s owner=%s",
                          event_id, selection, owner_chat_id or "global")
                 return False
 

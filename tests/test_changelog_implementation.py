@@ -22,9 +22,11 @@ import pytest
 # Mock psycopg + postgres module before any src.data.postgres imports —
 # the DB driver is not available in the test environment.
 import sys
+import importlib.machinery
 
 _mock_psycopg = MagicMock()
 _mock_psycopg.__version__ = "3.1.0"
+_mock_psycopg.__spec__ = importlib.machinery.ModuleSpec("psycopg", loader=None)
 sys.modules["psycopg"] = _mock_psycopg
 
 # Also mock the data.postgres module to avoid engine creation

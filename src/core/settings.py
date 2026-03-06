@@ -39,6 +39,40 @@ class Settings(BaseModel):
 
     # Enrichment
     enrichment_enabled: bool = os.getenv("ENRICHMENT_ENABLED", "true").lower() == "true"
+    # Reddit RSS (subreddit feeds, comma-separated full URLs)
+    reddit_rss_feeds: str = os.getenv(
+        "REDDIT_RSS_FEEDS",
+        "https://www.reddit.com/r/soccer/.rss,"
+        "https://www.reddit.com/r/championsleague/.rss,"
+        "https://www.reddit.com/r/EuropaLeague/.rss,"
+        "https://www.reddit.com/r/Bundesliga/.rss,"
+        "https://www.reddit.com/r/PremierLeague/.rss,"
+        "https://www.reddit.com/r/LaLiga/.rss,"
+        "https://www.reddit.com/r/seriea/.rss,"
+        "https://www.reddit.com/r/Ligue1/.rss,"
+        "https://www.reddit.com/r/nba/.rss,"
+        "https://www.reddit.com/r/nfl/.rss,"
+        "https://www.reddit.com/r/hockey/.rss,"
+        "https://www.reddit.com/r/tennis/.rss,"
+        "https://www.reddit.com/r/fcbayern/.rss,"
+        "https://www.reddit.com/r/borussiadortmund/.rss,"
+        "https://www.reddit.com/r/coys/.rss,"
+        "https://www.reddit.com/r/reddevils/.rss,"
+        "https://www.reddit.com/r/LiverpoolFC/.rss,"
+        "https://www.reddit.com/r/Gunners/.rss,"
+        "https://www.reddit.com/r/chelseafc/.rss,"
+        "https://www.reddit.com/r/MCFC/.rss,"
+        "https://www.reddit.com/r/realmadrid/.rss,"
+        "https://www.reddit.com/r/Barca/.rss,"
+        "https://www.reddit.com/r/Juve/.rss,"
+        "https://www.reddit.com/r/ACMilan/.rss,"
+        "https://www.reddit.com/r/FCInterMilan/.rss,"
+        "https://www.reddit.com/r/psg/.rss,"
+        "https://www.reddit.com/r/nbadiscussion/.rss,"
+        "https://www.reddit.com/r/footballhighlights/.rss,"
+        "https://www.reddit.com/r/sportsbook/.rss,"
+        "https://www.reddit.com/r/sportsbetting/.rss"
+    )
     enrichment_timeout_per_team: int = int(os.getenv("ENRICHMENT_TIMEOUT", "30"))
     enrichment_max_teams: int = int(os.getenv("ENRICHMENT_MAX_TEAMS", "24"))
     enrichment_news_articles_per_team: int = int(os.getenv("ENRICHMENT_NEWS_ARTICLES_PER_TEAM", "8"))

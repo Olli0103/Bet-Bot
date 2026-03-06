@@ -145,41 +145,60 @@ async def _consume_outbox(bot):
 
 
 async def _send_signal_push(bot, payload: Dict, target: str, chat_ids: Optional[List[str]]):
-    """Format and send signal push with summary header and card-like cards."""
-    from src.utils.signal_formatter import (
-        format_signal_card,
-        format_summary_header,
-        deduplicate_signals,
-        sort_signals,
-    )
-    from src.core.settings import settings
+    """Format and send signal push with strict execution + radar watchlist.
 
-    signals = payload.get("signals", [])
+    Execution book = only PLAYABLE signals.
+    Radar = close calls (positive EV but failed confidence gate).
+    """
+    from src.core.risk_guards import get_min_confidence
+    from src.core.settings import settings
+    from src.utils.signal_formatter import format_signal_card, format_summary_header
+
+    signals = payload.get("signals", []) or []
+    radar = payload.get("radar", []) or []
     ts = payload.get("ts", "")
-    raw_count = payload.get("raw_signal_count", len(signals))
+    raw_count = payload.get("raw_signal_count", len(signals) + len(radar))
     status_counts = payload.get("status_counts", {})
 
     if ts:
         await _broadcast(bot, f"\U0001F4C5 Tages-Push | Datenstand: {ts[:16]}", target, chat_ids)
 
-    if not signals:
-        await _broadcast(bot, "Keine spielbaren Einzelwetten heute.", target, chat_ids)
-        return
-
     # Build summary header
     conf_gates = f"Soccer={settings.min_confidence_soccer_h2h} Tennis={settings.min_confidence_tennis}"
     summary = format_summary_header(
         raw_count=raw_count,
-        deduped_count=len(signals),
+        deduped_count=max(len(signals) + len(radar), len(signals)),
         statuses=status_counts,
         ev_cut=settings.min_ev_default,
         conf_gates=conf_gates,
     )
     await _broadcast(bot, summary, target, chat_ids)
 
-    for i, b in enumerate(signals[:10]):
-        msg = format_signal_card(b, i, min(len(signals), 10))
-        await _broadcast(bot, msg, target, chat_ids)
+    # Section 1: Execution book (live stakes)
+    if signals:
+        await _broadcast(bot, "\U0001F7E2 EXECUTION (Live Stakes)", target, chat_ids)
+        for i, b in enumerate(signals[:10]):
+            msg = format_signal_card(b, i, min(len(signals), 10))
+            await _broadcast(bot, msg, target, chat_ids)
+    else:
+        await _broadcast(bot, "\U0001F7E2 EXECUTION (Live Stakes)\nKeine spielbaren Signale.", target, chat_ids)
+
+    # Section 2: Radar watchlist (paper-only close calls)
+    if radar:
+        lines = ["\U0001F440 RADAR (Paper Only - Close Calls)"]
+        for i, b in enumerate(radar[:3], start=1):
+            sport = str(b.get("sport", ""))
+            market = str(b.get("market", "h2h"))
+            sel = str(b.get("selection", "?"))
+            prob = float(b.get("model_probability", 0))
+            ev = float(b.get("expected_value", 0))
+            gate = get_min_confidence(sport, market)
+            gap = prob - gate
+            lines.append(
+                f"{i}. {sport} | {market} | {sel}\n"
+                f"   EV {ev:+.4f} | Model {prob:.1%} vs Gate {gate:.1%} (Δ {gap:+.1%})"
+            )
+        await _broadcast(bot, "\n".join(lines), target, chat_ids)
 
 
 async def _send_combo_push(bot, payload: Dict, target: str, chat_ids: Optional[List[str]]):

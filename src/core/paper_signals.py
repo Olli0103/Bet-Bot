@@ -148,6 +148,18 @@ def _persist_paper_signal(record: PaperSignalRecord, features: Optional[Dict[str
                 )
             )
             if exists:
+                # Update existing paper signal with latest enrichment/features
+                existing_bet = db.get(PlacedBet, exists)
+                if existing_bet:
+                    existing_bet.meta_features = {**(existing_bet.meta_features or {}), **meta}
+                    existing_bet.sharp_implied_prob = float(features.get("sharp_implied_prob", existing_bet.sharp_implied_prob or 0.0))
+                    existing_bet.sharp_vig = float(features.get("sharp_vig", existing_bet.sharp_vig or 0.0))
+                    existing_bet.sentiment_delta = float(features.get("sentiment_delta", existing_bet.sentiment_delta or 0.0))
+                    existing_bet.injury_delta = float(features.get("injury_delta", existing_bet.injury_delta or 0.0))
+                    existing_bet.form_winrate_l5 = float(features.get("form_winrate_l5", existing_bet.form_winrate_l5 or 0.5))
+                    existing_bet.form_games_l5 = int(features.get("form_games_l5", existing_bet.form_games_l5 or 0))
+                    existing_bet.notes = "; ".join(notes_parts)
+                    db.commit()
                 return
 
             bet = PlacedBet(

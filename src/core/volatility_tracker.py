@@ -16,11 +16,14 @@ def _cache_key(team: str) -> str:
 
 
 def record_odds_snapshot(team: str, implied_prob: float) -> None:
-    """Record an implied probability snapshot with timestamp for volatility/velocity."""
+    """Record an implied probability snapshot.
+
+    Keep legacy float-only storage for test/backward compatibility.
+    """
     k = _cache_key(team)
     data = cache.get_json(k) or {"snapshots": []}
     snapshots = data.get("snapshots", [])
-    snapshots.append({"ip": implied_prob, "ts": time.time()})
+    snapshots.append(float(implied_prob))
     # Keep last 50 snapshots
     data["snapshots"] = snapshots[-50:]
     cache.set_json(k, data, ttl_seconds=VOLATILITY_TTL)

@@ -175,6 +175,20 @@ class QuantPricingModel:
                 from src.core.calibration import get_calibration_manager
                 mgr = get_calibration_manager(_s.calibration_method)
                 calibrated, source = mgr.calibrate(raw, sport, market)
+
+                # Post-calibration shrinkage toward market-implied probability
+                # to reduce overconfident tails that cause Kelly cap-banging.
+                # This is applied only for h2h where sharp_prob is reliable.
+                if market == "h2h":
+                    try:
+                        market_anchor = float(sharp_prob)
+                        if 0.01 <= market_anchor <= 0.99:
+                            shrink = 0.35
+                            calibrated = calibrated * (1.0 - shrink) + market_anchor * shrink
+                    except Exception:
+                        pass
+
+                calibrated = max(0.01, min(0.99, calibrated))
                 self._last_calibration_source = source
                 return calibrated
             except Exception as exc:

@@ -11,14 +11,18 @@ from src.core.settings import settings
 from src.core.source_health import record_failure, record_success, is_available
 from src.data.redis_cache import cache
 from src.integrations.apisports_fetcher import APISportsFetcher
-from src.integrations.news_fetcher import NewsFetcher
+from src.integrations.multi_news_fetcher import MultiNewsFetcher
 from src.integrations.ollama_sentiment import OllamaSentimentClient
 from src.integrations.reddit_fetcher import RedditFetcher
 
+# Backward-compat for tests/patches still referencing NewsFetcher symbol.
+NewsFetcher = MultiNewsFetcher
+
 log = logging.getLogger(__name__)
 
-# Track aggregated enrichment errors per cycle (rate-limit noisy logs)
+# Track aggregated enrichment errors/metrics per cycle (rate-limit noisy logs)
 _enrichment_error_counts: Dict[str, int] = {}
+_enrichment_metrics: Dict[str, int] = {}
 _enrichment_cycle_start: float = 0.0
 
 ENRICHMENT_TIMEOUT = int(settings.enrichment_timeout_per_team)
@@ -51,7 +55,7 @@ def _timeout_guard(seconds: int):
 
 def _log_enrichment_summary(teams_processed: int = 0):
     """Log aggregated enrichment cycle summary instead of per-team noise."""
-    global _enrichment_error_counts, _enrichment_cycle_start
+    global _enrichment_error_counts, _enrichment_metrics, _enrichment_cycle_start
     elapsed = round(time.time() - _enrichment_cycle_start, 2) if _enrichment_cycle_start else 0
     error_count = sum(_enrichment_error_counts.values())
     error_detail = ", ".join(f"{k}={v}" for k, v in sorted(_enrichment_error_counts.items()))
@@ -72,20 +76,29 @@ def _log_enrichment_summary(teams_processed: int = 0):
     except Exception:
         pass
 
+    metric_detail = ", ".join(f"{k}={v}" for k, v in sorted(_enrichment_metrics.items()))
+
     log.info(
-        "enrichment_cycle_summary: teams=%d elapsed=%.1fs errors=%d (%s) "
+        "enrichment_cycle_summary: teams=%d elapsed=%.1fs errors=%d (%s) metrics=[%s] "
         "sources=[%s] budget=[%s]",
         teams_processed, elapsed, error_count,
         error_detail or "none",
+        metric_detail or "none",
         ", ".join(source_health_parts),
         ", ".join(budget_parts) or "n/a",
     )
     _enrichment_error_counts.clear()
+    _enrichment_metrics.clear()
 
 
 def _record_enrichment_error(category: str):
     """Increment error count for rate-limited logging."""
     _enrichment_error_counts[category] = _enrichment_error_counts.get(category, 0) + 1
+
+
+def _record_enrichment_metric(name: str, amount: int = 1):
+    """Increment enrichment telemetry counters for observability."""
+    _enrichment_metrics[name] = _enrichment_metrics.get(name, 0) + int(amount)
 
 
 def _norm_label(label: str) -> float:
@@ -108,28 +121,40 @@ def team_sentiment_score(team: str, limit_articles: int = 0) -> float:
     # Check if news source is available
     if not is_available("newsapi"):
         _record_enrichment_error("newsapi_breaker_open")
+        _record_enrichment_metric("source_breaker_open")
         cache.set_json(k, 0.0, 3600)
         return 0.0
 
     try:
         with _timeout_guard(ENRICHMENT_TIMEOUT):
-            news = NewsFetcher()
+            fetcher = MultiNewsFetcher(min_articles=3, max_articles=max(5, limit_articles))
             nlp = OllamaSentimentClient()
-            payload = news.search_news(query=team)
-            articles = (payload.get("articles") or [])[:limit_articles]
+            query = f'"{team}"'
+            articles = fetcher.search(query=query, language="en", team_names=[team])[:limit_articles]
+            _record_enrichment_metric("articles_found_total", len(articles))
+
+            if not articles:
+                _record_enrichment_metric("zero_articles")
+                log.warning("enrichment_starvation: team='%s' returned 0 articles", team)
 
             vals: List[float] = []
             for a in articles:
                 text = "\n".join(
-                    [a.get("title") or "", a.get("description") or "", a.get("content") or ""]
+                    [
+                        a.get("title") or "",
+                        a.get("summary") or a.get("description") or "",
+                        a.get("content") or "",
+                    ]
                 ).strip()
                 if not text:
+                    _record_enrichment_metric("empty_article_text")
                     continue
                 try:
                     s = nlp.analyze(text=text, context=f"Team={team}")
                     vals.append(_norm_label(s.label) * float(s.confidence))
                 except Exception:
                     _record_enrichment_error("ollama_analyze")
+                    _record_enrichment_metric("llm_parse_fail")
                     continue
 
             # ── Reddit sentiment (supplementary source) ──────────────
@@ -143,6 +168,7 @@ def team_sentiment_score(team: str, limit_articles: int = 0) -> float:
                 _record_enrichment_error("reddit_sentiment")
 
             if not vals:
+                _record_enrichment_metric("neutral_fallback")
                 cache.set_json(k, 0.0, 6 * 3600)
                 record_success("newsapi")
                 return 0.0
@@ -154,10 +180,12 @@ def team_sentiment_score(team: str, limit_articles: int = 0) -> float:
 
     except _EnrichmentTimeout:
         _record_enrichment_error("timeout")
+        _record_enrichment_metric("timeout_fallback")
         cache.set_json(k, 0.0, 3600)
         return 0.0
     except Exception as exc:
         _record_enrichment_error("sentiment_general")
+        _record_enrichment_metric("exception_fallback")
         record_failure("newsapi", str(exc)[:100])
         cache.set_json(k, 0.0, 6 * 3600)
         return 0.0
@@ -169,9 +197,10 @@ def batch_team_sentiment(teams: List[str], max_teams: int = 0) -> Dict[str, floa
     max_teams defaults to settings.enrichment_max_teams when 0.
     Best-effort: individual team failures don't block the pipeline.
     """
-    global _enrichment_cycle_start, _enrichment_error_counts
+    global _enrichment_cycle_start, _enrichment_error_counts, _enrichment_metrics
     _enrichment_cycle_start = time.time()
     _enrichment_error_counts.clear()
+    _enrichment_metrics.clear()
 
     if max_teams <= 0:
         max_teams = settings.enrichment_max_teams
@@ -183,12 +212,17 @@ def batch_team_sentiment(teams: List[str], max_teams: int = 0) -> Dict[str, floa
             uniq.append(t)
 
     processed = 0
-    for t in uniq[:max_teams]:
+    selected = uniq[:max_teams]
+    _record_enrichment_metric("teams_selected", len(selected))
+    _record_enrichment_metric("teams_total_unique", len(uniq))
+
+    for t in selected:
         try:
             out[t] = team_sentiment_score(t)
             processed += 1
         except Exception:
             out[t] = 0.0
+            _record_enrichment_error("team_sentiment_exception")
             processed += 1
 
     # Log aggregated summary instead of per-team noise

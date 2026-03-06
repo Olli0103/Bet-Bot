@@ -340,7 +340,10 @@ def fetch_and_build_signals(
             if away:
                 all_teams.append(away)
         try:
-            sentiment = batch_team_sentiment([t for t in all_teams if t], max_teams=24)
+            sentiment = batch_team_sentiment(
+                [t for t in all_teams if t],
+                max_teams=settings.enrichment_max_teams,
+            )
         except Exception as exc:
             log.warning("sentiment_fallback_neutral: Batch sentiment enrichment failed: %s — all teams default to 0.0", exc)
 

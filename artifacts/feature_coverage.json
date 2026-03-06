@@ -1,0 +1,1701 @@
+{
+  "general": {
+    "sentiment_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "injury_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "sharp_implied_prob": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.029486,
+      "unique_count": 58702,
+      "is_critical": true
+    },
+    "sharp_vig": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.000374,
+      "unique_count": 1325,
+      "is_critical": true
+    },
+    "form_winrate_l5": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0491,
+      "variance": 0.062936,
+      "unique_count": 11,
+      "is_critical": true
+    },
+    "form_games_l5": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0075,
+      "variance": 0.366912,
+      "unique_count": 6,
+      "is_critical": true
+    },
+    "elo_diff": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "elo_expected": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "h2h_home_winrate": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "home_advantage": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "weather_rain": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "weather_wind_high": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "home_volatility": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "away_volatility": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_steam_move": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "line_staleness": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "injury_news_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "time_to_kickoff_hours": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "public_bias": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "market_momentum": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "line_velocity": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "team_attack_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "team_defense_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "opp_attack_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "opp_defense_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "expected_total_proxy": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "form_trend_slope": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "rest_fatigue_score": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0075,
+      "variance": 0.000666,
+      "unique_count": 2,
+      "is_critical": false
+    },
+    "schedule_congestion": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0075,
+      "variance": 0.000167,
+      "unique_count": 2,
+      "is_critical": false
+    },
+    "over25_rate": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "btts_rate": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "home_away_split_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "league_position_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "goals_scored_avg": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "goals_conceded_avg": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_elo": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_weather": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_volatility": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_stats": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_form_trend": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    }
+  },
+  "soccer": {
+    "sentiment_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "injury_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "sharp_implied_prob": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.013184,
+      "unique_count": 36393,
+      "is_critical": true
+    },
+    "sharp_vig": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.000103,
+      "unique_count": 735,
+      "is_critical": true
+    },
+    "form_winrate_l5": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0332,
+      "variance": 0.061145,
+      "unique_count": 11,
+      "is_critical": true
+    },
+    "form_games_l5": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0027,
+      "variance": 0.14379,
+      "unique_count": 6,
+      "is_critical": true
+    },
+    "elo_diff": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "elo_expected": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "h2h_home_winrate": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "home_advantage": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "weather_rain": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "weather_wind_high": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "home_volatility": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "away_volatility": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_steam_move": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "line_staleness": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "injury_news_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "time_to_kickoff_hours": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "public_bias": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "market_momentum": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "line_velocity": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "team_attack_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "team_defense_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "opp_attack_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "opp_defense_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "expected_total_proxy": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "form_trend_slope": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "rest_fatigue_score": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0027,
+      "variance": 0.000238,
+      "unique_count": 2,
+      "is_critical": false
+    },
+    "schedule_congestion": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0027,
+      "variance": 6e-05,
+      "unique_count": 2,
+      "is_critical": false
+    },
+    "over25_rate": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "btts_rate": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "home_away_split_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "league_position_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "goals_scored_avg": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "goals_conceded_avg": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_elo": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_weather": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_volatility": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_stats": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_form_trend": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "poisson_true_prob": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    }
+  },
+  "basketball": {
+    "sentiment_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "injury_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "sharp_implied_prob": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.017616,
+      "unique_count": 2738,
+      "is_critical": true
+    },
+    "sharp_vig": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.000104,
+      "unique_count": 339,
+      "is_critical": true
+    },
+    "form_winrate_l5": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.056,
+      "variance": 0.070556,
+      "unique_count": 11,
+      "is_critical": true
+    },
+    "form_games_l5": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0135,
+      "variance": 0.660942,
+      "unique_count": 6,
+      "is_critical": true
+    },
+    "elo_diff": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "elo_expected": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "h2h_home_winrate": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "home_advantage": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "weather_rain": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "weather_wind_high": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "home_volatility": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "away_volatility": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_steam_move": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "line_staleness": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "injury_news_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "time_to_kickoff_hours": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "public_bias": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "market_momentum": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "line_velocity": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "team_attack_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "team_defense_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "opp_attack_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "opp_defense_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "expected_total_proxy": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "form_trend_slope": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "rest_fatigue_score": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0135,
+      "variance": 0.001195,
+      "unique_count": 2,
+      "is_critical": false
+    },
+    "schedule_congestion": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0135,
+      "variance": 0.000299,
+      "unique_count": 2,
+      "is_critical": false
+    },
+    "over25_rate": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "btts_rate": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "home_away_split_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "league_position_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "goals_scored_avg": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "goals_conceded_avg": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_elo": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_weather": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_volatility": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_stats": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_form_trend": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    }
+  },
+  "tennis": {
+    "sentiment_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "injury_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "sharp_implied_prob": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.046655,
+      "unique_count": 24800,
+      "is_critical": true
+    },
+    "sharp_vig": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.000589,
+      "unique_count": 1265,
+      "is_critical": false
+    },
+    "form_winrate_l5": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0593,
+      "variance": 0.061146,
+      "unique_count": 11,
+      "is_critical": true
+    },
+    "form_games_l5": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.009,
+      "variance": 0.425876,
+      "unique_count": 6,
+      "is_critical": true
+    },
+    "elo_diff": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "elo_expected": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "h2h_home_winrate": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "home_advantage": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "weather_rain": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "weather_wind_high": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "home_volatility": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "away_volatility": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_steam_move": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "line_staleness": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "injury_news_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "time_to_kickoff_hours": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "public_bias": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "market_momentum": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "line_velocity": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "team_attack_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "team_defense_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "opp_attack_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "opp_defense_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "expected_total_proxy": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "form_trend_slope": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "rest_fatigue_score": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.009,
+      "variance": 0.000799,
+      "unique_count": 2,
+      "is_critical": false
+    },
+    "schedule_congestion": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.009,
+      "variance": 0.0002,
+      "unique_count": 2,
+      "is_critical": false
+    },
+    "over25_rate": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "btts_rate": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "home_away_split_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "league_position_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "goals_scored_avg": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "goals_conceded_avg": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_elo": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_weather": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_volatility": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_stats": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_form_trend": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    }
+  },
+  "americanfootball": {
+    "sentiment_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "injury_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "sharp_implied_prob": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.036425,
+      "unique_count": 893,
+      "is_critical": true
+    },
+    "sharp_vig": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 9.4e-05,
+      "unique_count": 185,
+      "is_critical": false
+    },
+    "form_winrate_l5": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0765,
+      "variance": 0.071126,
+      "unique_count": 11,
+      "is_critical": true
+    },
+    "form_games_l5": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0057,
+      "variance": 0.304007,
+      "unique_count": 6,
+      "is_critical": true
+    },
+    "elo_diff": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "elo_expected": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "h2h_home_winrate": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "home_advantage": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "weather_rain": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "weather_wind_high": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "home_volatility": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "away_volatility": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_steam_move": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "line_staleness": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "injury_news_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "time_to_kickoff_hours": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "public_bias": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "market_momentum": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "line_velocity": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "team_attack_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "team_defense_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "opp_attack_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "opp_defense_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "expected_total_proxy": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "form_trend_slope": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "rest_fatigue_score": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0057,
+      "variance": 0.000506,
+      "unique_count": 2,
+      "is_critical": false
+    },
+    "schedule_congestion": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0057,
+      "variance": 0.000127,
+      "unique_count": 2,
+      "is_critical": false
+    },
+    "over25_rate": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "btts_rate": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "home_away_split_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "league_position_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "goals_scored_avg": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "goals_conceded_avg": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_elo": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_weather": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_volatility": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_stats": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_form_trend": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    }
+  },
+  "icehockey": {
+    "sentiment_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "injury_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "sharp_implied_prob": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.00117,
+      "unique_count": 217,
+      "is_critical": true
+    },
+    "sharp_vig": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "form_winrate_l5": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0218,
+      "variance": 0.053155,
+      "unique_count": 11,
+      "is_critical": true
+    },
+    "form_games_l5": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0012,
+      "variance": 0.061311,
+      "unique_count": 6,
+      "is_critical": true
+    },
+    "elo_diff": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "elo_expected": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "h2h_home_winrate": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "home_advantage": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "weather_rain": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "weather_wind_high": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "home_volatility": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "away_volatility": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_steam_move": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "line_staleness": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "injury_news_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "time_to_kickoff_hours": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "public_bias": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "market_momentum": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "line_velocity": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "team_attack_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "team_defense_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "opp_attack_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "opp_defense_strength": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "expected_total_proxy": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "form_trend_slope": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "rest_fatigue_score": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0012,
+      "variance": 0.000107,
+      "unique_count": 2,
+      "is_critical": false
+    },
+    "schedule_congestion": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0012,
+      "variance": 2.7e-05,
+      "unique_count": 2,
+      "is_critical": false
+    },
+    "over25_rate": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "btts_rate": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "home_away_split_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "league_position_delta": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "goals_scored_avg": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "goals_conceded_avg": {
+      "non_null_rate": 1.0,
+      "zero_rate": 0.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_elo": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_weather": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_volatility": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_stats": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    },
+    "is_missing_form_trend": {
+      "non_null_rate": 1.0,
+      "zero_rate": 1.0,
+      "variance": 0.0,
+      "unique_count": 1,
+      "is_critical": false
+    }
+  }
+}
