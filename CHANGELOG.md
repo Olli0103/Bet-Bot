@@ -48,6 +48,17 @@
   - Added `REDDIT_USER_AGENT` setting (env-driven) with sane default.
   - Reddit fetcher now reads User-Agent from settings instead of hardcoded string.
 
+- **Reddit RSS anti-hammer fallback via cache-control** (`src/integrations/reddit_sentiment_pipeline.py`, `src/bot/app.py`)
+  - Added per-feed `next_poll_at` persistence from response `cache-control: max-age`.
+  - When feed is still fresh, pipeline performs local skip (no network request).
+  - Added telemetry fields/logging: `local_skip` and `ratio304eq` (server 304 + local fresh-skip equivalent).
+
+- **Feature-engineering placeholders for NLP sentiment generation** (`src/core/feature_engineering.py`)
+  - Added cold-start safe feature defaults:
+    - `public_hype_index` (imputed to `0.0` when missing)
+    - `smart_money_divergence = sentiment_delta - public_hype_index`
+  - Added both fields to core feature vector output (no retraining triggered).
+
 ### Changed
 - **Agent polling cadence reduced (budget mode)** (`src/bot/app.py`, `src/bot/core_worker.py`)
   - Agent cycle changed from frequent mode to **2x per hour** (`1800s` interval).
@@ -94,6 +105,9 @@
   - Scheduled fetch now performs: core fetch → enrichment → push.
   - Push is emitted only when enrichment completed successfully.
   - Prevents sending raw/unenriched tips in the morning push flow.
+
+- **Combo leg market filter rollback** (`src/core/live_feed.py`)
+  - Re-enabled `double_chance` / `draw_no_bet` legs in combo-eligible pool per operator preference.
 
 ## 2026-03-05
 

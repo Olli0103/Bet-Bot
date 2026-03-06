@@ -162,6 +162,7 @@ class FeatureEngineer:
         injury_news_delta: float = 0.0,
         time_to_kickoff_hours: float = 24.0,
         public_bias: float = 0.0,
+        public_hype_index: float = 0.0,
         market_momentum: float = 0.0,
         # Line movement velocity (implied prob change per hour)
         line_velocity: float = 0.0,
@@ -252,11 +253,17 @@ class FeatureEngineer:
             elif rest_days_val >= 10:
                 rest_fatigue = 0.3  # rustiness penalty
 
+        # NLP placeholders (safe cold-start defaults for historical rows)
+        public_hype = float(_to_float(public_hype_index, 0.0))
+        smart_money_divergence = float(sent_delta) - public_hype
+
         features = {
             "sharp_implied_prob": float(sharp_prob),
             "clv": float(clv_proxy),
             "sharp_vig": float(sharp_vig),
             "sentiment_delta": float(sent_delta),
+            "public_hype_index": public_hype,
+            "smart_money_divergence": float(smart_money_divergence),
             "injury_delta": float(inj_delta),
             "form_winrate_l5": float(form_winrate_l5),
             "form_games_l5": float(form_games_l5),
