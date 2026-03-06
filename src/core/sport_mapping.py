@@ -21,7 +21,7 @@ from typing import Dict, List, Optional
 _log = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class SportEntry:
     """One sport/league in the mapping."""
     csv_code: str           # Code used in CSV Div column or folder name

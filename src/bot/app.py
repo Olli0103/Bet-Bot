@@ -27,6 +27,7 @@ from src.core.learning_monitor import learning_health
 from src.core.ml_trainer import auto_train_all_models, auto_train_model
 from src.core.performance_monitor import PerformanceMonitor
 from src.core.settings import settings
+from src.integrations.reddit_sentiment_pipeline import run_sentiment_pipeline
 from src.data.models import Base
 from src.data.postgres import engine
 
@@ -238,6 +239,41 @@ async def daily_performance_report(context: ContextTypes.DEFAULT_TYPE):
         pass
 
 
+async def scheduled_reddit_sentiment(context: ContextTypes.DEFAULT_TYPE):
+    """Run Reddit RSS sentiment pipeline every 15 minutes with hard cap.
+
+    Logs 304 ratio, delta item count, and tier spillover to verify
+    conditional-fetch + backlog-drain behavior in production.
+    """
+    import logging
+    _log = logging.getLogger(__name__)
+
+    try:
+        result = await asyncio.to_thread(run_sentiment_pipeline, 30)
+        feeds = result.get("feeds", {})
+        processed = int(result.get("processed", 0))
+        t = result.get("tier_counts", {})
+        w = result.get("weighted", {})
+
+        n200 = int(feeds.get("http_200", 0))
+        n304 = int(feeds.get("http_304", 0))
+        total_req = n200 + n304 + int(feeds.get("other", 0))
+        ratio304 = (100.0 * n304 / total_req) if total_req else 0.0
+
+        msg = (
+            "reddit_sentiment_15m: "
+            f"processed={processed} req200={n200} req304={n304} "
+            f"ratio304={ratio304:.1f}% delta={int(feeds.get('delta_items', 0))} "
+            f"tiers(core={int(t.get('core', 0))},fact={int(t.get('fact_only', 0))},noise={int(t.get('high_noise', 0))}) "
+            f"sentiment_delta={float(w.get('sentiment_delta', 0.0)):.4f} "
+            f"hype={float(w.get('public_hype_index', 0.0)):.4f}"
+        )
+        print(msg, flush=True)
+        _log.info(msg)
+    except Exception as exc:
+        _log.warning("reddit_sentiment_15m_failed: %s", exc)
+
+
 # Global app reference for signal handler
 _global_app = None
 
@@ -283,9 +319,12 @@ def main():
     app.job_queue.run_daily(api_health_push, time=dtime(hour=20, minute=5), name="api_health_daily")
     app.job_queue.run_daily(weekly_retrain, time=dtime(hour=3, minute=15), days=(6,), name="retrain_weekly")
 
-    # Agent orchestrator: polls every 60s, but internally skips to ~5min
-    # unless events are kicking off within the next hour (adaptive fast mode)
-    app.job_queue.run_repeating(agent_cycle, interval=60, first=60, name="agent_cycle")
+    # Agent orchestrator: budget mode — 2x per hour
+    # (requested: lower API/read cadence)
+    app.job_queue.run_repeating(agent_cycle, interval=1800, first=120, name="agent_cycle")
+
+    # Reddit sentiment pipeline (ETag/304 + GUID delta), every 15 minutes
+    app.job_queue.run_repeating(scheduled_reddit_sentiment, interval=900, first=90, name="reddit_sentiment_15m")
 
     # Daily performance report + self-evaluation at 22:00
     app.job_queue.run_daily(daily_performance_report, time=dtime(hour=22, minute=0), name="daily_report")

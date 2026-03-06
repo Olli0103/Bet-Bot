@@ -104,22 +104,31 @@ def _sync_place_bet(payload: dict) -> bool:
     """Sync DB call — always call via asyncio.to_thread.
 
     Returns True if the bet was inserted, False if it already existed
-    (prevents midnight-rollover duplicates where the Redis dedup key
-    rotates but the DB unique constraint catches the real duplicate).
+    in the *manual execution book* for the same owner.
+
+    Important: paper/live separation is enforced by including data_source
+    and owner_chat_id in duplicate checks.
     """
     eid = str(payload["event_id"])
     sel = str(payload["selection"])
     mkt = str(payload["market"])
+    owner_chat_id = str(payload.get("owner_chat_id", "") or "")
 
     with SessionLocal() as db:
-        # Pre-check: does this exact bet already exist?
-        existing = db.execute(
-            select(PlacedBet.id).where(
-                PlacedBet.event_id == eid,
-                PlacedBet.selection == sel,
-                PlacedBet.market == mkt,
-            )
-        ).scalar()
+        # Pre-check only inside manual book + owner scope.
+        # This avoids false duplicates against paper/live model rows.
+        existing_q = select(PlacedBet.id).where(
+            PlacedBet.event_id == eid,
+            PlacedBet.selection == sel,
+            PlacedBet.market == mkt,
+            PlacedBet.data_source == "manual",
+        )
+        if owner_chat_id:
+            existing_q = existing_q.where(PlacedBet.owner_chat_id == owner_chat_id)
+        else:
+            existing_q = existing_q.where(PlacedBet.owner_chat_id.is_(None))
+
+        existing = db.execute(existing_q).scalar()
         if existing:
             return False
 
@@ -135,6 +144,7 @@ def _sync_place_bet(payload: dict) -> bool:
                     status="open",
                     is_training_data=False,
                     data_source="manual",
+                    owner_chat_id=owner_chat_id or None,
                 )
             )
             db.commit()
@@ -897,6 +907,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not payload:
             await q.edit_message_text("Markierung abgelaufen. Bitte Signal neu laden.")
             return
+
+        # Scope manual placement to the current owner/chat.
+        if update.effective_chat:
+            payload["owner_chat_id"] = str(update.effective_chat.id)
+
         inserted = await asyncio.to_thread(_sync_place_bet, payload)
         if not inserted:
             await q.edit_message_text("Wette bereits vorhanden (Duplikat).")
@@ -944,6 +959,31 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("agent_analyze:"):
         alert_id = data.split(":", 1)[1]
         alert_data = cache.get_json(f"agent_alert:{alert_id}")
+
+        # DSS tips use callback_data=agent_analyze:<tip_id> but cache payload
+        # lives under dss_tip:<tip_id>. Build a compatible alert_data view.
+        if not alert_data:
+            tip_data = cache.get_json(f"dss_tip:{alert_id}")
+            if tip_data:
+                try:
+                    from src.models.compliance import StatefulTip
+                    st = StatefulTip.model_validate(tip_data)
+                    rec = st.ai_recommendation
+                    alert_data = {
+                        "event_id": rec.event_id,
+                        "home": rec.match_name.split(" vs ")[0] if " vs " in rec.match_name else rec.match_name,
+                        "away": rec.match_name.split(" vs ")[1] if " vs " in rec.match_name else "",
+                        "sport": rec.sport,
+                        "selection": rec.recommended_selection,
+                        "target_odds": rec.target_odds,
+                        "model_probability": rec.model_probability,
+                        "expected_value": rec.net_ev,
+                        "commence_time": rec.commence_time,
+                        "trigger": "dss_tip",
+                    }
+                except Exception:
+                    alert_data = None
+
         if not alert_data:
             await q.edit_message_text("Alert abgelaufen.")
             return

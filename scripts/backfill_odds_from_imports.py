@@ -28,6 +28,29 @@ def _first_num(row, cols: list[str]) -> float | None:
     return None
 
 
+def _calc_overround(prices: dict) -> float | None:
+    vals = []
+    for v in prices.values():
+        try:
+            vf = float(v)
+        except Exception:
+            continue
+        if vf > 1.0:
+            vals.append(vf)
+    if len(vals) < 2:
+        return None
+    return round(max(0.001, sum(1.0 / x for x in vals) - 1.0), 4)
+
+
+def _safe_read_csv(path: Path) -> pd.DataFrame | None:
+    for enc in ("utf-8", "latin-1", "cp1252"):
+        try:
+            return pd.read_csv(path, encoding=enc, on_bad_lines="skip")
+        except Exception:
+            continue
+    return None
+
+
 def backfill_football(folder: Path) -> int:
     updates = 0
     with SessionLocal() as db:
@@ -35,7 +58,9 @@ def backfill_football(folder: Path) -> int:
         idx = {(r.event_id, r.selection): r for r in rows}
 
         for p in sorted(folder.glob("*.csv")):
-            df = pd.read_csv(p)
+            df = _safe_read_csv(p)
+            if df is None or df.empty:
+                continue
             for _, r in df.iterrows():
                 home = str(r.get("HomeTeam") or "")
                 away = str(r.get("AwayTeam") or "")
@@ -48,10 +73,13 @@ def backfill_football(folder: Path) -> int:
                 od_open = _first_num(r, ["B365D", "WHD", "VCD", "IWD", "LBD"])
                 oa_open = _first_num(r, ["B365A", "WHA", "VCA", "IWA", "LBA"])
 
-                # close proxies (market consensus)
-                oh_close = _first_num(r, ["PSH", "AvgH", "MaxH", "B365H"])
-                od_close = _first_num(r, ["PSD", "AvgD", "MaxD", "B365D"])
-                oa_close = _first_num(r, ["PSA", "AvgA", "MaxA", "B365A"])
+                # close proxies (market consensus) — prefer Pinnacle closing first
+                oh_close = _first_num(r, ["PSCH", "PSH", "AvgH", "MaxH", "B365H"])
+                od_close = _first_num(r, ["PSCD", "PSD", "AvgD", "MaxD", "B365D"])
+                oa_close = _first_num(r, ["PSCA", "PSA", "AvgA", "MaxA", "B365A"])
+
+                sharp_prices_h2h = {"home": oh_close, "draw": od_close, "away": oa_close}
+                sharp_vig_h2h = _calc_overround(sharp_prices_h2h)
 
                 for selection, o_open, o_close in [(home, oh_open, oh_close), ("Draw", od_open, od_close), (away, oa_open, oa_close)]:
                     key = (event_id, selection)
@@ -62,6 +90,13 @@ def backfill_football(folder: Path) -> int:
                         bet.odds_open = float(o_open)
                         bet.odds_close = float(o_close)
                         bet.clv = (float(bet.odds) / float(o_close)) - 1.0 if float(o_close) > 1.0 else 0.0
+                        meta = dict(bet.meta_features or {})
+                        if sharp_vig_h2h is not None:
+                            meta["sharp_prices_h2h"] = {k: float(v) for k, v in sharp_prices_h2h.items() if v and v > 1.0}
+                            meta["sharp_vig_true"] = sharp_vig_h2h
+                            meta["sharp_vig_method"] = "book_overround_1x2"
+                            bet.sharp_vig = sharp_vig_h2h
+                        bet.meta_features = meta
                         updates += 1
         db.commit()
     return updates
@@ -87,6 +122,9 @@ def backfill_tennis(folder: Path) -> int:
                 w_close = _first_num(r, ["PSW", "AvgW", "MaxW", "B365W"])
                 l_close = _first_num(r, ["PSL", "AvgL", "MaxL", "B365L"])
 
+                sharp_prices_h2h = {"home": w_close, "away": l_close}
+                sharp_vig_h2h = _calc_overround(sharp_prices_h2h)
+
                 for selection, o_open, o_close in [(winner, w_open, w_close), (loser, l_open, l_close)]:
                     key = (event_id, selection)
                     bet = idx.get(key)
@@ -96,6 +134,13 @@ def backfill_tennis(folder: Path) -> int:
                         bet.odds_open = float(o_open)
                         bet.odds_close = float(o_close)
                         bet.clv = (float(bet.odds) / float(o_close)) - 1.0 if float(o_close) > 1.0 else 0.0
+                        meta = dict(bet.meta_features or {})
+                        if sharp_vig_h2h is not None:
+                            meta["sharp_prices_h2h"] = {k: float(v) for k, v in sharp_prices_h2h.items() if v and v > 1.0}
+                            meta["sharp_vig_true"] = sharp_vig_h2h
+                            meta["sharp_vig_method"] = "book_overround_2way"
+                            bet.sharp_vig = sharp_vig_h2h
+                        bet.meta_features = meta
                         updates += 1
         db.commit()
     return updates

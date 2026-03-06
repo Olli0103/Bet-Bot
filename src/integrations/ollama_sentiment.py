@@ -3,6 +3,7 @@
 Optimized for Gemma 3 4B: concise prompts, zero temperature, strict JSON output.
 """
 import json
+import logging
 import re
 from typing import Any, Dict
 
@@ -11,6 +12,8 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 from src.core.settings import settings
 from src.models.sentiment import SentimentResult
+
+log = logging.getLogger(__name__)
 
 
 def _strip_markdown_json(raw: str) -> str:
@@ -58,6 +61,7 @@ class OllamaSentimentClient:
         try:
             parsed = json.loads(raw)
         except Exception:
+            log.warning("llm_parse_fail: falling back to neutral/0.5 (raw_preview=%s)", raw[:120])
             parsed = {"label": "neutral", "score": 0.5, "confidence": 0.3, "rationale": raw[:240]}
 
         return SentimentResult(**parsed)

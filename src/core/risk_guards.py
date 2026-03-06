@@ -21,25 +21,38 @@ def get_min_confidence(sport: str, market: str = "h2h") -> float:
     """Return the minimum model_probability required to allow a bet.
 
     Resolves by sport prefix + market type, falling back to the default.
+    Applies hard safety floors so accidental permissive env overrides
+    (e.g. MIN_CONF_*=0.45) cannot silently weaken production guards.
     """
     s = sport.lower()
     m = market.lower()
 
+    floors = {
+        "soccer_h2h": 0.55,
+        "soccer_totals": 0.56,
+        "soccer_spread": 0.56,
+        "tennis": 0.57,
+        "basketball": 0.55,
+        "icehockey": 0.55,
+        "americanfootball": 0.55,
+        "default": 0.55,
+    }
+
     if s.startswith(("soccer", "football")):
         if "totals" in m:
-            return settings.min_confidence_soccer_totals
+            return max(settings.min_confidence_soccer_totals, floors["soccer_totals"])
         if "spread" in m:
-            return settings.min_confidence_soccer_spread
-        return settings.min_confidence_soccer_h2h
+            return max(settings.min_confidence_soccer_spread, floors["soccer_spread"])
+        return max(settings.min_confidence_soccer_h2h, floors["soccer_h2h"])
     if s.startswith("tennis"):
-        return settings.min_confidence_tennis
+        return max(settings.min_confidence_tennis, floors["tennis"])
     if s.startswith("basketball"):
-        return settings.min_confidence_basketball
+        return max(settings.min_confidence_basketball, floors["basketball"])
     if s.startswith("icehockey"):
-        return settings.min_confidence_icehockey
+        return max(settings.min_confidence_icehockey, floors["icehockey"])
     if s.startswith("americanfootball"):
-        return settings.min_confidence_americanfootball
-    return settings.min_confidence_default
+        return max(settings.min_confidence_americanfootball, floors["americanfootball"])
+    return max(settings.min_confidence_default, floors["default"])
 
 
 def passes_confidence_gate(
@@ -78,10 +91,14 @@ def apply_stake_cap(
     is_draw = "draw" in selection.lower() or "unentschieden" in selection.lower()
     is_longshot = odds >= settings.longshot_odds_threshold
 
+    # Hard safety floors to prevent accidental env drift loosening caps.
+    max_stake_pct = min(settings.max_stake_pct, 0.015)
+    max_longshot_pct = min(settings.max_stake_longshot_pct, 0.0075)
+
     if is_draw or is_longshot:
-        cap = bankroll * settings.max_stake_longshot_pct
+        cap = bankroll * max_longshot_pct
     else:
-        cap = bankroll * settings.max_stake_pct
+        cap = bankroll * max_stake_pct
 
     if stake > cap:
         return round(cap, 2), True

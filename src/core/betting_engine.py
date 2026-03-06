@@ -76,9 +76,30 @@ class BettingEngine:
                 calibration_source=calibration_source,
             )
 
+        # --- Probability/EV sanity guardrails (anti-outlier) ---
+        implied_prob = 1.0 / bookmaker_odds if bookmaker_odds > 1.0 else 0.0
+        max_reasonable_prob = min(0.90, implied_prob * 2.4 + 0.08)
+        if model_probability > max_reasonable_prob:
+            rejected_reason = (
+                f"reject_prob_outlier: model_prob={model_probability:.2f} "
+                f"> max_reasonable={max_reasonable_prob:.2f} (odds={bookmaker_odds:.2f})"
+            )
+            stake_final = 0.0
+            kf = 0.0
+        elif ev > 1.0 and bookmaker_odds >= 3.0:
+            rejected_reason = (
+                f"reject_ev_outlier: ev={ev:.2f} too high for odds={bookmaker_odds:.2f}"
+            )
+            stake_final = 0.0
+            kf = 0.0
+        elif ("draw" in selection.lower() or "unentschieden" in selection.lower() or bookmaker_odds >= 3.0) and source_quality <= 0.0:
+            rejected_reason = "reject_no_market_confirmation_for_longshot"
+            stake_final = 0.0
+            kf = 0.0
+
         # --- Confidence gate (uses model_probability as THE confidence) ---
         passed, min_conf = passes_confidence_gate(model_probability, sport, market)
-        if not passed:
+        if not rejected_reason and not passed:
             rejected_reason = (
                 f"reject_confidence_below_min: "
                 f"model_prob={model_probability:.2f} < gate={min_conf:.2f}"
@@ -88,7 +109,7 @@ class BettingEngine:
             # Zero out stake so this signal is filtered out as non-playable
             stake_final = 0.0
             kf = 0.0
-        else:
+        elif not rejected_reason:
             kf = kf_raw
             # --- Stake cap ---
             stake_final, was_capped = apply_stake_cap(
@@ -184,12 +205,15 @@ class BettingEngine:
             sports=sports,
         )
 
+        # Use a conservative portfolio-wide Kelly fraction across mixed sports.
+        portfolio_kelly = min(get_dynamic_kelly_frac(s.sport) for s in playable)
+
         fractions = cvar_constrained_kelly_sizing(
             edges=edges,
             cov_matrix=cov,
             probabilities=probs,
             odds=odds,
-            kelly_fraction=get_dynamic_kelly_frac(),
+            kelly_fraction=portfolio_kelly,
             max_cvar_loss=max_cvar_loss,
         )
 

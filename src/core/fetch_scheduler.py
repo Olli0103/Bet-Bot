@@ -189,7 +189,7 @@ def sequential_fetch_odds(
                 break
 
             except Exception as exc:
-                exc_str = str(exc)
+                exc_str = str(exc) or repr(exc)
 
                 # Detect HTTP status from exception message
                 status_code = _extract_status_code(exc_str)
@@ -367,7 +367,7 @@ async def sequential_fetch_odds_async(
                 break
 
             except Exception as exc:
-                exc_str = str(exc)
+                exc_str = str(exc) or repr(exc)
                 status_code = _extract_status_code(exc_str)
                 stats.record_status(status_code or 0)
 

@@ -65,7 +65,7 @@ class DynamicSettingsManager:
             "soccer_germany_bundesliga",
             "soccer_epl",
             "basketball_nba",
-            "tennis_atp",
+            "icehockey_nhl",
         ],
         "active_markets": ["h2h", "totals", "spreads", "double_chance", "draw_no_bet"],
         "min_odds_threshold": 1.20,

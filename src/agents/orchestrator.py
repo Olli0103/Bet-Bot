@@ -86,6 +86,12 @@ class AgentOrchestrator:
         self.bot = bot
         self.chat_id = chat_id or settings.telegram_chat_id
         self._running = False
+        # Python 3.9 test environments may not have a current loop in
+        # MainThread during object construction.
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            asyncio.set_event_loop(asyncio.new_event_loop())
         self.alert_queue: asyncio.Queue = asyncio.Queue()
         self._dead_letter_queue: Deque[Dict[str, Any]] = deque(maxlen=DLQ_MAX_SIZE)
 

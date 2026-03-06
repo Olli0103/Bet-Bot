@@ -104,7 +104,9 @@ def get_markets_for_sport(sport_key: str) -> str:
 
 class OddsFetcher(AsyncBaseFetcher):
     def __init__(self):
-        super().__init__(base_url=settings.odds_api_base_url)
+        # Higher timeout for heavy odds endpoints (h2h+spreads+totals)
+        # to avoid false TimeoutError trips on busy slates.
+        super().__init__(base_url=settings.odds_api_base_url, timeout=60)
 
     async def get_sports_async(self, ttl_seconds: int = 3600):
         cache_key = "odds:sports:list"
@@ -227,11 +229,38 @@ class OddsFetcher(AsyncBaseFetcher):
         if commence_time_to:
             params["commenceTimeTo"] = commence_time_to
 
-        _record_api_call()
-        data = await self.get(
-            f"sports/{sport_key}/odds",
-            params=params,
-        )
+        try:
+            _record_api_call()
+            data = await self.get(
+                f"sports/{sport_key}/odds",
+                params=params,
+            )
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            # Plan/entitlement fallback: retry with minimal request shape.
+            # Some keys allow /sports but reject premium bookmakers/markets.
+            if status in (401, 422):
+                log.warning(
+                    "Odds API %s for %s with full params; retrying minimal mode",
+                    status,
+                    sport_key,
+                )
+                fallback_params = {
+                    "apiKey": settings.odds_api_key,
+                    "regions": regions,
+                    "markets": "h2h",
+                }
+                if commence_time_from:
+                    fallback_params["commenceTimeFrom"] = commence_time_from
+                if commence_time_to:
+                    fallback_params["commenceTimeTo"] = commence_time_to
+                _record_api_call()
+                data = await self.get(
+                    f"sports/{sport_key}/odds",
+                    params=fallback_params,
+                )
+            else:
+                raise
 
         # Empty Window Cache: if the API returns an empty list ([]),
         # cache it until the trading window ends to prevent the fetcher
@@ -402,7 +431,15 @@ class OddsFetcher(AsyncBaseFetcher):
         return _safe_sync_run(self.get_sports_async(ttl_seconds=ttl_seconds))
 
     def get_sport_odds(self, sport_key: str, regions: str = "eu", markets: str = "h2h,spreads,totals", ttl_seconds: int = 600):
-        return _safe_sync_run(self.get_sport_odds_async(sport_key=sport_key, regions=regions, markets=markets, ttl_seconds=ttl_seconds))
+        return _safe_sync_run(
+            self.get_sport_odds_async(
+                sport_key=sport_key,
+                regions=regions,
+                markets=markets,
+                ttl_seconds=ttl_seconds,
+            ),
+            timeout=90,
+        )
 
     def get_historical_odds(self, sport_key: str, regions: str = "eu", markets: str = "h2h", days_history: int = 7):
         return _safe_sync_run(self.get_historical_odds_async(sport_key=sport_key, regions=regions, markets=markets, days_history=days_history))

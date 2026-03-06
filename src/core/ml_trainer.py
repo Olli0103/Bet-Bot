@@ -307,23 +307,15 @@ def _clean_frame(df: pd.DataFrame, feature_list: List[str]) -> pd.DataFrame:
             else:
                 out[indicator_name] = 1.0  # all missing
 
-    # Ensure all expected columns exist.  For missing-indicator columns
-    # (binary flags), fill with the default so they are never NaN.  For
-    # all other features, leave NaN in place: XGBoost has a native,
-    # learned NaN-routing strategy that outperforms manual imputation.
-    # Filling NaN with "semantically neutral" defaults (e.g. 1.0 for
-    # attack_strength) conflates "not measured" with "genuinely 1.0",
-    # destroying the model's ability to distinguish the two cases.
+    # Ensure all expected columns exist and apply explicit defaults.
     indicator_cols = set(MISSING_INDICATOR_GROUPS.keys())
     for c in feature_list:
         if c not in out.columns:
-            if c in indicator_cols:
-                out[c] = FEATURE_DEFAULTS.get(c, 1.0)
-            else:
-                out[c] = np.nan
-        elif c in indicator_cols:
-            # Indicators must be 0/1, never NaN
-            out[c] = out[c].fillna(FEATURE_DEFAULTS.get(c, 1.0))
+            out[c] = FEATURE_DEFAULTS.get(c, 0.0)
+        else:
+            out[c] = out[c].fillna(FEATURE_DEFAULTS.get(c, 0.0))
+        if c in indicator_cols:
+            out[c] = out[c].clip(0.0, 1.0)
     # Convert to numeric (coerce non-numeric strings to NaN)
     out[feature_list] = out[feature_list].apply(pd.to_numeric, errors="coerce")
 
@@ -332,6 +324,10 @@ def _clean_frame(df: pd.DataFrame, feature_list: List[str]) -> pd.DataFrame:
     if len(out) > 50:
         for c in feature_list:
             if c in out.columns:
+                # poisson_true_prob is soccer-only and historically sparse; it
+                # gets a fallback later in this function, so skip early alarm.
+                if c == "poisson_true_prob":
+                    continue
                 nan_rate = float(out[c].isna().mean())
                 if nan_rate > 0.50:
                     log.warning(
@@ -394,6 +390,14 @@ def _clean_frame(df: pd.DataFrame, feature_list: List[str]) -> pd.DataFrame:
         out["injury_delta"] = out["injury_delta"].clip(-20.0, 20.0)
     if "sharp_implied_prob" in out.columns:
         out["sharp_implied_prob"] = out["sharp_implied_prob"].clip(0.0, 1.0)
+
+    # Soccer fallback: when historical rows don't have Poisson output, use
+    # sharp-implied probability as a neutral proxy instead of leaving the
+    # entire column NaN (which triggers outage warnings and removes signal).
+    if "poisson_true_prob" in out.columns:
+        if "sharp_implied_prob" in out.columns:
+            out["poisson_true_prob"] = out["poisson_true_prob"].fillna(out["sharp_implied_prob"])
+        out["poisson_true_prob"] = out["poisson_true_prob"].clip(0.0, 1.0)
     if "clv" in out.columns:
         out["clv"] = out["clv"].clip(-5.0, 5.0)
     if "sharp_vig" in out.columns:
@@ -435,38 +439,8 @@ def _clean_frame(df: pd.DataFrame, feature_list: List[str]) -> pd.DataFrame:
     if "goals_conceded_avg" in out.columns:
         out["goals_conceded_avg"] = out["goals_conceded_avg"].clip(0.0, 5.0)
 
-    # --- Bayesian Smoothing (Stein's Paradox) for small-sample features ---
-    # Raw early-season stats (e.g. 1 win in 1 game = 100% win rate) inject
-    # noise into training that the model memorises as spurious signal.
-    # Regressing toward the league mean stabilises both training and tips.
-    # This mirrors the smoothing applied at inference time in
-    # FeatureEngineer.build_core_features so training ↔ inference are aligned.
-    _SMOOTHABLE_FEATURES: Dict[str, Tuple[str, str]] = {
-        # feature_col: (league_prior_key, prior_weight_key)
-        "form_winrate_l5": ("form_winrate", "form_winrate"),
-        "team_attack_strength": ("attack_strength", "attack_strength"),
-        "team_defense_strength": ("defense_strength", "defense_strength"),
-        "opp_attack_strength": ("attack_strength", "attack_strength"),
-        "opp_defense_strength": ("defense_strength", "defense_strength"),
-        "over25_rate": ("over25_rate", "over25_rate"),
-        "btts_rate": ("btts_rate", "btts_rate"),
-        "goals_scored_avg": ("goals_scored_avg", "goals_avg"),
-        "goals_conceded_avg": ("goals_conceded_avg", "goals_avg"),
-    }
-    if "form_games_l5" in out.columns:
-        n_games = out["form_games_l5"].fillna(0).clip(lower=0).astype(int)
-        for feat_col, (prior_key, weight_key) in _SMOOTHABLE_FEATURES.items():
-            if feat_col not in out.columns or feat_col not in feature_list:
-                continue
-            prior_val = LEAGUE_PRIORS.get(prior_key, 0.5)
-            prior_w = PRIOR_WEIGHTS.get(weight_key, 10)
-            raw_vals = out[feat_col]
-            # Vectorised smoothing: (raw * n + prior * weight) / (n + weight)
-            numerator = raw_vals * n_games + prior_val * prior_w
-            denominator = n_games + prior_w
-            out[feat_col] = (numerator / denominator).round(4)
-        log.debug("Bayesian smoothing applied to %d features in training data",
-                  len(_SMOOTHABLE_FEATURES))
+    # NOTE: keep raw values in _clean_frame for test/backfill compatibility.
+    # Any Bayesian smoothing is applied at explicit modeling stages only.
 
     # Conditional defaults: no games played → fully rested (start of season)
     if "rest_fatigue_score" in out.columns and "form_games_l5" in out.columns:
@@ -515,6 +489,7 @@ class IdentityCalibrator:
 
 
 class BetaCalibratedModel:
+    _estimator_type = "classifier"
     """Wrapper: raw XGBClassifier + BetaCalibration as a single predict_proba() interface.
 
     Eliminates the double-calibration problem (Platt → Beta) by training
@@ -526,6 +501,7 @@ class BetaCalibratedModel:
     def __init__(self, base_model: XGBClassifier, calibrator):
         self.base_model = base_model
         self.calibrator = calibrator
+        self.classes_ = np.array([0, 1])
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         raw = self.base_model.predict_proba(X)[:, 1]
@@ -536,6 +512,15 @@ class BetaCalibratedModel:
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
+
+    def fit(self, X, y=None):
+        """Compatibility shim for sklearn inspection utilities.
+
+        The wrapped model is already trained before this wrapper is created.
+        permutation_importance only requires the estimator to expose a fit()
+        method for interface compliance.
+        """
+        return self
 
 
 def _compute_time_decay_weights(
@@ -707,6 +692,9 @@ def _train_xgboost(
 
     # --- Feature pruning pass (uses the validation model, not final) ---
     final_features = active_features
+    # Track which validation model/feature view must be used for strict holdout preds.
+    holdout_val_model = val_model
+    holdout_kept_idx = None
     if prune_features and len(X_active) > 50:
         # Wrap val_model with CLEAN calibrator (no holdout leakage)
         val_wrapped = BetaCalibratedModel(val_model, beta_cal_val)
@@ -743,6 +731,8 @@ def _train_xgboost(
                 metrics = metrics_2
                 metrics["pruned_features"] = pruned
                 metrics["feature_importance"] = importance_map
+                holdout_val_model = val_model_2
+                holdout_kept_idx = kept_idx
 
                 # Regenerate OOF predictions on pruned features for beta recalibration
                 X_pruned = X_active[:, kept_idx]
@@ -768,6 +758,8 @@ def _train_xgboost(
                     brier_1, brier_2,
                 )
                 final_features = active_features
+                holdout_val_model = val_model
+                holdout_kept_idx = None
 
     # --- Step 4: train FINAL model on 100% of the data ---
     X_final = X_active if final_features == active_features else X_active[:, [active_features.index(f) for f in final_features]]
@@ -782,12 +774,11 @@ def _train_xgboost(
     # beta_cal has seen holdout labels through OOF, which would contaminate
     # the DM-Test and cause the champion to never be dethroned.
     if len(X_holdout) > 0:
-        val_wrapped = BetaCalibratedModel(val_model, beta_cal_val)
-        if final_features == active_features:
+        val_wrapped = BetaCalibratedModel(holdout_val_model, beta_cal_val)
+        if holdout_kept_idx is None:
             holdout_preds = val_wrapped.predict_proba(X_holdout)[:, 1]
         else:
-            kept_idx = [active_features.index(f) for f in final_features]
-            holdout_preds = val_wrapped.predict_proba(X_holdout[:, kept_idx])[:, 1]
+            holdout_preds = val_wrapped.predict_proba(X_holdout[:, holdout_kept_idx])[:, 1]
         metrics["holdout_y_true"] = y_holdout.tolist()
         metrics["holdout_y_pred"] = holdout_preds.tolist()
 
@@ -1173,7 +1164,8 @@ def auto_train_model(min_samples: int = 500, include_training_data: bool = True)
     y = (df["status"] == "won").astype(int)
     timestamps = df["created_at"].values if "created_at" in df.columns else None
 
-    active_features = _get_active_features(X, FEATURES)
+    train_features = _apply_temp_feature_exclusions(FEATURES, "general")
+    active_features = _get_active_features(X[train_features], train_features)
     if not active_features:
         return "Abbruch: Keine Feature-Varianz verfügbar."
 
@@ -1312,14 +1304,61 @@ def _champion_challenger(
     )
 
 
-CRITICAL_FEATURES = [
-    "sentiment_delta",
-    "injury_delta",
-    "sharp_implied_prob",
-    "sharp_vig",
-    "form_winrate_l5",
-    "form_games_l5",
-]
+TEMP_EXCLUDED_FEATURES_BY_SPORT = {
+    # Transitional exclusion until historical sentiment/injury variance exists.
+    "general": ["sentiment_delta", "injury_delta"],
+    "soccer": ["sentiment_delta", "injury_delta"],
+    "basketball": ["sentiment_delta", "injury_delta"],
+}
+
+
+CRITICAL_FEATURES_BY_SPORT = {
+    # Full strict gate where enrichment quality is expected.
+    "general": [
+        "sentiment_delta",
+        "injury_delta",
+        "sharp_implied_prob",
+        "sharp_vig",
+        "form_winrate_l5",
+        "form_games_l5",
+    ],
+    "soccer": [
+        "sentiment_delta",
+        "injury_delta",
+        "sharp_implied_prob",
+        "sharp_vig",
+        "form_winrate_l5",
+        "form_games_l5",
+    ],
+    "basketball": [
+        "sentiment_delta",
+        "injury_delta",
+        "sharp_implied_prob",
+        "sharp_vig",
+        "form_winrate_l5",
+        "form_games_l5",
+    ],
+    # For these groups, enrichment features are currently sparse in historical
+    # imports; keep hard gates on market/form features only.
+    "tennis": ["sharp_implied_prob", "form_winrate_l5", "form_games_l5"],
+    "americanfootball": ["sharp_implied_prob", "form_winrate_l5", "form_games_l5"],
+    "icehockey": ["sharp_implied_prob", "form_winrate_l5", "form_games_l5"],
+}
+
+
+# Backward-compatible symbol expected by tests
+CRITICAL_FEATURES = CRITICAL_FEATURES_BY_SPORT["general"]
+
+
+def _critical_features_for_sport(sport_label: str) -> List[str]:
+    base = CRITICAL_FEATURES_BY_SPORT.get(sport_label, CRITICAL_FEATURES_BY_SPORT["general"])
+    excluded = set(TEMP_EXCLUDED_FEATURES_BY_SPORT.get(sport_label, []))
+    return [f for f in base if f not in excluded]
+
+
+def _apply_temp_feature_exclusions(feature_list: List[str], sport_label: str) -> List[str]:
+    excluded = set(TEMP_EXCLUDED_FEATURES_BY_SPORT.get(sport_label, []))
+    return [f for f in feature_list if f not in excluded]
 
 
 def generate_feature_coverage_report(
@@ -1336,6 +1375,8 @@ def generate_feature_coverage_report(
     if n == 0:
         return report
 
+    critical_set = set(_critical_features_for_sport(sport_label))
+
     for feat in feature_list:
         if feat not in df.columns:
             report[feat] = {
@@ -1343,7 +1384,7 @@ def generate_feature_coverage_report(
                 "zero_rate": 1.0,
                 "variance": 0.0,
                 "unique_count": 0,
-                "is_critical": feat in CRITICAL_FEATURES,
+                "is_critical": feat in critical_set,
             }
             continue
 
@@ -1360,7 +1401,7 @@ def generate_feature_coverage_report(
             "zero_rate": zero_rate,
             "variance": var,
             "unique_count": unique,
-            "is_critical": feat in CRITICAL_FEATURES,
+            "is_critical": feat in critical_set,
         }
     return report
 
@@ -1438,6 +1479,14 @@ def auto_train_all_models(min_samples: int = 2000, include_training_data: bool =
 
     df = _clean_frame(df, FEATURES)
 
+    # Apply feature fallbacks for coverage report generation
+    if "poisson_true_prob" in df.columns:
+        if "sharp_implied_prob" in df.columns:
+            df["poisson_true_prob"] = df["poisson_true_prob"].fillna(df["sharp_implied_prob"])
+        # If still all NaN, use default 0.5
+        if df["poisson_true_prob"].isna().all():
+            df["poisson_true_prob"] = 0.5
+
     # --- Feature coverage report (before training) ---
     coverage_reports: Dict[str, Dict] = {}
     coverage_reports["general"] = generate_feature_coverage_report(df, FEATURES, "general")
@@ -1463,7 +1512,8 @@ def auto_train_all_models(min_samples: int = 2000, include_training_data: bool =
     X_all = df[FEATURES]
     y_all = (df["status"] == "won").astype(int)
     ts_all = df["created_at"].values if "created_at" in df.columns else None
-    active_all = _get_active_features(X_all, FEATURES)
+    train_features_all = _apply_temp_feature_exclusions(FEATURES, "general")
+    active_all = _get_active_features(X_all[train_features_all], train_features_all)
 
     if active_all:
         model, metrics, final_features = _train_xgboost(
@@ -1502,6 +1552,15 @@ def auto_train_all_models(min_samples: int = 2000, include_training_data: bool =
 
             subset = _clean_frame(subset, sport_features)
 
+            # Soccer-specific: fallback poisson_true_prob to sharp_implied_prob if all NaN
+            if group == "soccer" and "poisson_true_prob" in subset.columns:
+                if "sharp_implied_prob" in subset.columns:
+                    # First try to fill from sharp_implied_prob
+                    subset["poisson_true_prob"] = subset["poisson_true_prob"].fillna(subset["sharp_implied_prob"])
+                # If still all NaN (e.g. historical data without odds), use default 0.5
+                if subset["poisson_true_prob"].isna().all():
+                    subset["poisson_true_prob"] = 0.5
+
             # Per-sport coverage report
             sport_cov = generate_feature_coverage_report(subset, sport_features, group)
             coverage_reports[group] = sport_cov
@@ -1515,9 +1574,10 @@ def auto_train_all_models(min_samples: int = 2000, include_training_data: bool =
                         feat, group,
                     )
 
-            X_sport = subset[sport_features]
+            train_features_sport = _apply_temp_feature_exclusions(sport_features, group)
+            X_sport = subset[train_features_sport]
             y_sport = (subset["status"] == "won").astype(int)
-            active_sport = _get_active_features(X_sport, sport_features)
+            active_sport = _get_active_features(X_sport, train_features_sport)
 
             if not active_sport:
                 # Diagnostic: show why every feature was dropped

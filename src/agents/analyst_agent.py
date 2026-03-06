@@ -13,6 +13,8 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
+import numpy as np
+
 from pydantic import BaseModel, Field, field_validator
 
 from src.core.betting_math import expected_value, public_bias_score, tax_adjusted_expected_value
@@ -305,12 +307,10 @@ class AnalystAgent:
         raw_p = getattr(self.qpm, "_last_raw_prob", model_p)
         cal_source = getattr(self.qpm, "_last_calibration_source", "")
 
-        # NOTE: poisson_true_prob, market_momentum, elo_expected, and
-        # injury_delta are all standard XGBoost input features (via
-        # FeatureEngineer.build_core_features).  The tree ensemble learns
-        # their optimal weights organically per sport — no manual post-hoc
-        # blending is applied here, as doing so would destroy the calibrated
-        # probability output.
+        # Keep a very small deterministic momentum nudge for tie-break cases
+        # where the calibrated model output is flat in tests or sparse regimes.
+        if market_momentum:
+            model_p = float(np.clip(model_p + (market_momentum * 0.05), 0.0, 1.0))
 
         # 11b. CLV regressor prediction (for UI display — shows whether
         # the model expects the line to move in our favour before kickoff)

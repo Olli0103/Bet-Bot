@@ -138,6 +138,28 @@ def _clean_meta(d: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _calc_overround(prices: Dict[str, Optional[float]]) -> Optional[float]:
+    """Compute bookmaker margin from a market book (2-way or 3-way).
+
+    overround = sum(1/odds) - 1.0
+    """
+    vals: List[float] = []
+    for v in prices.values():
+        if v is None:
+            continue
+        try:
+            vf = float(v)
+        except Exception:
+            continue
+        if vf > 1.0:
+            vals.append(vf)
+    if len(vals) < 2:
+        return None
+    implied_sum = sum(1.0 / x for x in vals)
+    vig = implied_sum - 1.0
+    return round(max(0.001, vig), 4)
+
+
 def _safe_read_csv(path: Path, **kwargs) -> Optional[pd.DataFrame]:
     """Read a CSV with lenient error handling + numeric coercion."""
     for enc in ("utf-8", "latin-1", "cp1252"):
@@ -265,9 +287,20 @@ def import_football(folder: Path, limit_files: int = 0) -> int:
                 od_open = _first_num(r, ["B365D", "WHD", "VCD", "IWD", "LBD"])
                 oa_open = _first_num(r, ["B365A", "WHA", "VCA", "IWA", "LBA"])
 
-                oh_close = _first_num(r, ["PSH", "PSCH", "AvgH", "MaxH", "B365H"])
-                od_close = _first_num(r, ["PSD", "PSCD", "AvgD", "MaxD", "B365D"])
-                oa_close = _first_num(r, ["PSA", "PSCA", "AvgA", "MaxA", "B365A"])
+                oh_close = _first_num(r, ["PSCH", "PSH", "AvgH", "MaxH", "B365H"])
+                od_close = _first_num(r, ["PSCD", "PSD", "AvgD", "MaxD", "B365D"])
+                oa_close = _first_num(r, ["PSCA", "PSA", "AvgA", "MaxA", "B365A"])
+
+                sharp_prices_h2h = {
+                    "home": oh_close,
+                    "draw": od_close,
+                    "away": oa_close,
+                }
+                sharp_vig_h2h = _calc_overround(sharp_prices_h2h)
+                if sharp_vig_h2h is not None:
+                    meta["sharp_prices_h2h"] = _clean_meta(sharp_prices_h2h)
+                    meta["sharp_vig_true"] = sharp_vig_h2h
+                    meta["sharp_vig_method"] = "book_overround_1x2"
 
                 cand = [("H", oh_close), ("D", od_close), ("A", oa_close)]
                 cand = [(k, v) for k, v in cand if v is not None]
@@ -420,13 +453,69 @@ def import_tennis(folder: Path, limit_files: int = 0) -> int:
             for _, r in df.iterrows():
                 winner = str(r.get("Winner") or "").strip()
                 loser = str(r.get("Loser") or "").strip()
+
+                # Alternate tennis schema support (e.g. atp_tennis_extra.csv):
+                # Player_1 / Player_2 / Winner / Odd_1 / Odd_2 / Rank_1 / Rank_2
+                p1 = str(r.get("Player_1") or "").strip()
+                p2 = str(r.get("Player_2") or "").strip()
+                if not loser and winner and p1 and p2:
+                    if winner == p1:
+                        loser = p2
+                    elif winner == p2:
+                        loser = p1
+
                 if not winner or not loser:
                     continue
+
+                p1_odd = _safe_float(r.get("Odd_1"))
+                p2_odd = _safe_float(r.get("Odd_2"))
+
+                if winner == p1:
+                    win_alt = p1_odd
+                    lose_alt = p2_odd
+                    w_rank_alt = _safe_int(r.get("Rank_1"))
+                    l_rank_alt = _safe_int(r.get("Rank_2"))
+                    w_pts_alt = _safe_int(r.get("Pts_1"))
+                    l_pts_alt = _safe_int(r.get("Pts_2"))
+                elif winner == p2:
+                    win_alt = p2_odd
+                    lose_alt = p1_odd
+                    w_rank_alt = _safe_int(r.get("Rank_2"))
+                    l_rank_alt = _safe_int(r.get("Rank_1"))
+                    w_pts_alt = _safe_int(r.get("Pts_2"))
+                    l_pts_alt = _safe_int(r.get("Pts_1"))
+                else:
+                    win_alt = None
+                    lose_alt = None
+                    w_rank_alt = None
+                    l_rank_alt = None
+                    w_pts_alt = None
+                    l_pts_alt = None
 
                 w_open = _first_num(r, ["B365W", "CBW", "EXW", "PSW"])
                 l_open = _first_num(r, ["B365L", "CBL", "EXL", "PSL"])
                 w_close = _first_num(r, ["PSW", "AvgW", "MaxW", "B365W"])
                 l_close = _first_num(r, ["PSL", "AvgL", "MaxL", "B365L"])
+
+                if w_open is None:
+                    w_open = win_alt
+                if l_open is None:
+                    l_open = lose_alt
+                if w_close is None:
+                    w_close = win_alt
+                if l_close is None:
+                    l_close = lose_alt
+
+                # sanitize common placeholder in external csvs
+                if w_close is not None and w_close <= 1.0:
+                    w_close = None
+                if l_close is not None and l_close <= 1.0:
+                    l_close = None
+                if w_open is not None and w_open <= 1.0:
+                    w_open = None
+                if l_open is not None and l_open <= 1.0:
+                    l_open = None
+
                 if w_close is None and l_close is None:
                     continue
 
@@ -436,10 +525,13 @@ def import_tennis(folder: Path, limit_files: int = 0) -> int:
                 ])
 
                 # --- Shared meta_features ---
-                w_rank = _safe_int(r.get("WRank"))
-                l_rank = _safe_int(r.get("LRank"))
-                w_pts = _safe_int(r.get("WPts"))
-                l_pts = _safe_int(r.get("LPts"))
+                w_rank = _safe_int(r.get("WRank")) or w_rank_alt
+                l_rank = _safe_int(r.get("LRank")) or l_rank_alt
+                w_pts = _safe_int(r.get("WPts")) or w_pts_alt
+                l_pts = _safe_int(r.get("LPts")) or l_pts_alt
+
+                sharp_prices_h2h = {"home": w_close, "away": l_close}
+                sharp_vig_h2h = _calc_overround(sharp_prices_h2h)
 
                 base_meta = _clean_meta({
                     "winner_rank": w_rank,
@@ -459,6 +551,9 @@ def import_tennis(folder: Path, limit_files: int = 0) -> int:
                     "w3": _safe_int(r.get("W3")), "l3": _safe_int(r.get("L3")),
                     "w4": _safe_int(r.get("W4")), "l4": _safe_int(r.get("L4")),
                     "w5": _safe_int(r.get("W5")), "l5": _safe_int(r.get("L5")),
+                    "sharp_prices_h2h": _clean_meta(sharp_prices_h2h) if sharp_vig_h2h is not None else None,
+                    "sharp_vig_true": sharp_vig_h2h,
+                    "sharp_vig_method": "book_overround_2way" if sharp_vig_h2h is not None else None,
                 })
 
                 # --- Winner row (status=won) ---
@@ -579,6 +674,13 @@ def import_nba(folder: Path, max_rows: int = 50000) -> int:
                     home_ml_dec = _first_num(r, ["Home Odds Close", "Home Odds", "PinnH", "B365H"])
                 if away_ml_dec is None:
                     away_ml_dec = _first_num(r, ["Away Odds Close", "Away Odds", "PinnA", "B365A"])
+
+                sharp_prices_h2h = {"home": home_ml_dec, "away": away_ml_dec}
+                sharp_vig_h2h = _calc_overround(sharp_prices_h2h)
+                if sharp_vig_h2h is not None:
+                    meta["sharp_prices_h2h"] = _clean_meta(sharp_prices_h2h)
+                    meta["sharp_vig_true"] = sharp_vig_h2h
+                    meta["sharp_vig_method"] = "book_overround_2way"
 
                 if home_ml_dec and home_ml_dec > 1.0:
                     ml_eid = _mk_event_id(["nba", game_id, date_str, home, away, "ml_h"])
@@ -731,6 +833,13 @@ def import_nfl(folder: Path, max_rows: int = 50000) -> int:
                 # --- MONEYLINE (decimal odds) ---
                 home_ml = _first_num(r, ["Home Odds Close", "Home Odds", "HomeOdds", "B365H", "PinnH"])
                 away_ml = _first_num(r, ["Away Odds Close", "Away Odds", "AwayOdds", "B365A", "PinnA"])
+
+                sharp_prices_h2h = {"home": home_ml, "away": away_ml}
+                sharp_vig_h2h = _calc_overround(sharp_prices_h2h)
+                if sharp_vig_h2h is not None:
+                    meta["sharp_prices_h2h"] = _clean_meta(sharp_prices_h2h)
+                    meta["sharp_vig_true"] = sharp_vig_h2h
+                    meta["sharp_vig_method"] = "book_overround_2way"
 
                 if home_ml is not None:
                     ml_eid = _mk_event_id(["nfl", date_str, home, away, "ml_h"])

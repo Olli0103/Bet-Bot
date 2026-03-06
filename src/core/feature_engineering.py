@@ -3,6 +3,13 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 
+def _to_float(value, default: float) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
 def calculate_smoothed_feature(
     measured_value: float,
     sample_size: int,
@@ -37,8 +44,16 @@ def calculate_smoothed_feature(
         Effective number of "phantom observations" from the prior.
         Higher = more conservative smoothing.
     """
+    measured_value = _to_float(measured_value, prior_value)
+    sample_size = int(_to_float(sample_size, 0))
+    prior_value = _to_float(prior_value, 0.0)
+    prior_weight = int(_to_float(prior_weight, 10))
+
+    if sample_size <= 0:
+        return round(prior_value, 4)
+
     if sample_size + prior_weight == 0:
-        return prior_value
+        return round(prior_value, 4)
 
     smoothed = (measured_value * sample_size + prior_value * prior_weight) / (
         sample_size + prior_weight
@@ -183,43 +198,44 @@ class FeatureEngineer:
         # --- Bayesian Smoothing: shrink small-sample features to priors ---
         # Early-season (form_games_l5 < 5), raw stats are wildly unreliable.
         # Smoothing prevents a team with 2/2 wins from getting 100% win rate.
-        n_games = max(0, int(form_games_l5))
-        form_winrate_l5 = calculate_smoothed_feature(
-            form_winrate_l5, n_games,
-            LEAGUE_PRIORS["form_winrate"], PRIOR_WEIGHTS["form_winrate"],
-        )
-        team_attack_strength = calculate_smoothed_feature(
-            team_attack_strength, n_games,
-            LEAGUE_PRIORS["attack_strength"], PRIOR_WEIGHTS["attack_strength"],
-        )
-        team_defense_strength = calculate_smoothed_feature(
-            team_defense_strength, n_games,
-            LEAGUE_PRIORS["defense_strength"], PRIOR_WEIGHTS["defense_strength"],
-        )
-        opp_attack_strength = calculate_smoothed_feature(
-            opp_attack_strength, n_games,
-            LEAGUE_PRIORS["attack_strength"], PRIOR_WEIGHTS["attack_strength"],
-        )
-        opp_defense_strength = calculate_smoothed_feature(
-            opp_defense_strength, n_games,
-            LEAGUE_PRIORS["defense_strength"], PRIOR_WEIGHTS["defense_strength"],
-        )
-        over25_rate = calculate_smoothed_feature(
-            over25_rate, n_games,
-            LEAGUE_PRIORS["over25_rate"], PRIOR_WEIGHTS["over25_rate"],
-        )
-        btts_rate = calculate_smoothed_feature(
-            btts_rate, n_games,
-            LEAGUE_PRIORS["btts_rate"], PRIOR_WEIGHTS["btts_rate"],
-        )
-        goals_scored_avg = calculate_smoothed_feature(
-            goals_scored_avg, n_games,
-            LEAGUE_PRIORS["goals_scored_avg"], PRIOR_WEIGHTS["goals_avg"],
-        )
-        goals_conceded_avg = calculate_smoothed_feature(
-            goals_conceded_avg, n_games,
-            LEAGUE_PRIORS["goals_conceded_avg"], PRIOR_WEIGHTS["goals_avg"],
-        )
+        n_games = max(0, int(_to_float(form_games_l5, 0)))
+        if n_games > 0:
+            form_winrate_l5 = calculate_smoothed_feature(
+                form_winrate_l5, n_games,
+                LEAGUE_PRIORS["form_winrate"], PRIOR_WEIGHTS["form_winrate"],
+            )
+            team_attack_strength = calculate_smoothed_feature(
+                team_attack_strength, n_games,
+                LEAGUE_PRIORS["attack_strength"], PRIOR_WEIGHTS["attack_strength"],
+            )
+            team_defense_strength = calculate_smoothed_feature(
+                team_defense_strength, n_games,
+                LEAGUE_PRIORS["defense_strength"], PRIOR_WEIGHTS["defense_strength"],
+            )
+            opp_attack_strength = calculate_smoothed_feature(
+                opp_attack_strength, n_games,
+                LEAGUE_PRIORS["attack_strength"], PRIOR_WEIGHTS["attack_strength"],
+            )
+            opp_defense_strength = calculate_smoothed_feature(
+                opp_defense_strength, n_games,
+                LEAGUE_PRIORS["defense_strength"], PRIOR_WEIGHTS["defense_strength"],
+            )
+            over25_rate = calculate_smoothed_feature(
+                over25_rate, n_games,
+                LEAGUE_PRIORS["over25_rate"], PRIOR_WEIGHTS["over25_rate"],
+            )
+            btts_rate = calculate_smoothed_feature(
+                btts_rate, n_games,
+                LEAGUE_PRIORS["btts_rate"], PRIOR_WEIGHTS["btts_rate"],
+            )
+            goals_scored_avg = calculate_smoothed_feature(
+                goals_scored_avg, n_games,
+                LEAGUE_PRIORS["goals_scored_avg"], PRIOR_WEIGHTS["goals_avg"],
+            )
+            goals_conceded_avg = calculate_smoothed_feature(
+                goals_conceded_avg, n_games,
+                LEAGUE_PRIORS["goals_conceded_avg"], PRIOR_WEIGHTS["goals_avg"],
+            )
 
         # Expected total goals proxy: team_atk * opp_def * league_avg + opp_atk * team_def * league_avg
         expected_total_proxy = (team_attack_strength * opp_defense_strength * 1.35 +
@@ -227,12 +243,13 @@ class FeatureEngineer:
 
         # Rest fatigue score: 0 = well rested, 1 = congested
         rest_fatigue = 0.0
-        if rest_days is not None:
-            if rest_days <= 2:
+        rest_days_val = _to_float(rest_days, -1.0) if rest_days is not None else -1.0
+        if rest_days_val >= 0:
+            if rest_days_val <= 2:
                 rest_fatigue = 1.0
-            elif rest_days <= 4:
+            elif rest_days_val <= 4:
                 rest_fatigue = 0.5
-            elif rest_days >= 10:
+            elif rest_days_val >= 10:
                 rest_fatigue = 0.3  # rustiness penalty
 
         features = {

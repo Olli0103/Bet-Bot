@@ -284,16 +284,78 @@ def _run_clv_snapshot():
 # ── Existing scheduled tasks ─────────────────────────────────
 
 def _push_daily_signals():
-    """Push top singles + combos to outbox."""
-    from src.core.live_feed import get_cached_signals, get_cached_combos
-    items, ts = get_cached_signals()
-    if not items:
+    """Push execution book + radar watchlist + combos from cached snapshots.
+
+    Important: this function must never trigger a fresh fetch. It only reads
+    from Redis snapshots produced by the pipeline.
+    """
+    from src.core.live_feed import (
+        get_all_ranked_signals,
+        get_cached_combos,
+        get_cached_signals,
+    )
+
+    # Backward-compatible fallback snapshot
+    top_items, top_ts = get_cached_signals()
+    all_items, all_ts = get_all_ranked_signals()
+
+    if not all_items and not top_items:
         push_outbox("text", {"text": "Keine spielbaren Einzelwetten heute."}, target="broadcast")
         return
 
-    singles = [x for x in items if float(x.get("expected_value", 0)) > 0][:10]
-    if singles:
-        push_outbox("signal_push", {"signals": singles, "ts": ts}, target="broadcast")
+    pool = all_items or top_items
+    ts = all_ts or top_ts
+
+    # EXECUTION book: only truly playable signals
+    execution = [
+        x for x in pool
+        if x.get("display_status") == "PLAYABLE" and float(x.get("expected_value", 0)) > 0
+    ]
+    if not execution:
+        # Fallback for older snapshots without display_status annotation
+        execution = [x for x in top_items if float(x.get("expected_value", 0)) > 0]
+    execution = execution[:10]
+
+    # RADAR watchlist: positive EV, not playable, failed confidence gate
+    radar = []
+    for x in pool:
+        if x.get("display_status") == "PLAYABLE":
+            continue
+        if float(x.get("expected_value", 0)) <= 0:
+            continue
+        reason = str(x.get("rejected_reason") or x.get("display_reason") or "").lower()
+        if "confidence" in reason:
+            radar.append(x)
+
+    # Closest misses first (high model_prob / EV first)
+    radar.sort(
+        key=lambda x: (
+            float(x.get("model_probability", 0)),
+            float(x.get("expected_value", 0)),
+            -float(x.get("bookmaker_odds", 99)),
+        ),
+        reverse=True,
+    )
+    radar = radar[:3]
+
+    status_counts = {
+        "PLAYABLE": sum(1 for s in pool if s.get("display_status") == "PLAYABLE"),
+        "WATCHLIST": sum(1 for s in pool if s.get("display_status") == "WATCHLIST"),
+        "BLOCKED": sum(1 for s in pool if s.get("display_status") == "BLOCKED"),
+    }
+
+    if execution or radar:
+        push_outbox(
+            "signal_push",
+            {
+                "signals": execution,
+                "radar": radar,
+                "ts": ts,
+                "raw_signal_count": len(pool),
+                "status_counts": status_counts,
+            },
+            target="broadcast",
+        )
 
     combos = get_cached_combos()
     if combos:
@@ -648,8 +710,8 @@ async def main_loop():
                 finally:
                     sched._release_lock("auto_grading")
 
-        # Agent cycle every 5 minutes — reads from cache only, no API calls
-        if sched.should_run("agent_cycle", 300):
+        # Agent cycle every 30 minutes (budget mode)
+        if sched.should_run("agent_cycle", 1800):
             await _run_agent_cycle()
 
         # Process inbox (user actions forwarded from telegram worker)
