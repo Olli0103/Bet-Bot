@@ -163,6 +163,9 @@ class FeatureEngineer:
         time_to_kickoff_hours: float = 24.0,
         public_bias: float = 0.0,
         public_hype_index: float = 0.0,
+        api_prob_home: float = 0.0,
+        api_prob_draw: float = 0.0,
+        api_prob_away: float = 0.0,
         market_momentum: float = 0.0,
         # Line movement velocity (implied prob change per hour)
         line_velocity: float = 0.0,
@@ -257,6 +260,22 @@ class FeatureEngineer:
         public_hype = float(_to_float(public_hype_index, 0.0))
         smart_money_divergence = float(sent_delta) - public_hype
 
+        # API-Sports prediction features (soccer-only source; neutral fallback)
+        api_home = float(_to_float(api_prob_home, 0.0))
+        api_draw = float(_to_float(api_prob_draw, 0.0))
+        api_away = float(_to_float(api_prob_away, 0.0))
+        has_api_pred = (api_home + api_draw + api_away) > 0.001
+
+        if selection == home_team:
+            api_selected_prob = api_home
+        elif str(selection).lower() == "draw":
+            api_selected_prob = api_draw
+        else:
+            api_selected_prob = api_away
+
+        api_vs_market_diff = (api_selected_prob - float(sharp_prob)) if has_api_pred else 0.0
+        api_strong_conviction = 1.0 if (has_api_pred and api_selected_prob > 0.70) else 0.0
+
         features = {
             "sharp_implied_prob": float(sharp_prob),
             "clv": float(clv_proxy),
@@ -264,6 +283,12 @@ class FeatureEngineer:
             "sentiment_delta": float(sent_delta),
             "public_hype_index": public_hype,
             "smart_money_divergence": float(smart_money_divergence),
+            "api_prob_home": api_home,
+            "api_prob_draw": api_draw,
+            "api_prob_away": api_away,
+            "api_pred_available": 1.0 if has_api_pred else 0.0,
+            "api_vs_market_diff": float(api_vs_market_diff),
+            "api_strong_conviction": float(api_strong_conviction),
             "injury_delta": float(inj_delta),
             "form_winrate_l5": float(form_winrate_l5),
             "form_games_l5": float(form_games_l5),

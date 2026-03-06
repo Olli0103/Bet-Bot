@@ -557,6 +557,20 @@ def fetch_and_build_signals(
             # Line movement velocity: implied prob change per hour
             line_velocity = get_line_velocity(selection)
 
+            # API-Sports predictions (soccer only; strict no-op for other sports)
+            api_probs = {}
+            try:
+                from src.integrations.apisports_fetcher import APISportsFetcher
+                api_probs = APISportsFetcher().get_predictions_for_event(
+                    home_team=home,
+                    away_team=away,
+                    sport=sport,
+                    event_date=commence,
+                    ttl_seconds=12 * 3600,
+                )
+            except Exception:
+                api_probs = {}
+
             # Resolve snapshot features for selected team vs opponent
             sel_snap = home_snapshot if is_home else away_snapshot
             opp_snap = away_snapshot if is_home else home_snapshot
@@ -602,6 +616,9 @@ def fetch_and_build_signals(
                 injury_news_delta=inj_delta_sent,
                 time_to_kickoff_hours=time_to_kickoff,
                 public_bias=bias_scores.get(selection, 0.0),
+                api_prob_home=float(api_probs.get("api_prob_home", 0.0) or 0.0),
+                api_prob_draw=float(api_probs.get("api_prob_draw", 0.0) or 0.0),
+                api_prob_away=float(api_probs.get("api_prob_away", 0.0) or 0.0),
                 market_momentum=market_momentum,
                 line_velocity=line_velocity,
                 # Phase 4: stats-based features
