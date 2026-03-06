@@ -1016,6 +1016,8 @@ All settings are loaded from environment variables (`.env` file) via `src/core/s
 | `FETCH_MIN_DELAY_MS` | `800` | No | Min delay between sequential odds API requests (ms) |
 | `FETCH_MAX_DELAY_MS` | `1500` | No | Max delay between sequential odds API requests (ms) |
 | `FETCH_MAX_RETRIES` | `3` | No | Max retries per sport key on 429/5xx errors |
+| **Reddit Sentiment** | | | |
+| `REDDIT_USER_AGENT` | `python:bet-bot-sentiment-scraper:v1.0 (by /u/Olli0103)` | No | User-Agent string for Reddit RSS/JSON requests |
 
 ---
 
@@ -1030,6 +1032,9 @@ All settings are loaded from environment variables (`.env` file) via `src/core/s
 | `scripts/backfill_ml_features.py` | Backfill 6 critical ML features in `meta_features` | `python scripts/backfill_ml_features.py` |
 | `scripts/run_backtest.py` | Walk-forward backtesting engine | `python scripts/run_backtest.py --compare` |
 | `scripts/auto_grade_once.py` | Settle open bets against API results | `python scripts/auto_grade_once.py` |
+| `scripts/live_kpi_report.py` | Generate live KPI markdown report | `PYTHONPATH=. ./.venv/bin/python scripts/live_kpi_report.py` |
+| `scripts/bootstrap_runtime_settings.py` | Apply reproducible runtime dynamic settings (Redis) | `PYTHONPATH=. ./.venv/bin/python scripts/bootstrap_runtime_settings.py` |
+| `scripts/reddit_sentiment_daemon.sh` | 15-min Reddit sentiment daemon with telemetry logging | `bash scripts/reddit_sentiment_daemon.sh` |
 | `scripts/run_bot.py` | Alternative bot launcher | `python scripts/run_bot.py` |
 
 ### backfill_ml_features.py CLI Arguments
@@ -1088,23 +1093,24 @@ Derives `sharp_implied_prob` from odds when missing, computes form from `TeamMat
 
 | Button | Action |
 |--------|--------|
-| Deep Dive | Re-runs Analyst with full enrichment |
-| Ghost Bet | Places a virtual bet for tracking |
-| Ignorieren | Dismisses the alert |
-| Als platziert | Marks a value bet as placed |
+| Deep Dive | Shows cached DSS analysis + optional lightweight LLM reasoning |
+| 📊 Mathe zeigen | Shows EV/Kelly/MAO transparency card |
+| ❌ Abgelehnt | Rejects DSS tip with audit trail |
+| ✅ Als platziert / ✅ Platziert @ X.XX | Confirms placement with odds re-validation |
 
 ---
 
 ## Scheduled Jobs
 
-### Daily (Berlin time)
+### Daily (bot scheduler timezone)
 
 | Time | Job | Description |
 |------|-----|-------------|
-| 06:00 | Morning briefing | Fetch daily schedule (1 API call/sport), build initial signals |
-| 07:00 | Daily push | Push top singles + combos to Telegram |
+| 06:30 | Morning briefing | Reminder message in Telegram |
+| 07:00 | Scheduled fetch (+ optional push) | Core fetch → enrichment → push (push only after successful enrichment) |
+| 13:00 | Scheduled fetch | Midday core fetch → enrichment (no automatic push) |
 | 20:00 | Learning status | Win/loss stats and PnL summary |
-| 20:05 | API health check | Status of all external API connections |
+| 20:05 | API health check | Status of external API connections |
 | 22:00 | Daily performance | Full performance report with circuit breaker status |
 
 ### Weekly
@@ -1117,12 +1123,12 @@ Derives `sharp_implied_prob` from odds when missing, computes form from `TeamMat
 
 | Interval | Job | Description |
 |----------|-----|-------------|
-| Every 60s | JIT signal fetch | Targeted fetch for events kicking off within 75 min (only relevant sports) |
-| Every 30s | CLV snapshot | Log Pinnacle closing lines for events at kickoff (T-1 to T+3 min) |
-| Every 5 min | Agent cycle | Scout/Analyst/Executioner (reads from cache, no API calls) |
-| Every 5 min | Source health check | Push summary to Telegram if any data source is degraded/open |
+| Every 30s | CLV snapshot | Log Pinnacle closing lines around kickoff windows |
+| Every 15 min | Reddit sentiment pipeline | Tiered RSS ingest (`core/fact_only/high_noise`) with cache-aware local skip and hard cap |
+| Every 30 min | Agent cycle | Scout/Analyst DSS cycle (budget mode; lower polling pressure) |
 | Every 30 min | Auto-grading | Settle open bets against API results |
-| After grading | Data-driven retrain | Trigger retraining when 500+ new graded bets accumulate |
+| Every 5 min | Source health check | Push summary to Telegram when source health degrades |
+| After grading threshold | Data-driven retrain | Optional retrain trigger when enough new graded bets accumulate |
 
 ---
 
@@ -1145,6 +1151,8 @@ Bet-Bot/
 │   │   ├── chat_router.py              # Multi-chat-ID routing (broadcast/primary/ACL)
 │   │   ├── handlers.py                 # UI handlers, settings dashboard, NLP routing
 │   │   └── __main__.py                 # python -m src.bot entry point
+│   ├── config/
+│   │   └── sentiment_sources.py        # Tiered Reddit source config + weights
 │   ├── core/
 │   │   ├── api_health.py              # Daily API connectivity check
 │   │   ├── autograding.py             # Settle open bets against results
@@ -1192,6 +1200,8 @@ Bet-Bot/
 │   │   ├── injury_aggregator.py        # Unified aggregator (API-Sports + RSS + LLM)
 │   │   ├── apisports_fetcher.py        # API-Sports injuries/lineups
 │   │   ├── ollama_sentiment.py         # Ollama Gemma 3 4B (sentiment + intents)
+│   │   ├── reddit_fetcher.py           # Reddit RSS/JSON fetch helper
+│   │   ├── reddit_sentiment_pipeline.py # 15m tiered sentiment ingest + local-skip cache
 │   │   └── tipico_deeplink.py          # Tipico deep links (search + betslip + combo)
 │   ├── models/
 │   │   ├── betting.py                  # Pydantic models (BetSignal, ComboBet)
