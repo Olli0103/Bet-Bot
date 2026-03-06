@@ -31,11 +31,14 @@ t = res.get('tier_counts', {})
 w = res.get('weighted', {})
 n200 = int(feeds.get('http_200', 0))
 n304 = int(feeds.get('http_304', 0))
+skip = int(feeds.get('local_skip', 0))
 other = int(feeds.get('other', 0))
-total = n200 + n304 + other
+total = n200 + n304 + skip + other
 ratio304 = (100.0 * n304 / total) if total else 0.0
+ratio304eq = (100.0 * (n304 + skip) / total) if total else 0.0
 print(
-    f"reddit_sentiment_15m: processed={processed} req200={n200} req304={n304} ratio304={ratio304:.1f}% "
+    f"reddit_sentiment_15m: processed={processed} req200={n200} req304={n304} local_skip={skip} "
+    f"ratio304={ratio304:.1f}% ratio304eq={ratio304eq:.1f}% "
     f"delta={int(feeds.get('delta_items', 0))} "
     f"tiers(core={int(t.get('core',0))},fact={int(t.get('fact_only',0))},noise={int(t.get('high_noise',0))}) "
     f"sentiment_delta={float(w.get('sentiment_delta',0.0)):.4f} hype={float(w.get('public_hype_index',0.0)):.4f}"

@@ -109,6 +109,20 @@
 - **Combo leg market filter rollback** (`src/core/live_feed.py`)
   - Re-enabled `double_chance` / `draw_no_bet` legs in combo-eligible pool per operator preference.
 
+- **API-Sports prediction fetch support added** (`src/integrations/apisports_fetcher.py`)
+  - Added sport-routed prediction fetch (`soccer`/`basketball`/`icehockey`) with host-specific endpoints.
+  - Supports fixture/game ID routing and event-level lookup by teams/date.
+  - Parses API `%` strings into float probabilities (`api_prob_home/draw/away`).
+  - Includes Redis caching (12h default) and short negative-cache on fetch failures.
+
+- **API prediction features wired with sport-safe neutral handling** (`src/core/feature_engineering.py`, `src/core/live_feed.py`)
+  - Added features: `api_prob_home`, `api_prob_draw`, `api_prob_away`,
+    `api_pred_available`, `api_vs_market_diff`, `api_strong_conviction`.
+  - Divergence/conviction are only active when real API prediction data exists;
+    otherwise forced to neutral `0.0` (prevents non-soccer feature poisoning).
+  - Added explicit missingness indicator (`api_pred_available`) for model/observability clarity.
+  - Live pipeline now fetches API predictions per event through sport-routed guarded path.
+
 ## 2026-03-05
 
 ### Fixed

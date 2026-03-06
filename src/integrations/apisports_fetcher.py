@@ -17,8 +17,9 @@ from src.integrations.base_fetcher import AsyncBaseFetcher, _safe_sync_run
 
 log = logging.getLogger(__name__)
 
-# API-Basketball base URL (separate host from football API)
+# API-Sports sport-specific base URLs
 API_BASKETBALL_BASE = "https://v1.basketball.api-sports.io"
+API_HOCKEY_BASE = "https://v1.hockey.api-sports.io"
 
 
 class APISportsFetcher(AsyncBaseFetcher):
@@ -58,6 +59,182 @@ class APISportsFetcher(AsyncBaseFetcher):
 
     def get_injuries_by_fixture_ids(self, fixture_ids: List[int], ttl_seconds: int = 180) -> Dict[str, Any]:
         return _safe_sync_run(self.get_injuries_by_fixture_ids_async(fixture_ids, ttl_seconds))
+
+    # ------------------------------------------------------------------
+    # API-Football predictions (1X2 probabilities)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_percent_to_prob(raw_val: Any) -> float:
+        """Parse values like "45%" -> 0.45 with safe fallback."""
+        try:
+            s = str(raw_val or "0").replace("%", "").strip()
+            return max(0.0, min(1.0, float(s) / 100.0))
+        except Exception:
+            return 0.0
+
+    async def _get_predictions_raw(self, base_url: str, query_key: str, event_id: int) -> Dict[str, Any]:
+        """Fetch raw predictions from a specific API-Sports host."""
+        import httpx
+        from src.integrations.base_fetcher import build_httpx_ssl_verify
+
+        headers = {
+            "x-apisports-key": settings.apisports_api_key,
+            "Accept": "application/json",
+        }
+        url = f"{base_url}/predictions"
+        params = {query_key: int(event_id)}
+        async with httpx.AsyncClient(timeout=20, verify=build_httpx_ssl_verify()) as client:
+            resp = await client.get(url, headers=headers, params=params)
+            if resp.status_code != 200:
+                raise RuntimeError(f"HTTP {resp.status_code} {url}")
+            return resp.json()
+
+    async def get_predictions_by_event_id_async(
+        self,
+        event_id: int,
+        sport: str,
+        ttl_seconds: int = 43200,
+    ) -> Dict[str, float]:
+        """Fetch API-Sports prediction percentages by event/game/fixture id.
+
+        Sport routing:
+        - soccer*     -> football host, query `fixture=<id>`
+        - basketball* -> basketball host, query `game=<id>`
+        - icehockey*  -> hockey host, query `game=<id>`
+        """
+        sport_key = str(sport or "").lower()
+        cache_key = f"apisports:predictions:{sport_key}:{int(event_id)}"
+        cached = cache.get_json(cache_key)
+        if cached is not None:
+            return cached
+
+        if sport_key.startswith("soccer"):
+            base_url, query_key = settings.apisports_base_url, "fixture"
+        elif sport_key.startswith("basketball"):
+            base_url, query_key = API_BASKETBALL_BASE, "game"
+        elif sport_key.startswith("icehockey"):
+            base_url, query_key = API_HOCKEY_BASE, "game"
+        else:
+            cache.set_json(cache_key, {}, ttl_seconds)
+            return {}
+
+        try:
+            data = await self._get_predictions_raw(base_url, query_key, int(event_id))
+            response_list = data.get("response") or []
+            if not response_list:
+                cache.set_json(cache_key, {}, ttl_seconds)
+                return {}
+
+            percent_data = (
+                response_list[0]
+                .get("predictions", {})
+                .get("percent", {})
+            )
+
+            # US sports often have no draw field; keep neutral fallback = 0.0
+            result = {
+                "api_prob_home": self._parse_percent_to_prob(percent_data.get("home", "0%")),
+                "api_prob_draw": self._parse_percent_to_prob(percent_data.get("draw", "0%")),
+                "api_prob_away": self._parse_percent_to_prob(percent_data.get("away", "0%")),
+            }
+            cache.set_json(cache_key, result, ttl_seconds)
+            log.info("API-Sports predictions loaded sport=%s id=%s %s", sport_key, event_id, result)
+            return result
+        except Exception as exc:
+            log.warning("API-Sports predictions fetch failed sport=%s id=%s: %s", sport_key, event_id, exc)
+            cache.set_json(cache_key, {}, 300)
+            return {}
+
+    async def get_predictions_by_fixture_id_async(
+        self, fixture_id: int, ttl_seconds: int = 43200
+    ) -> Dict[str, float]:
+        """Backward-compatible soccer wrapper (fixture id on football host)."""
+        return await self.get_predictions_by_event_id_async(fixture_id, sport="soccer", ttl_seconds=ttl_seconds)
+
+    def get_predictions_by_fixture_id(self, fixture_id: int, ttl_seconds: int = 43200) -> Dict[str, float]:
+        """Sync wrapper for get_predictions_by_fixture_id_async."""
+        return _safe_sync_run(self.get_predictions_by_fixture_id_async(fixture_id, ttl_seconds))
+
+    async def get_predictions_for_event_async(
+        self,
+        home_team: str,
+        away_team: str,
+        sport: str,
+        event_date: str = "",
+        ttl_seconds: int = 43200,
+    ) -> Dict[str, float]:
+        """Fetch API predictions for a soccer/basketball/hockey event.
+
+        Routes to sport-specific API-Sports host and endpoint.
+        """
+        sport_key = str(sport or "").lower()
+        if not (
+            sport_key.startswith("soccer")
+            or sport_key.startswith("basketball")
+            or sport_key.startswith("icehockey")
+        ):
+            return {}
+
+        cache_key = f"apisports:pred:event:{sport_key}:{home_team}:{away_team}:{self._resolve_date(event_date)}".lower().replace(" ", "_")
+        cached = cache.get_json(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            date_str = self._resolve_date(event_date)
+
+            # Soccer uses existing wrapper + /fixtures endpoint
+            if sport_key.startswith("soccer"):
+                fixtures_data = await self.get("fixtures", params={"date": date_str})
+                event_ids = self._match_fixture_ids(fixtures_data.get("response") or [], home_team, away_team)
+            else:
+                # Basketball / Hockey use dedicated hosts + /games endpoint
+                import httpx
+                from src.integrations.base_fetcher import build_httpx_ssl_verify
+
+                if sport_key.startswith("basketball"):
+                    base_url = API_BASKETBALL_BASE
+                else:
+                    base_url = API_HOCKEY_BASE
+
+                headers = {
+                    "x-apisports-key": settings.apisports_api_key,
+                    "Accept": "application/json",
+                }
+                url = f"{base_url}/games"
+                params = {"date": date_str}
+                async with httpx.AsyncClient(timeout=20, verify=build_httpx_ssl_verify()) as client:
+                    resp = await client.get(url, headers=headers, params=params)
+                    if resp.status_code != 200:
+                        cache.set_json(cache_key, {}, 300)
+                        return {}
+                    games_data = resp.json()
+                event_ids = self._match_game_ids(games_data.get("response") or [], home_team, away_team)
+
+            if not event_ids:
+                cache.set_json(cache_key, {}, ttl_seconds)
+                return {}
+
+            preds = await self.get_predictions_by_event_id_async(int(event_ids[0]), sport=sport_key, ttl_seconds=ttl_seconds)
+            cache.set_json(cache_key, preds, ttl_seconds)
+            return preds
+        except Exception as exc:
+            log.warning("API-Sports event prediction fetch failed for %s vs %s (%s): %s", home_team, away_team, sport_key, exc)
+            cache.set_json(cache_key, {}, 300)
+            return {}
+
+    def get_predictions_for_event(
+        self,
+        home_team: str,
+        away_team: str,
+        sport: str,
+        event_date: str = "",
+        ttl_seconds: int = 43200,
+    ) -> Dict[str, float]:
+        return _safe_sync_run(
+            self.get_predictions_for_event_async(home_team, away_team, sport, event_date, ttl_seconds)
+        )
 
     # ------------------------------------------------------------------
     # Official injury data for today's events
@@ -213,6 +390,32 @@ class APISportsFetcher(AsyncBaseFetcher):
                 fid = fx.get("fixture", {}).get("id")
                 if fid:
                     ids.append(int(fid))
+        return ids
+
+    @staticmethod
+    def _match_game_ids(games: list, home_team: str, away_team: str) -> List[int]:
+        """Find basketball/hockey game IDs via normalized team names."""
+        ids: List[int] = []
+        norm_home = normalize_team(home_team)
+        norm_away = normalize_team(away_team)
+
+        for g in games:
+            teams = g.get("teams", {}) or {}
+            # API-Basketball sometimes uses visitors/home, hockey often home/away
+            g_home = normalize_team(
+                (teams.get("home") or {}).get("name")
+                or (teams.get("local") or {}).get("name")
+                or ""
+            )
+            g_away = normalize_team(
+                (teams.get("away") or {}).get("name")
+                or (teams.get("visitors") or {}).get("name")
+                or ""
+            )
+            if g_home == norm_home and g_away == norm_away:
+                gid = g.get("id") or (g.get("game") or {}).get("id") or (g.get("fixture") or {}).get("id")
+                if gid:
+                    ids.append(int(gid))
         return ids
 
     @staticmethod
