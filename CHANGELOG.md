@@ -44,6 +44,10 @@
   - Applies current active-sports policy to global scope and configured owner scopes.
   - Prevents drift between live runtime toggles and repository state.
 
+- **Configurable Reddit User-Agent** (`src/core/settings.py`, `src/integrations/reddit_fetcher.py`)
+  - Added `REDDIT_USER_AGENT` setting (env-driven) with sane default.
+  - Reddit fetcher now reads User-Agent from settings instead of hardcoded string.
+
 ### Changed
 - **Agent polling cadence reduced (budget mode)** (`src/bot/app.py`, `src/bot/core_worker.py`)
   - Agent cycle changed from frequent mode to **2x per hour** (`1800s` interval).

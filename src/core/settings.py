@@ -22,6 +22,12 @@ class Settings(BaseModel):
     newsdata_api_key: str = os.getenv("NEWSDATA_API_KEY", "")
     newsdata_base_url: str = os.getenv("NEWSDATA_BASE_URL", "https://newsdata.io/api/1")
 
+    # Reddit
+    reddit_user_agent: str = os.getenv(
+        "REDDIT_USER_AGENT",
+        "python:bet-bot-sentiment-scraper:v1.0 (by /u/Olli0103)",
+    )
+
     postgres_dsn: str = os.getenv("POSTGRES_DSN", "postgresql+psycopg://postgres:postgres@localhost:5432/signalbot")
     redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
