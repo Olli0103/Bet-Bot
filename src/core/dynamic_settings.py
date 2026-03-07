@@ -50,7 +50,7 @@ AVAILABLE_MARKETS: Dict[str, str] = {
     "draw_no_bet": "Draw No Bet",
 }
 
-AVAILABLE_COMBO_SIZES: List[int] = [10, 20, 30]
+AVAILABLE_COMBO_SIZES: List[int] = [5, 10, 20, 30]
 
 
 class DynamicSettingsManager:
@@ -69,7 +69,7 @@ class DynamicSettingsManager:
         ],
         "active_markets": ["h2h", "totals", "spreads", "double_chance", "draw_no_bet"],
         "min_odds_threshold": 1.20,
-        "target_combo_sizes": [10, 20, 30],
+        "target_combo_sizes": [5, 10, 20, 30],
     }
 
     def __init__(self, owner_chat_id: str = ""):
@@ -171,7 +171,7 @@ class DynamicSettingsManager:
         return float(self.get("min_odds_threshold") or 1.20)
 
     def get_combo_sizes(self) -> List[int]:
-        return self.get("target_combo_sizes") or [10, 20, 30]
+        return self.get("target_combo_sizes") or [5, 10, 20, 30]
 
 
 # Singleton
