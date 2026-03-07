@@ -598,6 +598,7 @@ async def _show_combos_for_sport_impl(
         # Take up to 5 legs, but only ONE per event!
         selected_legs = []
         used_events = set()
+        max_legs = 5  # Target number of legs
         for leg in sport_legs:
             event_id = leg.get("event_id", "")
             if event_id in used_events:
