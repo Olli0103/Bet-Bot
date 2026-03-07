@@ -592,19 +592,30 @@ async def _show_combos_for_sport_impl(
             )
             return
         
-        # Filter legs to only today's games
-        from datetime import datetime, timezone
-        today = datetime.now(timezone.utc).date()
+        # Filter legs to only games in current fetch window (07:00 - 06:59 next day)
+        from datetime import datetime, timezone, timedelta
+        from zoneinfo import ZoneInfo
+        
+        now_utc = datetime.now(timezone.utc)
+        tz = ZoneInfo("Europe/Berlin")
+        local = now_utc.astimezone(tz)
+        
+        window_start = local.replace(hour=7, minute=0, second=0, microsecond=0)
+        if local < window_start:
+            window_start = window_start - timedelta(days=1)
+        window_end = window_start + timedelta(days=1)
+        
         sport_legs = [
             l for l in sport_legs 
             if l.get("commence_time") and 
-            datetime.fromisoformat(l.get("commence_time").replace("Z", "+00:00")).date() == today
+            datetime.fromisoformat(l.get("commence_time").replace("Z", "+00:00")).astimezone(tz) >= window_start and
+            datetime.fromisoformat(l.get("commence_time").replace("Z", "+00:00")).astimezone(tz) < window_end
         ]
         
         if not sport_legs:
             sport_name = sport_filter.split("_")[-1] if "_" in sport_filter else sport_filter
             await (update.callback_query.edit_message_text if edit_message else update.message.reply_text)(
-                f"Keine Spiele heute für {sport_name}.",
+                f"Keine Spiele im Fetch-Fenster für {sport_name}.",
                 reply_markup=_combo_sport_keyboard(),
             )
             return
