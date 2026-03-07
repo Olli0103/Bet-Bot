@@ -543,6 +543,29 @@ async def _show_combos_for_sport(
     edit_message: bool = False,
 ) -> None:
     """Show combos filtered by sport, always 5-leg combos."""
+    try:
+        await _show_combos_for_sport_impl(update, context, sport_filter, combo_size, edit_message)
+    except Exception as e:
+        error_msg = str(e)
+        if "Message is not modified" in error_msg:
+            if update.callback_query:
+                await update.callback_query.answer("Keine neuen Daten.", show_alert=True)
+        else:
+            log.exception("Error in _show_combos_for_sport")
+            if update.callback_query:
+                await update.callback_query.edit_message_text(f"Fehler: {type(e).__name__}")
+            elif update.message:
+                await update.message.reply_text(f"Fehler: {type(e).__name__}")
+
+
+async def _show_combos_for_sport_impl(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    sport_filter: str = "all",
+    combo_size: int = 10,
+    edit_message: bool = False,
+) -> None:
+    """Implementation of show combos for sport."""
     from src.core.live_feed import get_cached_combos
     
     combos = get_cached_combos()
@@ -591,13 +614,7 @@ async def _show_combos_for_sport(
     text = "\n".join(lines)
     
     if edit_message:
-        try:
-            await update.callback_query.edit_message_text(text, parse_mode="HTML")
-        except Exception as e:
-            if "Message is not modified" in str(e):
-                await update.callback_query.answer("Keine neuen Daten verfügbar.", show_alert=True)
-            else:
-                raise
+        await update.callback_query.edit_message_text(text, parse_mode="HTML")
     else:
         await update.message.reply_text(text, parse_mode="HTML")
 
