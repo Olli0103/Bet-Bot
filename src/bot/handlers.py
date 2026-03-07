@@ -590,7 +590,13 @@ async def _show_combos_for_sport(
     text = "\n".join(lines)
     
     if edit_message:
-        await update.callback_query.edit_message_text(text, parse_mode="HTML")
+        try:
+            await update.callback_query.edit_message_text(text, parse_mode="HTML")
+        except Exception as e:
+            if "Message is not modified" in str(e):
+                await update.callback_query.answer("Keine neuen Daten verfügbar.", show_alert=True)
+            else:
+                raise
     else:
         await update.message.reply_text(text, parse_mode="HTML")
 
