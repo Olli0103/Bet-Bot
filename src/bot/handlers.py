@@ -156,7 +156,7 @@ def _sync_place_bet(payload: dict) -> bool:
 
 MAIN_MENU = ReplyKeyboardMarkup(
     [
-        ["Heutige Top 10 Einzelwetten", "10/20/30 Kombis"],
+        ["Heutige Top 10 Einzelwetten", "Kombis"],
         ["Daten aktualisieren", "Kontostand"],
         ["Einstellungen", "Hilfe"],
     ],
