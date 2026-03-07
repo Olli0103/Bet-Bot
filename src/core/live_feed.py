@@ -962,7 +962,7 @@ def fetch_and_build_signals(
     optimizer = ComboOptimizer(engine)
     eligible_legs = [
         l for l in combo_legs
-        if l["probability"] >= max(min_combo_conf, 0.40)
+        if l["probability"] >= max(min_combo_conf, 0.30)
     ]
     log.info("Combo legs: %d total, %d after confidence >= %.2f filter",
              len(combo_legs), len(eligible_legs), min_combo_conf)
