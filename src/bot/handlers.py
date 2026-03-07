@@ -595,16 +595,26 @@ async def _show_combos_for_sport_impl(
         # Sort by probability (confidence) - highest first
         sport_legs = sorted(sport_legs, key=lambda x: float(x.get("probability", 0)), reverse=True)
         
-        # Take up to 5 legs, but only ONE per event!
+        # Take up to 5 legs, but only ONE per event AND per matchup!
         selected_legs = []
         used_events = set()
+        used_matchups = set()
         max_legs = 5  # Target number of legs
         for leg in sport_legs:
             event_id = leg.get("event_id", "")
-            if event_id in used_events:
+            home = leg.get("home_team", "")
+            away = leg.get("away_team", "")
+            # Create a normalized matchup key (order-independent)
+            matchup = tuple(sorted([home.lower(), away.lower()]))
+            
+            # Skip if we've already used this event OR this exact matchup
+            if event_id in used_events or matchup in used_matchups:
                 continue
+                
             selected_legs.append(leg)
             used_events.add(event_id)
+            used_matchups.add(matchup)
+            
             if len(selected_legs) >= max_legs:
                 break
         
