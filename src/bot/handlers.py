@@ -473,11 +473,126 @@ def _sport_filter_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def _combo_size_keyboard() -> InlineKeyboardMarkup:
+    """Build inline keyboard for combo size selection (5/10/20/30)."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("5", callback_data="combo_size:5"),
+            InlineKeyboardButton("10", callback_data="combo_size:10"),
+            InlineKeyboardButton("20", callback_data="combo_size:20"),
+            InlineKeyboardButton("30", callback_data="combo_size:30"),
+        ],
+    ])
+
+
+def _combo_sport_keyboard() -> InlineKeyboardMarkup:
+    """Build inline keyboard for combo sport filter (shows only 5-leg combos)."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("⚽ Alle", callback_data="combo_sport:all"),
+        ],
+        [
+            InlineKeyboardButton("⚽ Bundesliga", callback_data="combo_sport:soccer_germany_bundesliga"),
+            InlineKeyboardButton("🏴󠁧󠁢󠁥󠁮󠁧󠁿 EPL", callback_data="combo_sport:soccer_epl"),
+        ],
+        [
+            InlineKeyboardButton("🇪🇸 LaLiga", callback_data="combo_sport:soccer_spain_la_liga"),
+            InlineKeyboardButton("🇮🇹 Serie A", callback_data="combo_sport:soccer_italy_serie_a"),
+        ],
+        [
+            InlineKeyboardButton("🏀 NBA", callback_data="combo_sport:basketball_nba"),
+            InlineKeyboardButton("🏒 NHL", callback_data="combo_sport:icehockey_nhl"),
+        ],
+        [
+            InlineKeyboardButton("🎾 ATP", callback_data="combo_sport:tennis_atp"),
+            InlineKeyboardButton("🏈 NFL", callback_data="combo_sport:americanfootball_nfl"),
+        ],
+    ])
+
+
 def _filter_items_by_sport(items: list, sport_filter: str) -> list:
     """Filter signal items by sport category prefix."""
     if sport_filter == "all":
         return items
     return [x for x in items if str(x.get("sport", "")).startswith(sport_filter)]
+
+
+def _filter_combos_by_sport(combos: list, sport_filter: str) -> list:
+    """Filter combo legs by sport prefix. Returns combos where legs match sport."""
+    if sport_filter == "all":
+        return combos
+    filtered = []
+    for combo in combos:
+        legs = combo.get("legs", [])
+        matching_legs = [l for l in legs if str(l.get("sport", "")).startswith(sport_filter)]
+        if len(matching_legs) >= 5:
+            # Create a filtered combo with only matching legs
+            filtered_combo = combo.copy()
+            filtered_combo["legs"] = matching_legs
+            filtered_combo["size"] = len(matching_legs)
+            filtered.append(filtered_combo)
+    return filtered
+
+
+async def _show_combos_for_sport(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    sport_filter: str = "all",
+    combo_size: int = 10,
+    edit_message: bool = False,
+) -> None:
+    """Show combos filtered by sport, always 5-leg combos."""
+    from src.core.live_feed import get_cached_combos
+    
+    combos = get_cached_combos()
+    if not combos:
+        await (update.callback_query.edit_message_text if edit_message else update.message.reply_text)(
+            "Keine Kombi-Daten vorhanden."
+        )
+        return
+
+    # Filter by sport and limit to requested size
+    filtered = _filter_combos_by_sport(combos, sport_filter)
+    limited = filtered[:combo_size]
+
+    if not limited:
+        sport_name = sport_filter.split("_")[-1] if "_" in sport_filter else sport_filter
+        await (update.callback_query.edit_message_text if edit_message else update.message.reply_text)(
+            f"Keine 5er-Kombis für {sport_name} gefunden.",
+            reply_markup=_combo_sport_keyboard(),
+        )
+        return
+
+    # Group by sport for display
+    sport_groups: dict = {}
+    for combo in limited:
+        legs = combo.get("legs", [])
+        for leg in legs:
+            sport = leg.get("sport", "unknown")
+            if sport not in sport_groups:
+                sport_groups[sport] = []
+            sport_groups[sport].append(combo)
+            break  # only count once per combo
+
+    # Build response
+    lines = [f"🧩 {len(limited)}x 5er-Kombis"]
+    if sport_filter != "all":
+        lines[0] += f" ({sport_filter.replace('_', ' ').title()})"
+
+    for sport, sport_combos in sorted(sport_groups.items()):
+        sport_label = sport.split("_")[-1].upper()
+        lines.append(f"\n🏅 {sport_label}: {len(sport_combos)} Kombis")
+        for i, combo in enumerate(sport_combos[:3], 1):  # Show top 3 per sport
+            card = _format_combo_card(combo)
+            if card:
+                lines.append(f"\n{card}")
+
+    text = "\n".join(lines)
+    
+    if edit_message:
+        await update.callback_query.edit_message_text(text, parse_mode="HTML")
+    else:
+        await update.message.reply_text(text, parse_mode="HTML")
 
 
 async def _show_top10_for_sport(
@@ -741,38 +856,11 @@ def _combo_deeplink_keyboard(combo_data: dict) -> InlineKeyboardMarkup:
 
 
 async def combo_suggestions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show 10/20/30-leg Tipico-friendly Lotto combos."""
-    from src.core.live_feed import get_cached_combos
-    combos = get_cached_combos()
-
-    if not combos:
-        try:
-            await asyncio.to_thread(lambda: fetch_and_build_signals())
-        except Exception:
-            pass
-        combos = get_cached_combos()
-
-    if not combos:
-        await update.message.reply_text("Keine Kombi-Daten vorhanden. Bitte später erneut versuchen.")
-        return
-
-    sent = 0
-    for combo_data in combos:
-        card = _format_combo_card(combo_data)
-        if card:
-            if sent == 0:
-                await update.message.reply_text(f"🧩 Lotto-Kombis (10/20/30 Legs)")
-            keyboard = _combo_deeplink_keyboard(combo_data)
-            # Use HTML parse_mode for <tg-spoiler> in 20+ leg combos
-            combo_size = combo_data.get("size", 0)
-            parse_mode = "HTML" if combo_size >= 20 else None
-            await update.message.reply_text(card, reply_markup=keyboard, parse_mode=parse_mode)
-            sent += 1
-
-    if sent == 0:
-        await update.message.reply_text(
-            "Keine Kombi-Vorschläge mit vollständigem Event-Kontext verfügbar."
-        )
+    """Show combo size selection first, then sport filter (5-leg combos only)."""
+    await update.message.reply_text(
+        "🧩 Lotto-Kombis\nWähle die Anzahl (immer 5er-Combos):",
+        reply_markup=_combo_size_keyboard(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -860,6 +948,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _show_top10_for_sport(update, context, sport_filter=sport_filter, edit_message=True)
         except Exception:
             await q.edit_message_text("Sport-Filter fehlgeschlagen.", reply_markup=_sport_filter_keyboard())
+        return
+
+    # --- Combo size selection ---
+    if data.startswith("combo_size:"):
+        size = data.split(":", 1)[1]
+        context.user_data["combo_size"] = int(size)
+        await q.edit_message_text(
+            f"🧩 {size}x 5er-Kombis (sportübergreifend)\nWähle eine Sportart:",
+            reply_markup=_combo_sport_keyboard(),
+        )
+        return
+
+    # --- Combo sport filter (shows only 5-leg combos) ---
+    if data.startswith("combo_sport:"):
+        sport_filter = data.split(":", 1)[1]
+        combo_size = context.user_data.get("combo_size", 10)
+        await _show_combos_for_sport(update, context, sport_filter=sport_filter, combo_size=combo_size, edit_message=True)
         return
 
     # --- Signal pagination ---
