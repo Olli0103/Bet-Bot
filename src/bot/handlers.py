@@ -648,6 +648,13 @@ async def _show_combos_for_sport_impl(
         
         max_legs = len(selected_legs)
         
+        # Calculate combined odds and probability from legs
+        combined_odds = 1.0
+        combined_prob = 1.0
+        for leg in selected_legs:
+            combined_odds *= float(leg.get("odds", 1.0))
+            combined_prob *= float(leg.get("probability", 1.0))
+        
         sport_name = sport_filter.split("_")[-1].title()
         
         # Build a single combo with these legs
@@ -656,8 +663,8 @@ async def _show_combos_for_sport_impl(
             "type": "lotto",
             "stake": 2.00 if max_legs == 5 else (3.00 if max_legs == 3 else 2.50),
             "legs": selected_legs,
-            "combined_odds": 1.0,
-            "combined_probability": 1.0,
+            "combined_odds": combined_odds,
+            "combined_probability": combined_prob,
             "expected_value": 0.0,
         }
         
@@ -726,13 +733,20 @@ async def _show_combos_for_sport_impl(
         
         max_legs = len(selected_legs)
         
+        # Calculate combined odds and probability from legs
+        combined_odds = 1.0
+        combined_prob = 1.0
+        for leg in selected_legs:
+            combined_odds *= float(leg.get("odds", 1.0))
+            combined_prob *= float(leg.get("probability", 1.0))
+        
         combo_data = {
             "size": max_legs,
             "type": "lotto",
             "stake": 2.00 if max_legs == 5 else (1.00 if max_legs <= 10 else 0.50),
             "legs": selected_legs,
-            "combined_odds": 1.0,
-            "combined_probability": 1.0,
+            "combined_odds": combined_odds,
+            "combined_probability": combined_prob,
             "expected_value": 0.0,
         }
         
