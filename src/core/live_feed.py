@@ -960,10 +960,8 @@ def fetch_and_build_signals(
               signals=len(top10), events=stats["events_seen"])
     from src.core.combo_optimizer import ComboOptimizer
     optimizer = ComboOptimizer(engine)
-    eligible_legs = [
-        l for l in combo_legs
-        if l["probability"] >= max(min_combo_conf, 0.30)
-    ]
+    # No confidence filter for lotto combos - show whatever is available
+    eligible_legs = combo_legs
     log.info("Combo legs: %d total, %d after confidence >= %.2f filter",
              len(combo_legs), len(eligible_legs), min_combo_conf)
     combos = optimizer.build_all_combos(eligible_legs, target_sizes=combo_sizes)
