@@ -565,9 +565,67 @@ async def _show_combos_for_sport_impl(
     combo_size: int = 10,
     edit_message: bool = False,
 ) -> None:
-    """Implementation of show combos for sport."""
-    from src.core.live_feed import get_cached_combos
+    """Implementation of show combos for sport.
     
+    If sport_filter is 'all': show mixed-sport combos.
+    If sport_filter is a specific sport: build a combo from legs ONLY of that sport.
+    """
+    from src.core.live_feed import get_cached_combo_legs
+    
+    # If a specific sport is selected, build combo from that sport's legs only
+    if sport_filter != "all":
+        all_legs = get_cached_combo_legs()
+        if not all_legs:
+            await (update.callback_query.edit_message_text if edit_message else update.message.reply_text)(
+                "Keine Kombi-Daten vorhanden."
+            )
+            return
+        
+        # Filter legs to only the selected sport
+        sport_legs = [l for l in all_legs if str(l.get("sport", "")).startswith(sport_filter)]
+        
+        if not sport_legs:
+            sport_name = sport_filter.split("_")[-1] if "_" in sport_filter else sport_filter
+            await (update.callback_query.edit_message_text if edit_message else update.message.reply_text)(
+                f"Keine Spiele für {sport_name} gefunden.",
+                reply_markup=_combo_sport_keyboard(),
+            )
+            return
+        
+        # Sort by probability (confidence) - highest first
+        sport_legs = sorted(sport_legs, key=lambda x: float(x.get("probability", 0)), reverse=True)
+        
+        # Take up to 5 legs (or fewer if not enough)
+        max_legs = min(5, len(sport_legs))
+        selected_legs = sport_legs[:max_legs]
+        
+        sport_name = sport_filter.split("_")[-1].title()
+        
+        # Build a single combo with these legs
+        combo_data = {
+            "size": max_legs,
+            "type": "lotto",
+            "stake": 2.00 if max_legs == 5 else (3.00 if max_legs == 3 else 2.50),
+            "legs": selected_legs,
+            "combined_odds": 1.0,
+            "combined_probability": 1.0,
+            "expected_value": 0.0,
+        }
+        
+        card = _format_combo_card(combo_data)
+        if card:
+            msg = f"🧩 {sport_name} {max_legs}-er Combo\n\n{card}"
+        else:
+            msg = f"Keine gültige Combo für {sport_name} erstellt."
+        
+        if update.callback_query:
+            await update.callback_query.edit_message_text(msg, parse_mode="HTML")
+        else:
+            await update.message.reply_text(msg, parse_mode="HTML")
+        return
+    
+    # Original behavior for "all" - show mixed-sport combos
+    from src.core.live_feed import get_cached_combos
     combos = get_cached_combos()
     if not combos:
         await (update.callback_query.edit_message_text if edit_message else update.message.reply_text)(
@@ -575,7 +633,6 @@ async def _show_combos_for_sport_impl(
         )
         return
 
-    # Filter by sport and limit to requested size
     filtered = _filter_combos_by_sport(combos, sport_filter)
     limited = filtered[:combo_size]
 
@@ -587,7 +644,6 @@ async def _show_combos_for_sport_impl(
         )
         return
 
-    # Group by sport for display
     sport_groups: dict = {}
     for combo in limited:
         legs = combo.get("legs", [])
@@ -596,9 +652,8 @@ async def _show_combos_for_sport_impl(
             if sport not in sport_groups:
                 sport_groups[sport] = []
             sport_groups[sport].append(combo)
-            break  # only count once per combo
+            break
 
-    # Build response
     lines = [f"🧩 {len(limited)}x 5er-Kombis"]
     if sport_filter != "all":
         lines[0] += f" ({sport_filter.replace('_', ' ').title()})"
@@ -606,7 +661,7 @@ async def _show_combos_for_sport_impl(
     for sport, sport_combos in sorted(sport_groups.items()):
         sport_label = sport.split("_")[-1].upper()
         lines.append(f"\n🏅 {sport_label}: {len(sport_combos)} Kombis")
-        for i, combo in enumerate(sport_combos[:3], 1):  # Show top 3 per sport
+        for i, combo in enumerate(sport_combos[:3], 1):
             card = _format_combo_card(combo)
             if card:
                 lines.append(f"\n{card}")
