@@ -592,6 +592,23 @@ async def _show_combos_for_sport_impl(
             )
             return
         
+        # Filter legs to only today's games
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).date()
+        sport_legs = [
+            l for l in sport_legs 
+            if l.get("commence_time") and 
+            datetime.fromisoformat(l.get("commence_time").replace("Z", "+00:00")).date() == today
+        ]
+        
+        if not sport_legs:
+            sport_name = sport_filter.split("_")[-1] if "_" in sport_filter else sport_filter
+            await (update.callback_query.edit_message_text if edit_message else update.message.reply_text)(
+                f"Keine Spiele heute für {sport_name}.",
+                reply_markup=_combo_sport_keyboard(),
+            )
+            return
+        
         # Sort by probability (confidence) - highest first
         sport_legs = sorted(sport_legs, key=lambda x: float(x.get("probability", 0)), reverse=True)
         

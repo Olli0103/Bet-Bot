@@ -740,6 +740,7 @@ def fetch_and_build_signals(
                     "home_team": home,
                     "away_team": away,
                     "market": "h2h",
+                    "commence_time": commence,
                 }
             )
 
@@ -787,6 +788,7 @@ def fetch_and_build_signals(
                                 "home_team": home,
                                 "away_team": away,
                                 "market": f"double_chance {dc_code}",
+                                "commence_time": commence,
                             })
 
             # Draw No Bet (DNB) — remove draw, redistribute
@@ -828,6 +830,7 @@ def fetch_and_build_signals(
                                     "home_team": home,
                                     "away_team": away,
                                     "market": "draw_no_bet",
+                                    "commence_time": commence,
                                 })
 
         # --- Process spreads market ---
@@ -877,6 +880,7 @@ def fetch_and_build_signals(
                         "home_team": home,
                         "away_team": away,
                         "market": f"spreads {point_val:+.1f}",
+                        "commence_time": commence,
                     })
 
         # --- Process totals market ---
@@ -926,6 +930,7 @@ def fetch_and_build_signals(
                         "home_team": home,
                         "away_team": away,
                         "market": f"totals {point_val}",
+                        "commence_time": commence,
                     })
 
     # CVaR-constrained portfolio sizing: re-size simultaneous bets to cap
