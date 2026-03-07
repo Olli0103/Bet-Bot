@@ -1,25 +1,25 @@
 {
-  "timestamp": "2026-03-07T13:44:59.466306+00:00",
+  "timestamp": "2026-03-07T14:05:51.035059+00:00",
   "global": {
     "fetched_keys": 9,
     "request_status_counts": {
       "200": 9
     },
     "raw_events_count": 115,
-    "parsed_events_count": 32,
-    "with_tipico_count": 32,
-    "with_sharp_count": 32,
-    "with_tipico_and_sharp_count": 32,
+    "parsed_events_count": 31,
+    "with_tipico_count": 31,
+    "with_sharp_count": 31,
+    "with_tipico_and_sharp_count": 31,
     "dropped_no_bookmaker_overlap": 0,
     "dropped_outright_filter": 2,
-    "dropped_time_window": 83,
+    "dropped_time_window": 84,
     "dropped_invalid_market": 0,
-    "dropped_confidence": 52,
+    "dropped_confidence": 50,
     "dropped_ev": 1,
     "dropped_stake_zero": 0,
-    "signals_generated": 163,
+    "signals_generated": 154,
     "signals_playable": 13,
-    "signals_paper_only": 150,
+    "signals_paper_only": 141,
     "final_displayed_count": 1
   },
   "per_sport": {
@@ -67,16 +67,16 @@
     },
     "soccer_italy_serie_a": {
       "raw_events": 19,
-      "parsed_events": 3,
-      "with_tipico": 3,
-      "with_sharp": 3,
-      "with_both": 3,
+      "parsed_events": 2,
+      "with_tipico": 2,
+      "with_sharp": 2,
+      "with_both": 2,
       "dropped_no_overlap": 0,
-      "dropped_time_window": 16,
-      "dropped_confidence": 6,
+      "dropped_time_window": 17,
+      "dropped_confidence": 4,
       "dropped_ev": 0,
       "dropped_stake_zero": 0,
-      "signals_generated": 22,
+      "signals_generated": 13,
       "signals_playable": 0
     },
     "soccer_france_ligue_one": {
