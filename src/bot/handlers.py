@@ -709,7 +709,10 @@ async def _show_combos_for_sport_impl(
             )
             return
         
-        # Build cross-sport combo: top 5 legs from different sports
+        # Build cross-sport combo: top N legs from different sports
+        # combo_size can be 10, 20, 30 - use that for number of legs
+        target_legs = min(combo_size, len(in_window))
+        
         sorted_legs = sorted(in_window, key=lambda x: float(x.get("probability", 0)), reverse=True)
         selected_legs = []
         used_sports = set()
@@ -718,7 +721,7 @@ async def _show_combos_for_sport_impl(
             if s not in used_sports:
                 selected_legs.append(l)
                 used_sports.add(s)
-                if len(selected_legs) >= 5:
+                if len(selected_legs) >= target_legs:
                     break
         
         max_legs = len(selected_legs)
@@ -726,7 +729,7 @@ async def _show_combos_for_sport_impl(
         combo_data = {
             "size": max_legs,
             "type": "lotto",
-            "stake": 2.00 if max_legs == 5 else (3.00 if max_legs == 3 else 2.50),
+            "stake": 2.00 if max_legs == 5 else (1.00 if max_legs <= 10 else 0.50),
             "legs": selected_legs,
             "combined_odds": 1.0,
             "combined_probability": 1.0,
