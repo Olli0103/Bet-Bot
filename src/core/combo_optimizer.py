@@ -59,6 +59,8 @@ COMBO_PROFILES: Dict[int, ComboConstraints] = {
 
 # Fixed stakes per combo size (lotto mode)
 COMBO_STAKES: Dict[int, float] = {
+    3: 3.00,
+    4: 2.50,
     5: 2.00,
     10: 1.00,
     20: 1.00,
@@ -307,14 +309,21 @@ class ComboOptimizer:
 
         # Use pre-sorted scored list instead of re-scoring with EV
         legs = self._select_legs_from_sorted(scored, target_legs, constraints)
-        if len(legs) < min(target_legs, 3):
+        
+        # If we don't have enough legs for target, use whatever is available (min 3)
+        if len(legs) < 3:
+            # Try to get at least 3 legs if possible
+            legs = self._select_legs_from_sorted(scored, min(len(scored), target_legs), constraints)
+        
+        if len(legs) < 3:
             return None
 
         # Dynamic correlation penalty
         correlation = CorrelationEngine.compute_combo_correlation(legs)
 
-        # Fixed stake for lotto combos
-        stake = COMBO_STAKES.get(target_legs, 1.00)
+        # Fixed stake for lotto combos - use actual leg count for lookup
+        actual_size = len(legs)
+        stake = COMBO_STAKES.get(actual_size, COMBO_STAKES.get(target_legs, 1.00))
         kelly_frac = stake / max(1.0, self.engine.bankroll)
 
         # Recompute tax with actual leg count (may differ from target)
@@ -398,20 +407,29 @@ class ComboOptimizer:
         candidates: List[Dict],
         target_sizes: Optional[List[int]] = None,
     ) -> List[Dict]:
-        """Build combos for configured target sizes (default: 10, 20, 30)."""
+        """Build combos for configured target sizes (default: 5, 10, 20, 30).
+        
+        For each target size, also generates combos with available leg counts
+        if target can't be met (e.g., 4-leg combo if only 4 legs available).
+        """
         if target_sizes is None:
-            target_sizes = [10, 20, 30]
+            target_sizes = [5, 10, 20, 30]
 
         results = []
+        seen_sizes = set()
 
         for target in target_sizes:
             combo = self.build_lotto_combo(candidates, target_legs=target)
             if combo:
-                results.append({
-                    "size": target,
-                    "type": "lotto",
-                    "stake": COMBO_STAKES.get(target, 1.00),
-                    **combo.model_dump(),
-                })
+                actual_size = len(combo.legs)
+                # Only add if we haven't seen this exact size
+                if actual_size not in seen_sizes:
+                    results.append({
+                        "size": actual_size,
+                        "type": "lotto",
+                        "stake": COMBO_STAKES.get(actual_size, 1.00),
+                        **combo.model_dump(),
+                    })
+                    seen_sizes.add(actual_size)
 
         return results
