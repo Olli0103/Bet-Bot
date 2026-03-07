@@ -518,14 +518,15 @@ def _filter_items_by_sport(items: list, sport_filter: str) -> list:
 
 
 def _filter_combos_by_sport(combos: list, sport_filter: str) -> list:
-    """Filter combo legs by sport prefix. Returns combos where legs match sport."""
+    """Filter combo legs by sport prefix. Returns combos with matching legs for the sport."""
     if sport_filter == "all":
         return combos
     filtered = []
     for combo in combos:
         legs = combo.get("legs", [])
         matching_legs = [l for l in legs if str(l.get("sport", "")).startswith(sport_filter)]
-        if len(matching_legs) >= 5:
+        # Allow any combo that has at least 3 matching legs for the sport
+        if len(matching_legs) >= 3:
             # Create a filtered combo with only matching legs
             filtered_combo = combo.copy()
             filtered_combo["legs"] = matching_legs
