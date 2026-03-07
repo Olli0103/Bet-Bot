@@ -881,6 +881,10 @@ def _combo_deeplink_keyboard(combo_data: dict) -> InlineKeyboardMarkup:
 
 async def combo_suggestions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show combo size selection first, then sport filter (5-leg combos only)."""
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    log = logging.getLogger(__name__)
+    log.info(f"combo_suggestions called, message: {update.message.text if update.message else 'no message'}")
     await update.message.reply_text(
         "🧩 Lotto-Kombis\nWähle die Anzahl (immer 5er-Combos):",
         reply_markup=_combo_size_keyboard(),
