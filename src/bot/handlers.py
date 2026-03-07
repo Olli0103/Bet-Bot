@@ -156,7 +156,7 @@ def _sync_place_bet(payload: dict) -> bool:
 
 MAIN_MENU = ReplyKeyboardMarkup(
     [
-        ["Heutige Top 10 Einzelwetten", "Kombo-Menu"],
+        ["Heutige Top 10 Einzelwetten", "10/20/30 Kombis"],
         ["Daten aktualisieren", "Kontostand"],
         ["Einstellungen", "Hilfe"],
     ],
@@ -881,10 +881,6 @@ def _combo_deeplink_keyboard(combo_data: dict) -> InlineKeyboardMarkup:
 
 async def combo_suggestions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show combo size selection first, then sport filter (5-leg combos only)."""
-    import logging
-    logging.basicConfig(level=logging.INFO)
-    log = logging.getLogger(__name__)
-    log.info(f"combo_suggestions called, message: {update.message.text if update.message else 'no message'}")
     await update.message.reply_text(
         "🧩 Lotto-Kombis\nWähle die Anzahl (immer 5er-Combos):",
         reply_markup=_combo_size_keyboard(),
@@ -980,21 +976,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- Combo size selection ---
     if data.startswith("combo_size:"):
-        try:
-            size = int(data.split(":", 1)[1])
-            context.user_data["combo_size"] = size
-            
-            if size == 5:
-                # 5-leg: show sport filter first
-                await q.edit_message_text(
-                    "🧩 5er-Kombis\nWähle eine Sportart:",
-                    reply_markup=_combo_sport_keyboard(),
-                )
-            else:
-                # 10/20/30: show mixed-sport combos directly
-                await _show_combos_for_sport(update, context, sport_filter="all", combo_size=size, edit_message=True)
-        except Exception as e:
-            await q.edit_message_text(f"Fehler: {type(e).__name__}")
+        size = int(data.split(":", 1)[1])
+        context.user_data["combo_size"] = size
+        
+        if size == 5:
+            # 5-leg: show sport filter first
+            await q.edit_message_text(
+                "🧩 5er-Kombis\nWähle eine Sportart:",
+                reply_markup=_combo_sport_keyboard(),
+            )
+        else:
+            # 10/20/30: show mixed-sport combos directly
+            await _show_combos_for_sport(update, context, sport_filter="all", combo_size=size, edit_message=True)
         return
 
     # --- Combo sport filter (shows only 5-leg combos) ---
