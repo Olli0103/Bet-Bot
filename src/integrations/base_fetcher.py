@@ -44,7 +44,7 @@ def build_httpx_ssl_verify():
     return True
 
 
-def _safe_sync_run(coro, timeout: float = 30):
+def _safe_sync_run(coro, timeout: float = 60):
     """Run a coroutine synchronously, safely handling nested event loops.
 
     Always creates a fresh event loop in a dedicated thread to avoid
