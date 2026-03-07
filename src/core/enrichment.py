@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import random
+import re
 import signal
 import threading
 import time
@@ -27,6 +29,13 @@ _enrichment_metrics: Dict[str, int] = {}
 _enrichment_cycle_start: float = 0.0
 
 ENRICHMENT_TIMEOUT = int(settings.enrichment_timeout_per_team)
+
+# Rate-limiting and retry control for external enrichment providers.
+_EXTERNAL_CALL_SLOTS = threading.Semaphore(max(1, int(settings.enrichment_external_concurrency)))
+_PROVIDER_LOCK = threading.Lock()
+_PROVIDER_LAST_CALL_TS: Dict[str, float] = {}
+_PROVIDER_FAIL_COUNT: Dict[str, int] = {}
+_PROVIDER_COOLDOWN_UNTIL: Dict[str, float] = {}
 
 
 class _EnrichmentTimeout(Exception):
@@ -110,6 +119,107 @@ def _record_enrichment_metric(name: str, amount: int = 1):
     _enrichment_metrics[name] = _enrichment_metrics.get(name, 0) + int(amount)
 
 
+def _parse_retry_after_seconds(message: str) -> Optional[float]:
+    """Extract Retry-After seconds from provider error messages if present."""
+    if not message:
+        return None
+    m = re.search(r"retry[- ]?after\s*[=:]?\s*([0-9]+(?:\.[0-9]+)?)", message, re.IGNORECASE)
+    if m:
+        try:
+            return float(m.group(1))
+        except Exception:
+            return None
+    m = re.search(r"please retry in\s*([0-9]+(?:\.[0-9]+)?)s", message, re.IGNORECASE)
+    if m:
+        try:
+            return float(m.group(1))
+        except Exception:
+            return None
+    return None
+
+
+def _is_rate_or_timeout_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return ("429" in msg) or ("rate limit" in msg) or ("timed out" in msg) or ("timeout" in msg)
+
+
+def _provider_wait(provider: str, min_interval_ms: int) -> None:
+    """Throttle calls by provider and enforce cooldown windows."""
+    now = time.time()
+    with _PROVIDER_LOCK:
+        cooldown_until = _PROVIDER_COOLDOWN_UNTIL.get(provider, 0.0)
+        last_ts = _PROVIDER_LAST_CALL_TS.get(provider, 0.0)
+
+    if cooldown_until > now:
+        wait_s = cooldown_until - now
+        log.warning("enrichment_provider_cooldown: provider=%s wait=%.2fs", provider, wait_s)
+        time.sleep(wait_s)
+
+    elapsed_ms = (time.time() - last_ts) * 1000.0
+    needed_ms = max(0.0, float(min_interval_ms) - elapsed_ms)
+    if needed_ms > 0:
+        wait_s = needed_ms / 1000.0
+        log.info("enrichment_rate_limit_wait: provider=%s wait=%.2fs reason=min_interval", provider, wait_s)
+        time.sleep(wait_s)
+
+    with _PROVIDER_LOCK:
+        _PROVIDER_LAST_CALL_TS[provider] = time.time()
+
+
+def _call_with_retry(provider: str, fn, min_interval_ms: int):
+    """Provider call wrapper with semaphore, throttling and backoff+jitter."""
+    attempts = max(1, int(settings.enrichment_retry_max_attempts))
+    base_ms = max(100, int(settings.enrichment_backoff_base_ms))
+    cap_ms = max(base_ms, int(settings.enrichment_backoff_max_ms))
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            _provider_wait(provider, min_interval_ms)
+            with _EXTERNAL_CALL_SLOTS:
+                result = fn()
+            with _PROVIDER_LOCK:
+                _PROVIDER_FAIL_COUNT[provider] = 0
+            return result
+        except Exception as exc:
+            last_exc = exc
+            if not _is_rate_or_timeout_error(exc) or attempt >= attempts:
+                break
+
+            retry_after_s = _parse_retry_after_seconds(str(exc))
+            exp_backoff_s = min(cap_ms / 1000.0, (base_ms / 1000.0) * (2 ** (attempt - 1)))
+            jitter_s = random.uniform(0.15, 0.9)
+            wait_s = max(retry_after_s or 0.0, exp_backoff_s) + jitter_s
+
+            with _PROVIDER_LOCK:
+                fails = _PROVIDER_FAIL_COUNT.get(provider, 0) + 1
+                _PROVIDER_FAIL_COUNT[provider] = fails
+                if fails >= int(settings.enrichment_provider_fail_threshold):
+                    cool_s = max(30, int(settings.enrichment_provider_cooldown_sec))
+                    _PROVIDER_COOLDOWN_UNTIL[provider] = time.time() + cool_s
+                    log.warning(
+                        "enrichment_provider_circuit_open: provider=%s fails=%d cooldown=%ss",
+                        provider,
+                        fails,
+                        cool_s,
+                    )
+
+            log.warning(
+                "enrichment_retry: provider=%s attempt=%d/%d wait=%.2fs reason=%s",
+                provider,
+                attempt,
+                attempts,
+                wait_s,
+                type(exc).__name__,
+            )
+            _record_enrichment_metric(f"retry_{provider}")
+            time.sleep(wait_s)
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"enrichment provider call failed without exception: {provider}")
+
+
 def _norm_label(label: str) -> float:
     l = (label or "neutral").lower()
     if l == "positive":
@@ -139,7 +249,11 @@ def team_sentiment_score(team: str, limit_articles: int = 0) -> float:
             fetcher = MultiNewsFetcher(min_articles=3, max_articles=max(5, limit_articles))
             nlp = OllamaSentimentClient()
             query = f'"{team}"'
-            articles = fetcher.search(query=query, language="en", team_names=[team])[:limit_articles]
+            articles = _call_with_retry(
+                "newsapi",
+                lambda: fetcher.search(query=query, language="en", team_names=[team]),
+                settings.enrichment_news_min_interval_ms,
+            )[:limit_articles]
             _record_enrichment_metric("articles_found_total", len(articles))
 
             if not articles:
@@ -169,11 +283,15 @@ def team_sentiment_score(team: str, limit_articles: int = 0) -> float:
             # ── Reddit sentiment (supplementary source) ──────────────
             try:
                 reddit = RedditFetcher()
-                reddit_text = reddit.fetch_team_sentiment_posts_sync(team)
+                reddit_text = _call_with_retry(
+                    "reddit",
+                    lambda: reddit.fetch_team_sentiment_posts_sync(team),
+                    settings.enrichment_reddit_min_interval_ms,
+                )
                 if reddit_text:
                     rs = nlp.analyze(text=reddit_text, context=f"Reddit r/sportsbook Team={team}")
                     vals.append(_norm_label(rs.label) * float(rs.confidence))
-            except Exception as exc:
+            except Exception:
                 _record_enrichment_error("reddit_sentiment")
 
             if not vals:
@@ -225,14 +343,29 @@ def batch_team_sentiment(teams: List[str], max_teams: int = 0) -> Dict[str, floa
     _record_enrichment_metric("teams_selected", len(selected))
     _record_enrichment_metric("teams_total_unique", len(uniq))
 
-    for t in selected:
-        try:
-            out[t] = team_sentiment_score(t)
-            processed += 1
-        except Exception:
-            out[t] = 0.0
-            _record_enrichment_error("team_sentiment_exception")
-            processed += 1
+    batch_size = max(1, int(settings.enrichment_team_batch_size))
+    batch_pause_s = max(0.0, float(settings.enrichment_team_batch_pause_ms) / 1000.0)
+
+    for i in range(0, len(selected), batch_size):
+        chunk = selected[i:i + batch_size]
+        _record_enrichment_metric("batch_count")
+        for t in chunk:
+            try:
+                out[t] = team_sentiment_score(t)
+                processed += 1
+            except Exception:
+                out[t] = 0.0
+                _record_enrichment_error("team_sentiment_exception")
+                processed += 1
+
+        if (i + batch_size) < len(selected) and batch_pause_s > 0:
+            log.info(
+                "enrichment_batch_pause: batch=%d size=%d wait=%.2fs",
+                (i // batch_size) + 1,
+                len(chunk),
+                batch_pause_s,
+            )
+            time.sleep(batch_pause_s)
 
     # Log aggregated summary instead of per-team noise
     _log_enrichment_summary(teams_processed=processed)
