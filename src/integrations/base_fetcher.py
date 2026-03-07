@@ -107,7 +107,7 @@ class AsyncBaseFetcher:
     closed' errors).
     """
 
-    def __init__(self, base_url: str, headers: Optional[Dict[str, str]] = None, timeout: int = 20):
+    def __init__(self, base_url: str, headers: Optional[Dict[str, str]] = None, timeout: int = 45):
         self.base_url = base_url.rstrip("/")
         self.headers = headers or {}
         self.timeout = timeout
