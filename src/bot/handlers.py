@@ -673,6 +673,78 @@ async def _show_combos_for_sport_impl(
             await update.message.reply_text(msg, parse_mode="HTML")
         return
     
+    # For "all" - build cross-sport combo with tips from different sports
+    if sport_filter == "all":
+        all_legs = get_cached_combo_legs()
+        if not all_legs:
+            await (update.callback_query.edit_message_text if edit_message else update.message.reply_text)(
+                "Keine Kombi-Daten vorhanden."
+            )
+            return
+        
+        # Filter by window
+        from datetime import datetime, timezone, timedelta
+        from zoneinfo import ZoneInfo
+        
+        now_utc = datetime.now(timezone.utc)
+        tz = ZoneInfo("Europe/Berlin")
+        local = now_utc.astimezone(tz)
+        
+        window_start = local.replace(hour=7, minute=0, second=0, microsecond=0)
+        if local < window_start:
+            window_start = window_start - timedelta(days=1)
+        window_end = window_start + timedelta(days=1)
+        
+        in_window = []
+        for l in all_legs:
+            ct = l.get("commence_time", "")
+            if ct:
+                ct_dt = datetime.fromisoformat(ct.replace("Z", "+00:00")).astimezone(tz)
+                if window_start <= ct_dt < window_end:
+                    in_window.append(l)
+        
+        if not in_window:
+            await (update.callback_query.edit_message_text if edit_message else update.message.reply_text)(
+                "Keine Spiele im Fenster gefunden."
+            )
+            return
+        
+        # Build cross-sport combo: top 5 legs from different sports
+        sorted_legs = sorted(in_window, key=lambda x: float(x.get("probability", 0)), reverse=True)
+        selected_legs = []
+        used_sports = set()
+        for l in sorted_legs:
+            s = l.get("sport", "")
+            if s not in used_sports:
+                selected_legs.append(l)
+                used_sports.add(s)
+                if len(selected_legs) >= 5:
+                    break
+        
+        max_legs = len(selected_legs)
+        
+        combo_data = {
+            "size": max_legs,
+            "type": "lotto",
+            "stake": 2.00 if max_legs == 5 else (3.00 if max_legs == 3 else 2.50),
+            "legs": selected_legs,
+            "combined_odds": 1.0,
+            "combined_probability": 1.0,
+            "expected_value": 0.0,
+        }
+        
+        card = _format_combo_card(combo_data)
+        if card:
+            msg = f"🧩 {max_legs}-er Kombo (Alle Sportarten)\n\n{card}"
+        else:
+            msg = "Keine gültige Combo erstellt."
+        
+        if update.callback_query:
+            await update.callback_query.edit_message_text(msg, parse_mode="HTML")
+        else:
+            await update.message.reply_text(msg, parse_mode="HTML")
+        return
+    
     # Original behavior for "all" - show mixed-sport combos
     from src.core.live_feed import get_cached_combos
     combos = get_cached_combos()
