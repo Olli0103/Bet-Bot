@@ -269,7 +269,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("status", balance))
     app.add_handler(CommandHandler("help", help_menu))
     app.add_handler(MessageHandler(filters.Regex("^Heutige Top 10 Einzelwetten$"), menu_value_bets))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("Kombo"), combo_suggestions))
+    app.add_handler(MessageHandler(filters.Regex("^10/20/30 Kombis$"), combo_suggestions))
     app.add_handler(MessageHandler(filters.Regex("^Daten aktualisieren$"), refresh_data))
     app.add_handler(MessageHandler(filters.Regex("^Kontostand$"), balance))
     app.add_handler(MessageHandler(filters.Regex("^Einstellungen$"), settings_menu))
