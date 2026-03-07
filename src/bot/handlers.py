@@ -595,9 +595,19 @@ async def _show_combos_for_sport_impl(
         # Sort by probability (confidence) - highest first
         sport_legs = sorted(sport_legs, key=lambda x: float(x.get("probability", 0)), reverse=True)
         
-        # Take up to 5 legs (or fewer if not enough)
-        max_legs = min(5, len(sport_legs))
-        selected_legs = sport_legs[:max_legs]
+        # Take up to 5 legs, but only ONE per event!
+        selected_legs = []
+        used_events = set()
+        for leg in sport_legs:
+            event_id = leg.get("event_id", "")
+            if event_id in used_events:
+                continue
+            selected_legs.append(leg)
+            used_events.add(event_id)
+            if len(selected_legs) >= max_legs:
+                break
+        
+        max_legs = len(selected_legs)
         
         sport_name = sport_filter.split("_")[-1].title()
         
