@@ -202,30 +202,25 @@ async def _send_signal_push(bot, payload: Dict, target: str, chat_ids: Optional[
 
 
 async def _send_combo_push(bot, payload: Dict, target: str, chat_ids: Optional[List[str]]):
-    """Format and send combo push."""
+    """Format and send combo push.
+
+    Sends all combos in a single message (consolidated) since they're lottery-style
+    and we want to show all options regardless of EV.
+    """
     from src.bot.handlers import _format_combo_card
     combos = payload.get("combos", [])
     if not combos:
         await _broadcast(bot, "Keine Kombi-Vorschläge heute.", target, chat_ids)
         return
 
-    sent = 0
+    # Build consolidated message with all combos (no EV filter - confidence only)
+    lines = [f"🧩 {len(combos)} Lotto-Kombis (Confidence-only)"]
     for combo_data in combos:
-        if float(combo_data.get("expected_value", 0)) <= 0:
-            continue
         card = _format_combo_card(combo_data)
         if card:
-            if sent == 0:
-                await _broadcast(bot, f"🧩 {len(combos)} Lotto-Kombis", target, chat_ids)
-            await _broadcast(bot, card, target, chat_ids)
-            sent += 1
-    if sent == 0:
-        await _broadcast(
-            bot,
-            "Keine Kombi-Vorschläge mit vollständigem Event-Kontext verfügbar.",
-            target,
-            chat_ids,
-        )
+            lines.append("\n" + card)
+
+    await _broadcast(bot, "\n\n".join(lines), target, chat_ids)
 
 
 # ── Outbox polling job (runs inside Telegram event loop) ──────
