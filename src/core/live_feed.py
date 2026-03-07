@@ -382,15 +382,15 @@ def fetch_and_build_signals(
 
         try:
             ct = datetime.fromisoformat(commence.replace("Z", "+00:00")).astimezone(timezone.utc)
-            if ct < now_utc or ct >= window_end:
-                gap_tracker.record_drop(sport, "time_window")
-                continue
+            # TIME WINDOW FILTER DISABLED FOR LOTTO COMBOS - show all games
+            # if ct < now_utc or ct >= window_end:
+            #     gap_tracker.record_drop(sport, "time_window")
+            #     continue
         except Exception:
-            gap_tracker.record_drop(sport, "time_window")
-            continue
+            pass
 
         # Time to kickoff in hours
-        time_to_kickoff = max(0.0, (ct - now_utc).total_seconds() / 3600.0)
+        time_to_kickoff = max(0.0, (ct - now_utc).total_seconds() / 3600.0) if 'ct' in locals() else 0.0
 
         # --- H2H prices (primary market) ---
         prices = _extract_prices(e.get("bookmakers") or [])
