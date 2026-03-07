@@ -976,18 +976,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- Combo size selection ---
     if data.startswith("combo_size:"):
-        size = int(data.split(":", 1)[1])
-        context.user_data["combo_size"] = size
-        
-        if size == 5:
-            # 5-leg: show sport filter first
-            await q.edit_message_text(
-                "🧩 5er-Kombis\nWähle eine Sportart:",
-                reply_markup=_combo_sport_keyboard(),
-            )
-        else:
-            # 10/20/30: show mixed-sport combos directly
-            await _show_combos_for_sport(update, context, sport_filter="all", combo_size=size, edit_message=True)
+        try:
+            size = int(data.split(":", 1)[1])
+            context.user_data["combo_size"] = size
+            
+            if size == 5:
+                # 5-leg: show sport filter first
+                await q.edit_message_text(
+                    "🧩 5er-Kombis\nWähle eine Sportart:",
+                    reply_markup=_combo_sport_keyboard(),
+                )
+            else:
+                # 10/20/30: show mixed-sport combos directly
+                await _show_combos_for_sport(update, context, sport_filter="all", combo_size=size, edit_message=True)
+        except Exception as e:
+            await q.edit_message_text(f"Fehler: {type(e).__name__}")
         return
 
     # --- Combo sport filter (shows only 5-leg combos) ---
