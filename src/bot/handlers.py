@@ -503,10 +503,6 @@ def _combo_sport_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🏀 NBA", callback_data="combo_sport:basketball_nba"),
             InlineKeyboardButton("🏒 NHL", callback_data="combo_sport:icehockey_nhl"),
         ],
-        [
-            InlineKeyboardButton("🎾 ATP", callback_data="combo_sport:tennis_atp"),
-            InlineKeyboardButton("🏈 NFL", callback_data="combo_sport:americanfootball_nfl"),
-        ],
     ])
 
 
@@ -604,6 +600,12 @@ async def _show_combos_for_sport_impl(
         if local < window_start:
             window_start = window_start - timedelta(days=1)
         window_end = window_start + timedelta(days=1)
+        
+        # Exclude tennis from UI (for training data only)
+        sport_legs = [
+            l for l in sport_legs 
+            if not l.get("sport", "").startswith("tennis")
+        ]
         
         sport_legs = [
             l for l in sport_legs 
