@@ -292,6 +292,23 @@ class AgentOrchestrator:
         if not event_id:
             return {"action": "skip", "reasoning": ["missing event_id"]}
 
+        # Only actionable betting alerts should enter tip flow.
+        # Injury/news alerts without concrete selection+odds are informational,
+        # not executable tips.
+        selection = str(alert.get("selection") or alert.get("team") or "").strip()
+        try:
+            current_odds = float(alert.get("current_odds") or 0.0)
+        except Exception:
+            current_odds = 0.0
+
+        if not selection or current_odds <= 1.0:
+            return {
+                "action": "skip",
+                "reasoning": [
+                    f"non_actionable_alert type={alert.get('type','?')} selection='{selection}' odds={current_odds}"
+                ],
+            }
+
         # Pre-flight: circuit breakers
         halt_reason = self._check_circuit_breakers()
         if halt_reason:
@@ -533,9 +550,9 @@ class AgentOrchestrator:
             sport=alert.get("sport", ""),
             home=alert.get("home", ""),
             away=alert.get("away", ""),
-            selection=alert.get("selection", alert.get("team", "")),
+            selection=(alert.get("selection") or alert.get("team") or ""),
             market=alert.get("market", "h2h"),
-            initial_odds=float(alert.get("current_odds", 2.0)),
+            initial_odds=float(alert.get("current_odds") or 0.0),
         )
 
         result = await tip_flow(

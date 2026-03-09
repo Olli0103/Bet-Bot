@@ -79,9 +79,19 @@ class Settings(BaseModel):
         "https://www.reddit.com/r/sportsbook/.rss,"
         "https://www.reddit.com/r/sportsbetting/.rss"
     )
-    enrichment_timeout_per_team: int = int(os.getenv("ENRICHMENT_TIMEOUT", "30"))
+    enrichment_timeout_per_team: int = int(os.getenv("ENRICHMENT_TIMEOUT", "60"))
     enrichment_max_teams: int = int(os.getenv("ENRICHMENT_MAX_TEAMS", "24"))
     enrichment_news_articles_per_team: int = int(os.getenv("ENRICHMENT_NEWS_ARTICLES_PER_TEAM", "8"))
+    enrichment_external_concurrency: int = int(os.getenv("ENRICHMENT_EXTERNAL_CONCURRENCY", "2"))
+    enrichment_news_min_interval_ms: int = int(os.getenv("ENRICHMENT_NEWS_MIN_INTERVAL_MS", "2500"))
+    enrichment_reddit_min_interval_ms: int = int(os.getenv("ENRICHMENT_REDDIT_MIN_INTERVAL_MS", "3500"))
+    enrichment_retry_max_attempts: int = int(os.getenv("ENRICHMENT_RETRY_MAX_ATTEMPTS", "2"))
+    enrichment_backoff_base_ms: int = int(os.getenv("ENRICHMENT_BACKOFF_BASE_MS", "800"))
+    enrichment_backoff_max_ms: int = int(os.getenv("ENRICHMENT_BACKOFF_MAX_MS", "8000"))
+    enrichment_provider_cooldown_sec: int = int(os.getenv("ENRICHMENT_PROVIDER_COOLDOWN_SEC", "600"))
+    enrichment_provider_fail_threshold: int = int(os.getenv("ENRICHMENT_PROVIDER_FAIL_THRESHOLD", "2"))
+    enrichment_team_batch_size: int = int(os.getenv("ENRICHMENT_TEAM_BATCH_SIZE", "2"))
+    enrichment_team_batch_pause_ms: int = int(os.getenv("ENRICHMENT_TEAM_BATCH_PAUSE_MS", "800"))
 
     # SSL
     insecure_ssl_fallback: bool = os.getenv("INSECURE_SSL_FALLBACK", "false").lower() in ("true", "1", "yes")

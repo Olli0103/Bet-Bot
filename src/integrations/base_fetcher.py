@@ -44,7 +44,7 @@ def build_httpx_ssl_verify():
     return True
 
 
-def _safe_sync_run(coro, timeout: float = 30):
+def _safe_sync_run(coro, timeout: float = 60):
     """Run a coroutine synchronously, safely handling nested event loops.
 
     Always creates a fresh event loop in a dedicated thread to avoid
@@ -107,7 +107,7 @@ class AsyncBaseFetcher:
     closed' errors).
     """
 
-    def __init__(self, base_url: str, headers: Optional[Dict[str, str]] = None, timeout: int = 20):
+    def __init__(self, base_url: str, headers: Optional[Dict[str, str]] = None, timeout: int = 45):
         self.base_url = base_url.rstrip("/")
         self.headers = headers or {}
         self.timeout = timeout

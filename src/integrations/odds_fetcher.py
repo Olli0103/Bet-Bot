@@ -21,7 +21,7 @@ _DEEP_SLEEP_TTL = 24 * 3600  # 24 hours — re-check once per day
 
 # Global rate limiter — protects the API key across all workers
 _RATE_LIMIT_KEY = "odds:api:rate_limit"
-_MIN_REQUEST_INTERVAL_S = 1.0  # minimum 1s between requests to the Odds API
+_MIN_REQUEST_INTERVAL_S = 0.3  # minimum 300ms between requests to the Odds API
 
 
 def _check_global_rate_limit() -> bool:

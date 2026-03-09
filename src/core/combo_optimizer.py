@@ -59,6 +59,8 @@ COMBO_PROFILES: Dict[int, ComboConstraints] = {
 
 # Fixed stakes per combo size (lotto mode)
 COMBO_STAKES: Dict[int, float] = {
+    3: 3.00,
+    4: 2.50,
     5: 2.00,
     10: 1.00,
     20: 1.00,
@@ -98,6 +100,24 @@ def _combo_score(
     if market_type in ("double_chance", "draw_no_bet"):
         ev *= 1.10
     return ev
+
+
+def _confidence_only_score(
+    prob: float,
+    odds: float,
+    market_type: str = "h2h",
+    tax_rate: float = 0.0,
+) -> float:
+    """Score a leg for combo selection using ONLY model confidence.
+
+    Used for lottery-style combos (5/10/20/30 legs) where EV is irrelevant
+    since the expected value of multi-leg combos is dominated by variance.
+    Higher probability = higher confidence = better leg.
+    """
+    if prob <= 0:
+        return 0.0
+    # Pure confidence ranking - higher probability wins
+    return prob
 
 
 class ComboOptimizer:
@@ -185,15 +205,99 @@ class ComboOptimizer:
 
         return chosen
 
+    def _select_legs_from_sorted(
+        self,
+        scored_candidates: List[Dict],
+        target_legs: int,
+        constraints: ComboConstraints,
+    ) -> List[Dict]:
+        """Select legs from pre-sorted list (confidence-only order), applying constraints only.
+
+        Used by lotto combos where legs are pre-ranked by confidence only.
+        """
+        # Pre-filter based on constraints (but keep order from scored_candidates)
+        valid = []
+        for leg in scored_candidates:
+            odds = float(leg.get("odds", 0))
+            prob = float(leg.get("probability", 0))
+            if prob < constraints.min_prob_per_leg or prob > constraints.max_prob_per_leg:
+                continue
+            if odds < constraints.odds_range[0] or odds > constraints.odds_range[1]:
+                continue
+            valid.append(leg)
+
+        # Already sorted by confidence - just apply constraints sequentially
+        chosen: List[Dict] = []
+        used_events: set = set()
+        sport_count: Dict[str, int] = {}
+        league_count: Dict[str, int] = {}
+        league_heavy_count: Dict[str, int] = {}
+        sports_used: set = set()
+
+        for leg in valid:
+            event_id = leg.get("event_id", "")
+            sport_key = leg.get("sport", "")
+            odds = float(leg.get("odds", 0))
+            sport = _extract_sport(sport_key)
+            league = _extract_league(sport_key)
+            is_heavy_favorite = odds < constraints.heavy_favorite_threshold
+
+            # No duplicate events
+            if constraints.no_same_event and event_id in used_events:
+                continue
+
+            # Per-sport limit
+            if sport_count.get(sport, 0) >= constraints.max_per_sport:
+                continue
+
+            # Per-league limit
+            if league_count.get(league, 0) >= constraints.max_per_league:
+                continue
+
+            # Heavy favorite cap per league
+            if is_heavy_favorite:
+                if league_heavy_count.get(league, 0) >= constraints.max_heavy_favorites_per_league:
+                    continue
+
+            chosen.append(leg)
+            used_events.add(event_id)
+            sport_count[sport] = sport_count.get(sport, 0) + 1
+            league_count[league] = league_count.get(league, 0) + 1
+            if is_heavy_favorite:
+                league_heavy_count[league] = league_heavy_count.get(league, 0) + 1
+            sports_used.add(sport)
+
+            if len(chosen) == target_legs:
+                break
+
+        # Soft check on min_sports - accept if we have enough legs anyway
+        if len(sports_used) < constraints.min_sports and len(chosen) >= target_legs:
+            pass
+
+        return chosen
+
     def build_lotto_combo(
         self,
         candidates: List[Dict],
         target_legs: int,
         constraints: Optional[ComboConstraints] = None,
     ) -> Optional[ComboBet]:
-        """Build a lotto-style combo: small stake, maximized potential payout."""
+        """Build a lotto-style combo: small stake, maximized confidence.
+
+        Uses confidence-only scoring (no EV) since lottery combos are variance-driven
+        anyway - higher confidence legs = better picks regardless of EV.
+        """
         if constraints is None:
             constraints = COMBO_PROFILES.get(target_legs, COMBO_PROFILES[10])
+
+        # Score legs by confidence only (not EV) - higher probability = better
+        scored = sorted(
+            candidates,
+            key=lambda l: _confidence_only_score(
+                l["probability"], l.get("odds", 0), l.get("market_type", "h2h"), 0.0
+            ),
+            reverse=True,
+        )
 
         # Compute tax rate up-front so leg scoring uses net EV
         tax = effective_tax_rate(
@@ -203,15 +307,23 @@ class ComboOptimizer:
             combo_legs=target_legs,
         )
 
-        legs = self._select_legs(candidates, target_legs, constraints, tax_rate=tax)
-        if len(legs) < min(target_legs, 3):
+        # Use pre-sorted scored list instead of re-scoring with EV
+        legs = self._select_legs_from_sorted(scored, target_legs, constraints)
+        
+        # If we don't have enough legs for target, use whatever is available (min 3)
+        if len(legs) < 3:
+            # Try to get at least 3 legs if possible
+            legs = self._select_legs_from_sorted(scored, min(len(scored), target_legs), constraints)
+        
+        if len(legs) < 3:
             return None
 
         # Dynamic correlation penalty
         correlation = CorrelationEngine.compute_combo_correlation(legs)
 
-        # Fixed stake for lotto combos
-        stake = COMBO_STAKES.get(target_legs, 1.00)
+        # Fixed stake for lotto combos - use actual leg count for lookup
+        actual_size = len(legs)
+        stake = COMBO_STAKES.get(actual_size, COMBO_STAKES.get(target_legs, 1.00))
         kelly_frac = stake / max(1.0, self.engine.bankroll)
 
         # Recompute tax with actual leg count (may differ from target)
@@ -295,20 +407,29 @@ class ComboOptimizer:
         candidates: List[Dict],
         target_sizes: Optional[List[int]] = None,
     ) -> List[Dict]:
-        """Build combos for configured target sizes (default: 10, 20, 30)."""
+        """Build combos for configured target sizes (default: 5, 10, 20, 30).
+        
+        For each target size, also generates combos with available leg counts
+        if target can't be met (e.g., 4-leg combo if only 4 legs available).
+        """
         if target_sizes is None:
-            target_sizes = [10, 20, 30]
+            target_sizes = [5, 10, 20, 30]
 
         results = []
+        seen_sizes = set()
 
         for target in target_sizes:
             combo = self.build_lotto_combo(candidates, target_legs=target)
             if combo:
-                results.append({
-                    "size": target,
-                    "type": "lotto",
-                    "stake": COMBO_STAKES.get(target, 1.00),
-                    **combo.model_dump(),
-                })
+                actual_size = len(combo.legs)
+                # Only add if we haven't seen this exact size
+                if actual_size not in seen_sizes:
+                    results.append({
+                        "size": actual_size,
+                        "type": "lotto",
+                        "stake": COMBO_STAKES.get(actual_size, 1.00),
+                        **combo.model_dump(),
+                    })
+                    seen_sizes.add(actual_size)
 
         return results

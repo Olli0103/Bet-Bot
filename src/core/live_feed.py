@@ -382,15 +382,15 @@ def fetch_and_build_signals(
 
         try:
             ct = datetime.fromisoformat(commence.replace("Z", "+00:00")).astimezone(timezone.utc)
-            if ct < now_utc or ct >= window_end:
-                gap_tracker.record_drop(sport, "time_window")
-                continue
+            # TIME WINDOW FILTER DISABLED FOR LOTTO COMBOS - show all games
+            # if ct < now_utc or ct >= window_end:
+            #     gap_tracker.record_drop(sport, "time_window")
+            #     continue
         except Exception:
-            gap_tracker.record_drop(sport, "time_window")
-            continue
+            pass
 
         # Time to kickoff in hours
-        time_to_kickoff = max(0.0, (ct - now_utc).total_seconds() / 3600.0)
+        time_to_kickoff = max(0.0, (ct - now_utc).total_seconds() / 3600.0) if 'ct' in locals() else 0.0
 
         # --- H2H prices (primary market) ---
         prices = _extract_prices(e.get("bookmakers") or [])
@@ -740,6 +740,7 @@ def fetch_and_build_signals(
                     "home_team": home,
                     "away_team": away,
                     "market": "h2h",
+                    "commence_time": commence,
                 }
             )
 
@@ -787,6 +788,7 @@ def fetch_and_build_signals(
                                 "home_team": home,
                                 "away_team": away,
                                 "market": f"double_chance {dc_code}",
+                                "commence_time": commence,
                             })
 
             # Draw No Bet (DNB) — remove draw, redistribute
@@ -828,6 +830,7 @@ def fetch_and_build_signals(
                                     "home_team": home,
                                     "away_team": away,
                                     "market": "draw_no_bet",
+                                    "commence_time": commence,
                                 })
 
         # --- Process spreads market ---
@@ -877,6 +880,7 @@ def fetch_and_build_signals(
                         "home_team": home,
                         "away_team": away,
                         "market": f"spreads {point_val:+.1f}",
+                        "commence_time": commence,
                     })
 
         # --- Process totals market ---
@@ -926,6 +930,7 @@ def fetch_and_build_signals(
                         "home_team": home,
                         "away_team": away,
                         "market": f"totals {point_val}",
+                        "commence_time": commence,
                     })
 
     # CVaR-constrained portfolio sizing: re-size simultaneous bets to cap
@@ -960,10 +965,8 @@ def fetch_and_build_signals(
               signals=len(top10), events=stats["events_seen"])
     from src.core.combo_optimizer import ComboOptimizer
     optimizer = ComboOptimizer(engine)
-    eligible_legs = [
-        l for l in combo_legs
-        if l["probability"] >= max(min_combo_conf, 0.40)
-    ]
+    # No confidence filter for lotto combos - show whatever is available
+    eligible_legs = combo_legs
     log.info("Combo legs: %d total, %d after confidence >= %.2f filter",
              len(combo_legs), len(eligible_legs), min_combo_conf)
     combos = optimizer.build_all_combos(eligible_legs, target_sizes=combo_sizes)
